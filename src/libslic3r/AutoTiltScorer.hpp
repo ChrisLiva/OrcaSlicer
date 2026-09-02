@@ -46,6 +46,7 @@ private:
     DynamicPrintConfig m_config;
     Transform3d        m_root      = Transform3d::Identity();
     Vec3d              m_pivot     = Vec3d::Zero();
+    BoundingBoxf3      m_root_box;  // the object's bounding box in the root pose, set once in the ctor
     double             m_h_search  = 0.;
 };
 

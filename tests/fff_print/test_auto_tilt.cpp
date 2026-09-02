@@ -29,6 +29,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "test_helpers.hpp"
@@ -200,6 +201,88 @@ TEST_CASE("The auto-tilt search picks the pose that removes the most support con
     REQUIRE_THAT(r.best.tilt_deg, WithinAbs(-20.0, 1e-9));
     REQUIRE(r.best_contact.score_mm3 < r.root.score_mm3);
     REQUIRE(r.improvement >= r.required_improvement);
+}
+
+TEST_CASE("The auto-tilt scorer ignores contact below the bottom exclusion plane", "[AutoTilt]")
+{
+    // The column HEAD sums with the exclusion off, one score per pose of the 9-pose grid.
+    const std::vector<std::pair<AutoTilt::Pose, double>> expected_score = {
+        { { 0., 0. }, 73.4894 },     { { 0., -15. }, 94.4571 },  { { 0., 15. }, 94.4571 },
+        { { -20., -15. }, 44.0795 }, { { -20., 0. }, 37.6070 },  { { -20., 15. }, 44.0795 },
+        { { -40., -15. }, 63.4913 }, { { -40., 0. }, 74.3701 },  { { -40., 15. }, 63.4913 },
+    };
+
+    AutoTilt::Constants k0       = coarse_constants();
+    k0.bottom_exclusion_fraction = 0.;
+
+    const std::vector<AutoTilt::Pose> g = AutoTilt::grid(k0);
+    REQUIRE(g.size() == expected_score.size());
+
+    Slic3r::Model           model0 = Slic3r::Test::model("fin", fin_fixture());
+    AutoTilt::ContactScorer scorer0(*model0.objects.front(), fixture_config(), k0, inline_runner());
+
+    double root0 = 0., minus20_0 = 0.;
+    for (const AutoTilt::Pose &p : g) {
+        const auto it = std::find_if(expected_score.begin(), expected_score.end(),
+                                     [&p](const std::pair<AutoTilt::Pose, double> &e) { return e.first == p; });
+        REQUIRE(it != expected_score.end());
+
+        const AutoTilt::Contact c = scorer0.score(p);
+        INFO("pose tilt " << p.tilt_deg << " lean " << p.lean_deg);
+        CHECK_THAT(c.score_mm3, WithinRel(it->second, 1e-5));
+        // object_volume_mm3 is the sliced sum of area(lslices)*height, an approximation that moves
+        // with the layer discretisation as the object turns, so only the root pose pins it tightly.
+        CHECK_THAT(c.object_volume_mm3, p.is_root() ? WithinRel(1797.32, 1e-5) : WithinRel(1797.32, 0.05));
+
+        if (p.is_root())
+            root0 = c.score_mm3;
+        if (p == AutoTilt::Pose{ -20., 0. })
+            minus20_0 = c.score_mm3;
+    }
+    REQUIRE(root0 > 0.);
+    REQUIRE(minus20_0 > 0.);
+
+    // The bottom fifth of the root pose's height excluded. The fin's overhang starts at z = 2 mm on a
+    // fixture about 36.7 mm tall, so the plane at about 7.3 mm cuts contact off both poses, and it
+    // cuts more off the root than off the tilt that already lifted the fin's foot clear.
+    AutoTilt::Constants k20       = coarse_constants();
+    k20.bottom_exclusion_fraction = 0.20;
+
+    // A fresh scorer per step: score() re-appends sharp tails and cantilevers, so it is not
+    // idempotent for a repeated identical pose.
+    Slic3r::Model           model20 = Slic3r::Test::model("fin", fin_fixture());
+    AutoTilt::ContactScorer scorer20(*model20.objects.front(), fixture_config(), k20, inline_runner());
+    const AutoTilt::Contact root20  = scorer20.score(AutoTilt::Pose{});
+    const AutoTilt::Contact minus20 = scorer20.score(AutoTilt::Pose{ -20., 0. });
+    INFO("root " << root0 << " -> " << root20.score_mm3 << ", (-20, 0) " << minus20_0 << " -> " << minus20.score_mm3);
+    CHECK(root20.score_mm3 < root0 * (1. - 1e-5));
+    CHECK(minus20.score_mm3 < minus20_0 * (1. - 1e-5));
+
+    Slic3r::Model           model20s = Slic3r::Test::model("fin", fin_fixture());
+    AutoTilt::ContactScorer scorer20s(*model20s.objects.front(), fixture_config(), k20, inline_runner());
+    const AutoTilt::SearchResult r20 =
+        AutoTilt::search(AutoTilt::grid(k20), scorer20s, k20, []() { return false; }, [](size_t, size_t) {});
+    CHECK(r20.outcome == AutoTilt::SearchResult::Outcome::Improved);
+    CHECK_THAT(r20.best.tilt_deg, WithinAbs(-20.0, 1e-9));
+
+    // The plane raised to the full height of the root pose: no contact survives it, so the search
+    // sees a root under the negligible-volume floor and stops after that one pose.
+    AutoTilt::Constants k1       = coarse_constants();
+    k1.bottom_exclusion_fraction = 1.0;
+
+    Slic3r::Model           model1 = Slic3r::Test::model("fin", fin_fixture());
+    AutoTilt::ContactScorer scorer1(*model1.objects.front(), fixture_config(), k1, inline_runner());
+    const AutoTilt::Contact root1 = scorer1.score(AutoTilt::Pose{});
+    CHECK_THAT(root1.volume_mm3, WithinAbs(0.0, 0.0));
+    CHECK_THAT(root1.score_mm3, WithinAbs(0.0, 0.0));
+    CHECK_THAT(root1.object_volume_mm3, WithinRel(1797.32, 1e-5)); // the denominator stays whole
+
+    Slic3r::Model           model1s = Slic3r::Test::model("fin", fin_fixture());
+    AutoTilt::ContactScorer scorer1s(*model1s.objects.front(), fixture_config(), k1, inline_runner());
+    const AutoTilt::SearchResult r1 =
+        AutoTilt::search(AutoTilt::grid(k1), scorer1s, k1, []() { return false; }, [](size_t, size_t) {});
+    CHECK(r1.outcome == AutoTilt::SearchResult::Outcome::BelowFloor);
+    CHECK(r1.evaluated == 1);
 }
 
 TEST_CASE("The auto-tilt search returns the same numbers whatever the worker count", "[AutoTilt]")

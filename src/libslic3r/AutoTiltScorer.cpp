@@ -19,8 +19,9 @@ ContactScorer::ContactScorer(const ModelObject &object, const DynamicPrintConfig
     while (obj->instances.size() > 1)
         obj->delete_last_instance();
 
-    m_root  = obj->instances.front()->get_transformation().get_matrix();
-    m_pivot = obj->instance_bounding_box(0).center();
+    m_root     = obj->instances.front()->get_transformation().get_matrix();
+    m_root_box = obj->instance_bounding_box(0); // the constructor never calls ensure_on_bed(), so this is the root pose's box
+    m_pivot    = m_root_box.center();
 
     // The object's own layer height wins over the preset's, so read it before erasing it.
     const double print_h = obj->config.has("layer_height") ? obj->config.opt_float("layer_height") : full_config.opt_float("layer_height");
@@ -47,6 +48,7 @@ Contact ContactScorer::score(const Pose &pose)
     inst->set_transformation(Geometry::Transformation(candidate_transform(m_root, m_pivot, pose)));
     obj->invalidate_bounding_box();
     obj->ensure_on_bed();
+    const Transform3d posed = inst->get_transformation().get_matrix(); // read after ensure_on_bed() moved it
 
     // Print::apply rewrites the model tree and bumps ObjectIDs, so it belongs to the main thread;
     // slicing and overhang detection below run right here on the worker.
@@ -79,6 +81,14 @@ Contact ContactScorer::score(const Pose &pose)
             const auto it         = ts.overhang_types.find(&p);
             const bool type_floor = (it != ts.overhang_types.end() && it->second == TreeSupport::SharpTail) ||
                                     (! layer->cantilevers.empty() && overlaps(layer->cantilevers, p));
+
+            // Contact low on the object in its root pose is what the exclusion plane drops. A
+            // degenerate contour makes centroid() divide by zero and the fraction non-finite, and
+            // `NaN < x` is false, so such a polygon is charged exactly as it is with the plane off.
+            const Vec3d centroid_world =
+                to_3d(unscale(p.contour.centroid()) + unscale(po->instances().front().shift), layer->print_z);
+            if (root_height_fraction(m_root, posed, m_root_box, centroid_world) < m_k.bottom_exclusion_fraction)
+                continue;
 
             // One piece's contribution. The arithmetic and its order are the same whether `p` is
             // charged whole or in shadow-corrected pieces, so the plain path's sums are unchanged.
