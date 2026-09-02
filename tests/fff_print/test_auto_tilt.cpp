@@ -10,6 +10,7 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Support/TreeSupport.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/Utils.hpp"
 
 #include <tbb/global_control.h>
 
@@ -589,14 +590,22 @@ std::vector<std::filesystem::path> corpus_files(const std::string &dir)
 }
 
 // The config a corpus model is both scored and ground-truthed under: whatever the file carries, over
-// the fixture's defaults (an .stl carries nothing), with a legacy tree style forced in only when the
-// file did not pick one -- the organic generator never fills roof_areas, so ground truth needs a
-// legacy style, but a legacy style the file already chose is left alone.
+// the fixture's defaults (an .stl carries nothing), with only what ground truth needs forced back in.
+// Ground truth reads roof_areas off the tree generator, so a file that turned supports off, picked a
+// normal support type, or left the organic style (which never fills roof_areas) would make both the
+// truth and the scorer return nothing; each of those three is forced only when the loaded value
+// cannot produce roof areas, so a legacy tree style the file already chose is left alone.
 DynamicPrintConfig corpus_config(const DynamicPrintConfig &loaded)
 {
     DynamicPrintConfig config = fixture_config();
     if (! loaded.keys().empty())
         config.apply(loaded);
+    const auto *enable = config.option<ConfigOptionBool>("enable_support");
+    if (enable == nullptr || ! enable->value)
+        config.set_deserialize_strict({ { "enable_support", "1" } });
+    const auto *type = config.option<ConfigOptionEnum<SupportType>>("support_type");
+    if (type == nullptr || ! is_tree(type->value))
+        config.set_deserialize_strict({ { "support_type", "tree(auto)" } });
     const auto *style = config.option<ConfigOptionEnum<SupportMaterialStyle>>("support_style");
     if (style == nullptr || style->value == smsDefault || style->value == smsTreeOrganic)
         config.set_deserialize_strict({ { "support_style", "tree_slim" } });
@@ -611,6 +620,12 @@ DynamicPrintConfig corpus_config(const DynamicPrintConfig &loaded)
 TEST_CASE("Auto-tilt validation harness over a corpus", "[AutoTilt][.]")
 {
     const AutoTilt::Constants k;
+
+    // Model::get_backup_path() builds from temporary_dir(), which is "" in a test process, so each
+    // 3mf load logs two "Failed to create backup path /orcaslicer_model/...: Read-only file system"
+    // errors that read like a failure but are caught and non-fatal. Point it at the OS temp dir the
+    // way the app does at src/OrcaSlicer.cpp:1330.
+    Slic3r::set_temporary_dir(std::filesystem::temp_directory_path().string());
 
     const char       *env        = std::getenv("ORCA_AUTOTILT_CORPUS");
     const std::string corpus_dir = env != nullptr ? std::string(env) : std::string();
@@ -631,7 +646,11 @@ TEST_CASE("Auto-tilt validation harness over a corpus", "[AutoTilt][.]")
         DynamicPrintConfig     loaded;
         std::unique_ptr<Model> model;
         try {
-            model.reset(new Model(Model::read_from_file(path.string(), &loaded)));
+            // The 3mf importer creates no object without LoadModel and reads no config without
+            // LoadConfig (Format/bbs_3mf.cpp:1419, :1422), so the default strategy hands back an
+            // empty model; load the way the CLI does (src/OrcaSlicer.cpp:1648).
+            model.reset(new Model(Model::read_from_file(path.string(), &loaded, nullptr,
+                LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances)));
         } catch (const std::exception &e) {
             std::cout << "model " << index << " " << stem << " skipped: " << e.what() << std::endl;
             ++ index;
