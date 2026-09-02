@@ -28,6 +28,11 @@ public:
 
     double search_layer_height_mm() const { return m_h_search; } // max(print layer height, k.h_search_min_mm)
 
+    // Off in every shipping path. On, score() charges each overhang only for the part that does not
+    // already sit over solid object below it (spec §11); the validation harness measures whether that
+    // correction tracks ground truth better than the plain sum does.
+    bool shadow_correction = false;
+
     // No root/pivot accessors: the GUI job caches its own `root_matrix[i]` and `pivot[i]` per instance
     // from the live ModelObject, and this clone keeps instance 0 only, so exposing the scorer's copies
     // would create a second source of truth that nothing reads.

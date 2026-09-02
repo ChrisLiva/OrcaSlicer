@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <utility>
 
+#include "ClipperUtils.hpp"
 #include "Geometry.hpp"
 #include "Layer.hpp"
 #include "Support/TreeSupport.hpp"
@@ -61,6 +62,7 @@ Contact ContactScorer::score(const Pose &pose)
     // Serial, ascending, fixed order: two candidates must sum the same floats in the same order,
     // whatever the worker pool looks like.
     Contact         c;
+    ExPolygons      shadow; // union of every lower layer's slices; only filled under shadow_correction
     const LayerPtrs &layers = po->layers();
     for (size_t i = 0; i < layers.size(); ++i) {
         const Layer *layer = layers[i];
@@ -68,22 +70,36 @@ Contact ContactScorer::score(const Pose &pose)
         // Layer 0 sits on the plate: whatever the detector calls an overhang there needs no support.
         if (i == 0)
             continue;
+        if (this->shadow_correction)
+            shadow = union_ex(shadow, layers[i - 1]->lslices);
         for (size_t j = 0; j < layer->loverhangs.size(); ++j) {
             // A reference, not a copy: overhang_types is keyed on the address of this very element.
             const ExPolygon &p = layer->loverhangs[j];
-            const double     a = p.area() * SCALING_FACTOR * SCALING_FACTOR;
-            double           perimeter_scaled = p.contour.length();
-            for (const Polygon &hole : p.holes)
-                perimeter_scaled += hole.length();
-            const double perimeter = unscale<double>(perimeter_scaled);
 
             const auto it         = ts.overhang_types.find(&p);
             const bool type_floor = (it != ts.overhang_types.end() && it->second == TreeSupport::SharpTail) ||
                                     (! layer->cantilevers.empty() && overlaps(layer->cantilevers, p));
 
-            const double w = fragility_weight(a, perimeter, type_floor, m_k);
-            c.volume_mm3 += a * m_k.h_ref_mm;
-            c.score_mm3 += w * a * m_k.h_ref_mm;
+            // One piece's contribution. The arithmetic and its order are the same whether `p` is
+            // charged whole or in shadow-corrected pieces, so the plain path's sums are unchanged.
+            const auto charge = [&](const ExPolygon &piece) {
+                const double a = piece.area() * SCALING_FACTOR * SCALING_FACTOR;
+                double       perimeter_scaled = piece.contour.length();
+                for (const Polygon &hole : piece.holes)
+                    perimeter_scaled += hole.length();
+                const double perimeter = unscale<double>(perimeter_scaled);
+
+                const double w = fragility_weight(a, perimeter, type_floor, m_k);
+                c.volume_mm3 += a * m_k.h_ref_mm;
+                c.score_mm3 += w * a * m_k.h_ref_mm;
+            };
+
+            if (this->shadow_correction)
+                // The part of the overhang standing over solid object needs no support under it.
+                for (const ExPolygon &piece : diff_ex(p, shadow))
+                    charge(piece);
+            else
+                charge(p);
         }
     }
     return c;

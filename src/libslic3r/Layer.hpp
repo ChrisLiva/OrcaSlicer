@@ -295,6 +295,10 @@ public:
     // for tree supports
     ExPolygons base_areas;
 
+    // Read-only views on the protected tree-support roof areas below, for measuring how much
+    // support contact a print carries without opening the generator's own members up for writing.
+    const ExPolygons& tree_roof_areas() const { return roof_areas; }
+    const ExPolygons& tree_roof_1st_layer() const { return roof_1st_layer; }
 
     // Is there any valid extrusion assigned to this LayerRegion?
     virtual bool                has_extrusions() const { return ! support_fills.empty(); }
