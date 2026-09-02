@@ -108,6 +108,7 @@
 #include "Camera.hpp"
 #include "Mouse3DController.hpp"
 #include "Tab.hpp"
+#include "Jobs/AutoTiltJob.hpp"
 #include "Jobs/OrientJob.hpp"
 #include "Jobs/ArrangeJob.hpp"
 #include "Jobs/FillBedJob.hpp"
@@ -13439,6 +13440,19 @@ void Plater::orient()
         p->take_snapshot(_u8L("Orient"));
         replace_job(w, std::make_unique<OrientJob>());
     }
+}
+
+void Plater::auto_tilt()
+{
+    auto &w = get_ui_job_worker();
+    if (!w.is_idle())
+        return;
+    // No snapshot here: the search may find nothing to apply, and a cancelled run must leave the
+    // undo stack untouched. AutoTiltJob::finalize takes the snapshot right before it moves anything.
+    auto job = std::make_unique<AutoTiltJob>();
+    if (!job->prepare(*this))
+        return;
+    replace_job(w, std::move(job));
 }
 
 //BBS: add job state related functions

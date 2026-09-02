@@ -4,6 +4,7 @@
 #include "libslic3r/Model.hpp"
 
 #include "GUI_Factories.hpp"
+#include "Jobs/AutoTiltJob.hpp"
 #include "GUI_ObjectList.hpp"
 #include "GUI_App.hpp"
 #include "I18N.hpp"
@@ -1482,6 +1483,8 @@ void MenuFactory::create_extra_object_menu()
     append_menu_item_center(&m_object_menu);
     // Object Drop
     append_menu_item_drop(&m_object_menu);
+    // Object Auto-tilt for supports
+    append_menu_item_auto_tilt(&m_object_menu);
     // Object Split
     wxMenu* split_menu = new wxMenu();
     if (!split_menu)
@@ -2144,6 +2147,16 @@ void MenuFactory::append_menu_item_drop(wxMenu* menu)
                 return (std::abs(plater()->get_view3D_canvas3D()->get_selection().get_bounding_box().min.z()) > -SINKING_Z_THRESHOLD);
             } //disable if model is on the bed / not in View3D
         }, m_parent);
+}
+
+void MenuFactory::append_menu_item_auto_tilt(wxMenu* menu)
+{
+    append_menu_item(menu, wxID_ANY, _L("Auto-tilt for supports"),
+        _L("Tilt the object backward to reduce where tree supports touch it. Requires tree supports; assumes the model's front faces the front view."),
+        [](wxCommandEvent&) {
+            plater()->auto_tilt();
+        }, "", nullptr,
+        []() { return AutoTiltJob::can_start(*plater()); }, m_parent);
 }
 
 void MenuFactory::append_menu_item_per_object_process(wxMenu* menu)

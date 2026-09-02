@@ -189,6 +189,8 @@ enum class NotificationType
     // Active preset references a capability the installed+loaded plugin does not provide (outdated
     // plugin). Informational; cannot be auto-resolved; persistent, blocks slicing.
     OrcaPluginCapabilityUnavailableError,
+    // Outcome of an auto-tilt-for-supports run: applied, nothing better found, or discarded.
+    AutoTiltResult,
     NotificationTypeCount
 
 };

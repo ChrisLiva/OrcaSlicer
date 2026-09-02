@@ -656,6 +656,7 @@ public:
 
     void arrange();
     void orient();
+    void auto_tilt();
     void find_new_position(const ModelInstancePtrs  &instances);
     //BBS: add job state related functions
     void set_prepare_state(int state);

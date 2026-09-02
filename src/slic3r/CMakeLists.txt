@@ -294,6 +294,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/InstanceCheck.hpp
     GUI/Jobs/ArrangeJob.cpp
     GUI/Jobs/ArrangeJob.hpp
+    GUI/Jobs/AutoTiltJob.cpp
+    GUI/Jobs/AutoTiltJob.hpp
     GUI/Jobs/BindJob.cpp
     GUI/Jobs/BindJob.hpp
     GUI/Jobs/BoostThreadWorker.cpp
