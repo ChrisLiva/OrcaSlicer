@@ -4,6 +4,7 @@
 #include <functional>
 #include <vector>
 
+#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ObjectID.hpp"
 #include "libslic3r/Point.hpp"
 
@@ -23,6 +24,7 @@ struct Constants
     double w_sharp                    = 4.0;
     double h_ref_mm                   = 0.12; // unit of account for both reported mm3 figures
     double h_search_min_mm            = 0.12; // floor of the search layer height
+    double bottom_exclusion_fraction  = 0.0; // contact whose centroid sits below this fraction of the root pose's height is ignored; 0 turns it off
 };
 
 struct Pose
@@ -41,6 +43,10 @@ std::vector<Pose> grid(const Constants &k);
 
 // Translate(pivot) * rotation_transform({rad(tilt), rad(lean), 0}) * Translate(-pivot) * root
 Transform3d candidate_transform(const Transform3d &root, const Vec3d &pivot, const Pose &pose);
+
+// Height of a posed-world point in the root pose, as a fraction of the root pose's Z extent:
+// (z of root * posed^-1 * point - root_box.min.z) / (root_box.max.z - root_box.min.z). A zero-height box yields 0.
+double root_height_fraction(const Transform3d &root, const Transform3d &posed, const BoundingBoxf3 &root_box, const Vec3d &posed_point);
 
 // t = 2*area/perimeter; w = clamp(t_ref/t, 1, w_max); if type_floor, w = max(w, w_sharp).
 // perimeter <= 0 yields 1.

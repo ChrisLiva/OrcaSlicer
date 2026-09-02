@@ -36,6 +36,15 @@ Transform3d candidate_transform(const Transform3d &root, const Vec3d &pivot, con
            Geometry::translation_transform(- pivot) * root;
 }
 
+double root_height_fraction(const Transform3d &root, const Transform3d &posed, const BoundingBoxf3 &root_box, const Vec3d &posed_point)
+{
+    // Undo the pose, then apply the root, so the point lands where it sat before the search moved it.
+    const Vec3d  p = root * posed.inverse() * posed_point;
+    // Read min/max rather than size(): a box built with equal Z is marked undefined, and its size() is not usable.
+    const double h = root_box.max.z() - root_box.min.z();
+    return h > 0. ? (p.z() - root_box.min.z()) / h : 0.;
+}
+
 double fragility_weight(double area_mm2, double perimeter_mm, bool type_floor, const Constants &k)
 {
     if (perimeter_mm <= 0.)

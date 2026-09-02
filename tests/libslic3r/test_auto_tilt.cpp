@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <utility>
 #include <vector>
 
 #include "libslic3r/AutoTilt.hpp"
+#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Geometry.hpp"
 
 using namespace Slic3r;
@@ -84,6 +86,39 @@ TEST_CASE("candidate_transform tilts toward +Y and leans toward +X about the piv
         for (int r = 0; r < 4; ++r)
             for (int c = 0; c < 4; ++c)
                 REQUIRE_THAT(out.matrix()(r, c), WithinAbs(root.matrix()(r, c), 1e-12));
+    }
+}
+
+TEST_CASE("root_height_fraction reads a posed point's height in the root frame as a fraction of the root height", "[AutoTilt]")
+{
+    REQUIRE(Constants{}.bottom_exclusion_fraction == 0.0);
+
+    // A 10x10x50 root box sitting at the root translation, so a mesh-local Z of 5 mm is 0.1 of the height.
+    const Transform3d   root = Geometry::translation_transform(Vec3d(7, 8, 9));
+    const BoundingBoxf3 root_box(Vec3d(7, 8, 9), Vec3d(17, 18, 59));
+    const Vec3d         pivot = root_box.center();
+
+    SECTION("every pose reports the same root-frame height for the same mesh point") {
+        for (const Pose &pose : {Pose{0, 0}, Pose{-30, 0}, Pose{-20, 15}, Pose{-40, -15}}) {
+            CAPTURE(pose.tilt_deg, pose.lean_deg);
+            // The 3.7 mm stands in for the Z shift ensure_on_bed() pre-multiplies onto a tilted instance.
+            const Transform3d posed = Geometry::translation_transform(Vec3d(0, 0, 3.7)) *
+                                      candidate_transform(root, pivot, pose);
+            REQUIRE_THAT(root_height_fraction(root, posed, root_box, posed * Vec3d(3, 3, 5)), WithinAbs(0.1, 1e-9));
+            REQUIRE_THAT(root_height_fraction(root, posed, root_box, posed * Vec3d(10, 10, 50)), WithinAbs(1.0, 1e-9));
+            REQUIRE_THAT(root_height_fraction(root, posed, root_box, posed * Vec3d(0, 0, 0)), WithinAbs(0.0, 1e-9));
+        }
+    }
+
+    SECTION("a zero-height box yields 0") {
+        const BoundingBoxf3 flat(Vec3d(0, 0, 0), Vec3d(10, 10, 0));
+        REQUIRE_THAT(root_height_fraction(root, root, flat, Vec3d(5, 5, 0)), WithinAbs(0.0, 1e-12));
+    }
+
+    SECTION("a non-finite point yields a fraction that excludes nothing") {
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        REQUIRE(std::isnan(root_height_fraction(root, root, root_box, Vec3d(nan, nan, nan))));
+        REQUIRE_FALSE(root_height_fraction(root, root, root_box, Vec3d(nan, nan, nan)) < 0.20);
     }
 }
 
