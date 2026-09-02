@@ -14,7 +14,8 @@ namespace Slic3r { namespace AutoTilt {
 // and fragility_weight() so no loop bakes a number in.
 struct Constants
 {
-    std::vector<double> tilts_deg {0, -5, -10, -15, -20, -25, -30, -35, -40};
+    std::vector<double> tilts_deg {0,   -2,  -4,  -6,  -8,  -10, -12, -14, -16, -18, -20,
+                                   -22, -24, -26, -28, -30, -32, -34, -36, -38, -40};
     std::vector<double> leans_deg {-15, -10, -5, 0, 5, 10, 15};
     double threshold_base             = 0.10;   // fraction of the root score
     double threshold_per_degree       = 0.0025; // added per degree of |tilt|
@@ -24,7 +25,7 @@ struct Constants
     double w_sharp                    = 4.0;
     double h_ref_mm                   = 0.12; // unit of account for both reported mm3 figures
     double h_search_min_mm            = 0.12; // floor of the search layer height
-    double bottom_exclusion_fraction  = 0.0; // contact whose centroid sits below this fraction of the root pose's height is ignored; 0 turns it off
+    double bottom_exclusion_fraction  = 0.20; // contact whose centroid sits below this fraction of the root pose's height is ignored; 0 turns it off
 };
 
 struct Pose

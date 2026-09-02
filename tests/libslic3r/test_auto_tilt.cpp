@@ -22,10 +22,10 @@ TEST_CASE("grid lists the root pose first and then every tilt/lean pair tilt-maj
     const Constants         k;
     const std::vector<Pose> g = grid(k);
 
-    REQUIRE(g.size() == 63);
+    REQUIRE(g.size() == 147);
     REQUIRE(g[0].is_root());
     REQUIRE(g[1] == Pose{0, -15});
-    REQUIRE(g[7] == Pose{-5, -15});
+    REQUIRE(g[7] == Pose{-2, -15});
 
     SECTION("every tilt/lean pair appears exactly once") {
         for (double tilt : k.tilts_deg) {
@@ -91,7 +91,7 @@ TEST_CASE("candidate_transform tilts toward +Y and leans toward +X about the piv
 
 TEST_CASE("root_height_fraction reads a posed point's height in the root frame as a fraction of the root height", "[AutoTilt]")
 {
-    REQUIRE(Constants{}.bottom_exclusion_fraction == 0.0);
+    REQUIRE(Constants{}.bottom_exclusion_fraction == 0.20);
 
     // A 10x10x50 root box sitting at the root translation, so a mesh-local Z of 5 mm is 0.1 of the height.
     const Transform3d   root = Geometry::translation_transform(Vec3d(7, 8, 9));
@@ -190,14 +190,14 @@ TEST_CASE("search breaks a tie between two admissible poses by the smaller devia
     const Constants         k;
     const std::vector<Pose> legal = grid(k);
     FakeScorer              scorer(legal, Contact{100, 100, 1000});
-    // Both halve the root score (50% gain) against thresholds of 11.25% and 12.5%.
-    scorer.set(Pose{-5, 0}, Contact{50, 50, 1000});
+    // Both halve the root score (50% gain) against thresholds of 11% and 12.5%.
+    scorer.set(Pose{-4, 0}, Contact{50, 50, 1000});
     scorer.set(Pose{-10, 0}, Contact{50, 50, 1000});
 
     const SearchResult r = search(legal, scorer, k, never_stop, no_progress);
 
     REQUIRE(r.outcome == SearchResult::Outcome::Improved);
-    REQUIRE(r.best == Pose{-5, 0});
+    REQUIRE(r.best == Pose{-4, 0});
 }
 
 TEST_CASE("search rejects a gain that misses the threshold for its tilt", "[AutoTilt]")
@@ -213,6 +213,33 @@ TEST_CASE("search rejects a gain that misses the threshold for its tilt", "[Auto
     REQUIRE(r.best == Pose{-40, 0});
     REQUIRE_THAT(r.improvement, WithinAbs(0.05, 1e-12));
     REQUIRE_THAT(r.required_improvement, WithinAbs(0.20, 1e-12));
+}
+
+TEST_CASE("search requires a 10.5% gain from a 2 degree tilt", "[AutoTilt]")
+{
+    const Constants         k;
+    const std::vector<Pose> legal = grid(k);
+
+    SECTION("a 10.4% gain misses the threshold") {
+        FakeScorer scorer(legal, Contact{100, 100, 1000});
+        scorer.set(Pose{-2, 0}, Contact{89.6, 89.6, 1000});
+
+        const SearchResult r = search(legal, scorer, k, never_stop, no_progress);
+
+        REQUIRE(r.outcome == SearchResult::Outcome::NoImprovement);
+        REQUIRE(r.best == Pose{-2, 0});
+        REQUIRE_THAT(r.required_improvement, WithinAbs(0.105, 1e-12));
+    }
+
+    SECTION("a 10.6% gain clears it") {
+        FakeScorer scorer(legal, Contact{100, 100, 1000});
+        scorer.set(Pose{-2, 0}, Contact{89.4, 89.4, 1000});
+
+        const SearchResult r = search(legal, scorer, k, never_stop, no_progress);
+
+        REQUIRE(r.outcome == SearchResult::Outcome::Improved);
+        REQUIRE(r.best == Pose{-2, 0});
+    }
 }
 
 TEST_CASE("search ranks inside the admissible set, not over the whole grid", "[AutoTilt]")
