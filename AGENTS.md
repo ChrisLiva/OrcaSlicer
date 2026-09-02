@@ -5,6 +5,11 @@ OrcaSlicer — open-source C++17 3D slicer. wxWidgets GUI, CMake build system.
 ## Build Commands
 
 ```bash
+# macOS first-time setup with Command Line Tools only (no Xcode): automake, libtool and texinfo
+# are needed by deps/MPFR/MPFR.cmake's autoreconf and makeinfo steps, then build deps with Ninja
+brew install cmake ninja automake libtool texinfo
+./build_release_macos.sh -d -a arm64 -x
+
 # macOS
 cmake --build build/arm64 --config RelWithDebInfo --target all --
 
