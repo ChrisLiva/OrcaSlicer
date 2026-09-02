@@ -628,6 +628,14 @@ void run_harness_model(size_t index, const std::string &stem, const Model &base,
     const Column col_plain  = sweep(plain, poses, k);
     const Column col_shadow = sweep(shadow, poses, k);
 
+    // §14's diagnostics describe the root pose alone, off a scorer of their own: score() accumulates
+    // sharp-tail and cantilever state across calls, so a swept scorer would fold nine poses of it into
+    // the root's rows. shadow_correction stays false, where the recorded and the charged sets coincide.
+    AutoTilt::ContactScorer                            diag(obj, config, k, inline_runner());
+    std::vector<AutoTilt::ContactScorer::PolygonRecord> records;
+    diag.records                   = &records;
+    const AutoTilt::Contact root_c = diag.score(AutoTilt::Pose{});
+
     // roof_gap_areas is the gap the generator leaves between a contact tip and the object, so a
     // config that prints the tips straight onto the object files none of it: there is no truth to
     // measure, and 147 Print::process() passes would only produce zeros. Score, report, say so.
@@ -666,6 +674,24 @@ void run_harness_model(size_t index, const std::string &stem, const Model &base,
         for (std::string line; std::getline(back, line); )
             ++ lines;
         REQUIRE(lines == n + 1);
+
+        // One row per overhang polygon the root pose slices, excluded rows included: where to put the
+        // exclusion plane is read off these, so the rows it would drop have to be in the file.
+        const std::filesystem::path poly_path = std::filesystem::path(corpus_dir) / (stem + ".autotilt.polygons.csv");
+        std::ofstream               poly(poly_path.string());
+        poly << std::setprecision(12);
+        poly << "layer,print_z_mm,area_mm2,perimeter_mm,t_mm,weight,root_height_fraction,type_floor,excluded\n";
+        for (const AutoTilt::ContactScorer::PolygonRecord &r : records)
+            poly << r.layer << "," << r.print_z_mm << "," << r.area_mm2 << "," << r.perimeter_mm << ","
+                 << r.t_mm << "," << r.weight << "," << r.root_height_fraction << ","
+                 << (r.type_floor ? 1 : 0) << "," << (r.excluded ? 1 : 0) << "\n";
+        poly.close();
+
+        size_t        poly_lines = 0;
+        std::ifstream poly_back(poly_path.string());
+        for (std::string line; std::getline(poly_back, line); )
+            ++ poly_lines;
+        REQUIRE(poly_lines == records.size() + 1);
     }
 
     // Spearman and the truth extremes only see the poses both sides could measure.
@@ -724,6 +750,55 @@ void run_harness_model(size_t index, const std::string &stem, const Model &base,
               << " sweep_s=" << sweep_text
               << " elapsed_s=" << elapsed_text
               << (truth_available ? "" : " truth_unavailable=support_top_z_distance_0")
+              << std::endl;
+
+    // §14's shape diagnostics, over the root pose's rows. `R` is what the exclusion plane keeps; the
+    // percentiles read off the finite thicknesses in it (t is NaN for a degenerate zero-perimeter
+    // contour), and `excluded_share` weighs what the plane drops against every row, kept or not.
+    std::vector<double> t_kept, wa_kept;
+    double              area_h_all = 0., area_h_excluded = 0.;
+    size_t              kept = 0, t_above_ref = 0;
+    for (const AutoTilt::ContactScorer::PolygonRecord &r : records) {
+        area_h_all += r.area_mm2 * k.h_ref_mm;
+        if (r.excluded) {
+            area_h_excluded += r.area_mm2 * k.h_ref_mm;
+            continue;
+        }
+        ++ kept;
+        wa_kept.push_back(r.weight * r.area_mm2);
+        if (std::isfinite(r.t_mm)) {
+            t_kept.push_back(r.t_mm);
+            if (r.t_mm >= k.t_ref_mm)
+                ++ t_above_ref;
+        }
+    }
+    std::sort(t_kept.begin(), t_kept.end());
+    const size_t t_n        = t_kept.size();
+    // Nearest rank: ceil(P*n) is at least 1 for P > 0 and n >= 1.
+    const auto   percentile = [&](double p) {
+        return t_n == 0 ? harness_nan : t_kept[size_t(std::ceil(p * double(t_n))) - 1];
+    };
+    double top3_share = harness_nan, excluded_share = harness_nan;
+    if (kept > 3) {
+        std::partial_sort(wa_kept.begin(), wa_kept.begin() + 3, wa_kept.end(), std::greater<double>());
+        top3_share = std::accumulate(wa_kept.begin(), wa_kept.begin() + 3, 0.) /
+                     std::accumulate(wa_kept.begin(), wa_kept.end(), 0.);
+    } else if (kept > 0) {
+        top3_share = 1.;
+    }
+    if (kept > 0)
+        excluded_share = area_h_excluded / area_h_all;
+
+    std::cout << "model " << index << " " << stem
+              << " diag root_volume_mm3=" << root_c.volume_mm3
+              << " root_volume_fraction=" << (root_c.volume_mm3 / root_c.object_volume_mm3)
+              << " t_p10=" << percentile(0.10)
+              << " t_p50=" << percentile(0.50)
+              << " t_p90=" << percentile(0.90)
+              << " share_t_above_t_ref=" << (t_n == 0 ? harness_nan : double(t_above_ref) / double(t_n))
+              << " top3_share=" << top3_share
+              << " excluded_share=" << excluded_share
+              << " h_search_mm=" << diag.search_layer_height_mm()
               << std::endl;
 
     if (truth_available)
