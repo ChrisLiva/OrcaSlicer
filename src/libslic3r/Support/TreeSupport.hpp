@@ -402,6 +402,9 @@ public:
 
     std::function<void()> throw_on_cancel;
     const PrintConfig* m_print_config;
+    // Set by the auto-tilt scorer before detect_overhangs(): disables the wall-clock/size cutoff
+    // and replaces the sharp-tail band gate with a 0.5 mm crossing test. Normal slicing never sets it.
+    bool m_scoring_mode = false;
     /*!
      * \brief Polygons representing the limits of the printable area of the
      * machine

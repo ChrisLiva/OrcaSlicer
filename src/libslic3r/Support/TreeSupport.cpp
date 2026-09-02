@@ -1,4 +1,6 @@
+#include <atomic>
 #include <chrono>
+#include <cmath>
 #include <math.h>
 
 #include "format.hpp"
@@ -665,6 +667,12 @@ TreeSupport::TreeSupport(PrintObject& object, const SlicingParameters &slicing_p
 
 
 #define SUPPORT_SURFACES_OFFSET_PARAMETERS ClipperLib::jtSquare, 0.
+
+// True when the half-open interval (accum - h, accum] contains a multiple of 0.5 mm, i.e. when this
+// layer is the one that carries a sharp tail across the next 0.5 mm boundary. At accum == 0 (a tail's
+// detachment layer) the two floors are 0 and -1, so the base band is admitted.
+static bool crosses_half_mm(double accum, double h) { return std::floor(accum / 0.5) != std::floor((accum - h) / 0.5); }
+
 void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
 {
     bool tree_support_enable = m_object_config->enable_support.value && is_tree(m_object_config->support_type.value);
@@ -686,8 +694,9 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
     const coordf_t max_bridge_length = scale_(config.max_bridge_length.value);
     const bool bridge_no_support = max_bridge_length > 0;
     const bool support_critical_regions_only = config.support_critical_regions_only.value;
-    bool config_remove_small_overhangs = config.support_remove_small_overhang.value;
-    bool config_detect_sharp_tails = g_config_support_sharp_tails;
+    // Written from inside the tbb::parallel_for lambda below, read on every worker.
+    std::atomic<bool> config_remove_small_overhangs{ config.support_remove_small_overhang.value };
+    std::atomic<bool> config_detect_sharp_tails{ g_config_support_sharp_tails };
     const int enforce_support_layers = config.enforce_support_layers.value;
     const double area_thresh_well_supported = SQ(scale_(6));
     const double length_thresh_well_supported = scale_(6);
@@ -845,7 +854,7 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
                 overhangs_all_layers[layer_nr] = diff_ex(curr_polys, lower_layer_offseted);
 
                 double duration{ std::chrono::duration_cast<second_>(clock_::now() - t0).count() };
-                if (duration > 30 || overhangs_all_layers[layer_nr].size() > 100) {
+                if (!m_scoring_mode && (duration > 30 || overhangs_all_layers[layer_nr].size() > 100)) {
                     BOOST_LOG_TRIVIAL(info) << "detect_overhangs takes more than 30 secs, skip cantilever and sharp tails detection: layer_nr=" << layer_nr << " duration=" << duration;
                     config_detect_sharp_tails = false;
                     config_remove_small_overhangs = false;
@@ -1064,7 +1073,7 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
             for (size_t i = 0; i < layer->sharp_tails_height.size();i++) {
                 ExPolygons areas = diff_clipped({ layer->sharp_tails[i]}, lower_layer_expanded);
                 float accum_height = layer->sharp_tails_height[i];
-                if (!areas.empty() && int(accum_height * 10) % 5 == 0) {
+                if (!areas.empty() && (m_scoring_mode ? crosses_half_mm(accum_height, layer->height) : int(accum_height * 10) % 5 == 0)) {
                     append(sharp_tail_overhangs, areas);
                     has_sharp_tails = true;
 #ifdef SUPPORT_TREE_DEBUG_TO_SVG
