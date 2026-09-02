@@ -33,6 +33,13 @@ public:
     // correction tracks ground truth better than the plain sum does.
     bool shadow_correction = false;
 
+    struct PolygonRecord {
+        size_t layer;            // object layer index, >= 1
+        double print_z_mm, area_mm2, perimeter_mm, t_mm, weight, root_height_fraction;
+        bool   type_floor, excluded;
+    };
+    std::vector<PolygonRecord> *records = nullptr; // when set, score() appends (never clears) one row per loverhangs polygon on layers >= 1, excluded ones included
+
     // No root/pivot accessors: the GUI job caches its own `root_matrix[i]` and `pivot[i]` per instance
     // from the live ModelObject, and this clone keeps instance 0 only, so exposing the scorer's copies
     // would create a second source of truth that nothing reads.

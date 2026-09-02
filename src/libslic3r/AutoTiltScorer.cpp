@@ -1,6 +1,7 @@
 #include "AutoTiltScorer.hpp"
 
 #include <algorithm>
+#include <limits>
 #include <utility>
 
 #include "ClipperUtils.hpp"
@@ -87,7 +88,23 @@ Contact ContactScorer::score(const Pose &pose)
             // `NaN < x` is false, so such a polygon is charged exactly as it is with the plane off.
             const Vec3d centroid_world =
                 to_3d(unscale(p.contour.centroid()) + unscale(po->instances().front().shift), layer->print_z);
-            if (root_height_fraction(m_root, posed, m_root_box, centroid_world) < m_k.bottom_exclusion_fraction)
+            const double fraction = root_height_fraction(m_root, posed, m_root_box, centroid_world);
+            const bool   excluded = fraction < m_k.bottom_exclusion_fraction;
+
+            // The row describes the whole polygon, excluded or not: the harness needs the rows the
+            // plane drops to judge where to put it. Written before the `continue` for that reason.
+            if (this->records != nullptr) {
+                const double a = p.area() * SCALING_FACTOR * SCALING_FACTOR;
+                double       perimeter_scaled = p.contour.length();
+                for (const Polygon &hole : p.holes)
+                    perimeter_scaled += hole.length();
+                const double perimeter = unscale<double>(perimeter_scaled);
+                this->records->push_back(PolygonRecord{ i, layer->print_z, a, perimeter,
+                                                        perimeter > 0. ? 2. * a / perimeter : std::numeric_limits<double>::quiet_NaN(),
+                                                        fragility_weight(a, perimeter, type_floor, m_k), fraction, type_floor, excluded });
+            }
+
+            if (excluded)
                 continue;
 
             // One piece's contribution. The arithmetic and its order are the same whether `p` is

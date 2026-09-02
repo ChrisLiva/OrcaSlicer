@@ -285,6 +285,49 @@ TEST_CASE("The auto-tilt scorer ignores contact below the bottom exclusion plane
     CHECK(r1.evaluated == 1);
 }
 
+TEST_CASE("The auto-tilt scorer records one row per contact polygon when asked", "[AutoTilt]")
+{
+    // The plane is switched on explicitly rather than left at the shipping default, so that this
+    // fixture produces both excluded and charged rows and the sums below have something to prove.
+    AutoTilt::Constants k;
+    k.bottom_exclusion_fraction = 0.20;
+
+    Slic3r::Model           model = Slic3r::Test::model("fin", fin_fixture());
+    AutoTilt::ContactScorer scorer(*model.objects.front(), fixture_config(), k, inline_runner());
+
+    std::vector<AutoTilt::ContactScorer::PolygonRecord> records;
+    scorer.records = &records;
+    const AutoTilt::Contact c = scorer.score(AutoTilt::Pose{});
+
+    REQUIRE_FALSE(records.empty());
+
+    // Summed in vector order, so these reproduce score()'s own float arithmetic term for term.
+    double score_sum = 0., volume_sum = 0.;
+    size_t excluded_rows = 0;
+    for (const AutoTilt::ContactScorer::PolygonRecord &r : records) {
+        CHECK(r.layer >= 1); // layer 0 sits on the plate and is never recorded
+        CHECK(r.print_z_mm > 0.);
+        CHECK(r.weight >= 1.);
+        if (r.perimeter_mm > 0.)
+            CHECK_THAT(r.t_mm, WithinRel(2. * r.area_mm2 / r.perimeter_mm, 1e-12));
+        if (r.excluded) {
+            ++excluded_rows;
+            continue;
+        }
+        volume_sum += r.area_mm2 * k.h_ref_mm;
+        score_sum += r.weight * r.area_mm2 * k.h_ref_mm;
+    }
+    INFO("records " << records.size() << ", excluded " << excluded_rows);
+    REQUIRE(excluded_rows > 0);
+    CHECK_THAT(score_sum, WithinRel(c.score_mm3, 1e-9));
+    CHECK_THAT(volume_sum, WithinRel(c.volume_mm3, 1e-9));
+
+    // A second pose appends to the same vector: score() adds rows and never clears them.
+    const size_t n = records.size();
+    scorer.score(AutoTilt::Pose{ -20., 0. });
+    CHECK(records.size() > n);
+}
+
 TEST_CASE("The auto-tilt search returns the same numbers whatever the worker count", "[AutoTilt]")
 {
     const AutoTilt::Constants k = coarse_constants();
