@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -27,6 +28,7 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -560,7 +562,8 @@ struct Column
     std::vector<AutoTilt::Contact> contacts;
     std::vector<char>              ok;
     AutoTilt::SearchResult         result;
-    size_t                         chosen = 0;
+    size_t                         chosen  = 0;
+    double                         seconds = 0.;
 };
 
 Column sweep(AutoTilt::ContactScorer &scorer, const std::vector<AutoTilt::Pose> &poses, const AutoTilt::Constants &k)
@@ -568,6 +571,8 @@ Column sweep(AutoTilt::ContactScorer &scorer, const std::vector<AutoTilt::Pose> 
     Column col;
     col.contacts.resize(poses.size());
     col.ok.assign(poses.size(), 0);
+    // Only the scoring costs wall clock worth reporting; the table search() below runs in microseconds.
+    const auto start = std::chrono::high_resolution_clock::now();
     for (size_t i = 0; i < poses.size(); ++ i) {
         try {
             col.contacts[i] = scorer.score(poses[i]);
@@ -576,6 +581,7 @@ Column sweep(AutoTilt::ContactScorer &scorer, const std::vector<AutoTilt::Pose> 
             col.ok[i] = 0;
         }
     }
+    col.seconds = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - start).count();
     TableScorer table(poses, col.contacts, col.ok);
     col.result = AutoTilt::search(poses, table, k, []() { return false; }, [](size_t, size_t) {});
     col.chosen = chosen_index(col.result, poses);
@@ -610,6 +616,7 @@ std::string pose_text(const AutoTilt::Pose &p)
 void run_harness_model(size_t index, const std::string &stem, const Model &base, const DynamicPrintConfig &config,
                        const std::string &corpus_dir, const AutoTilt::Constants &k)
 {
+    const auto                        start = std::chrono::high_resolution_clock::now();
     const std::vector<AutoTilt::Pose> poses = AutoTilt::grid(k);
     const size_t                      n     = poses.size();
     const ModelObject                &obj   = *base.objects.front();
@@ -623,7 +630,7 @@ void run_harness_model(size_t index, const std::string &stem, const Model &base,
 
     // roof_gap_areas is the gap the generator leaves between a contact tip and the object, so a
     // config that prints the tips straight onto the object files none of it: there is no truth to
-    // measure, and 63 full Print::process() passes would only produce zeros. Score, report, say so.
+    // measure, and 147 Print::process() passes would only produce zeros. Score, report, say so.
     const bool truth_available = config.opt_float("support_top_z_distance") > 0.;
 
     std::vector<double> truth_w(n, harness_nan), truth_u(n, harness_nan);
@@ -687,6 +694,19 @@ void run_harness_model(size_t index, const std::string &stem, const Model &base,
     const bool false_move = truth_ok[0] && truth_w[0] <= truth_min &&
                             (col_plain.result.outcome == AutoTilt::SearchResult::Outcome::Improved);
 
+    // Also the height the search-height check below compares against.
+    const double print_h = obj.config.has("layer_height") ? obj.config.opt_float("layer_height") : config.opt_float("layer_height");
+    const Vec3d  bbox    = obj.instance_bounding_box(0).size();
+    std::ostringstream   fields;
+    fields << std::fixed << std::setprecision(2) << bbox.x() << "x" << bbox.y() << "x" << bbox.z();
+    const std::string bbox_text = fields.str();
+    fields.str(std::string());
+    fields << std::setprecision(1) << col_plain.seconds;
+    const std::string sweep_text = fields.str();
+    fields.str(std::string());
+    fields << std::setprecision(1) << std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - start).count();
+    const std::string elapsed_text = fields.str();
+
     std::cout << "model " << index << " " << stem
               << " regret_plain=" << regret_plain
               << " regret_shadow=" << regret_shadow
@@ -698,6 +718,11 @@ void run_harness_model(size_t index, const std::string &stem, const Model &base,
               << " poses_with_truth=" << measured << "/" << n
               << " chosen_plain=" << pose_text(poses[col_plain.chosen])
               << " chosen_shadow=" << pose_text(poses[col_shadow.chosen])
+              << " facets=" << obj.facets_count()
+              << " bbox_mm=" << bbox_text
+              << " layer_height_mm=" << print_h
+              << " sweep_s=" << sweep_text
+              << " elapsed_s=" << elapsed_text
               << (truth_available ? "" : " truth_unavailable=support_top_z_distance_0")
               << std::endl;
 
@@ -718,10 +743,9 @@ void run_harness_model(size_t index, const std::string &stem, const Model &base,
         REQUIRE(rho_shadow <= 1.);
     }
 
-    // Below 0.12 mm the search slices coarser than the print does, so the winner has to be shown to
-    // survive dropping the search height onto the print height.
-    const double print_h = obj.config.has("layer_height") ? obj.config.opt_float("layer_height") : config.opt_float("layer_height");
-    if (print_h < 0.12) {
+    // Below the search floor the search slices coarser than the print does, so the winner has to be
+    // shown to survive dropping the search height onto the print height.
+    if (print_h < k.h_search_min_mm) {
         AutoTilt::Constants k_print = k;
         k_print.h_search_min_mm     = print_h;
         AutoTilt::ContactScorer at_print(obj, config, k_print, inline_runner());
@@ -754,6 +778,24 @@ std::vector<std::filesystem::path> corpus_files(const std::string &dir)
     return out;
 }
 
+// The name a corpus object's CSV and log lines carry. Slic3r::sanitize_filename (Utils.hpp:279)
+// replaces only /\:*?"<>| and would leave the spaces of an object name like `10_Dark Elves 1.stl`
+// in a path that gets typed on a command line, so this keeps a tighter character class.
+std::string corpus_stem(const std::filesystem::path &path, size_t object_count, const std::string &object_name)
+{
+    const std::string file = path.stem().string();
+    if (object_count == 1)
+        return file;
+    std::string s = object_name;
+    for (char &c : s) {
+        const bool keep = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+                          c == '.' || c == '_' || c == '-';
+        if (! keep)
+            c = '_';
+    }
+    return file + "#" + s;
+}
+
 // The config a corpus model is both scored and ground-truthed under: whatever the file carries, over
 // the fixture's defaults (an .stl carries nothing), with only what ground truth needs forced back in.
 // Ground truth reads roof_gap_areas off the tree generator, so a file that turned supports off,
@@ -779,12 +821,21 @@ DynamicPrintConfig corpus_config(const DynamicPrintConfig &loaded)
 
 } // namespace
 
-// Hidden ([.]): one model costs 63 full Print::process() passes plus 126 scorer slices, minutes of
-// wall clock, and the corpus it reads lives outside the repo under $ORCA_AUTOTILT_CORPUS
+TEST_CASE("The auto-tilt corpus stem keeps a one-object file's name and sanitises a multi-object one", "[AutoTilt]")
+{
+    CHECK(corpus_stem("/c/Ratmen_Test.3mf", 1, "anything at all") == "Ratmen_Test");
+    CHECK(corpus_stem("/c/Ratmen_Test.3mf", 3, "10_Dark Elves 1.stl") == "Ratmen_Test#10_Dark_Elves_1.stl");
+}
+
+// Hidden ([.]): one model costs 147 full Print::process() passes plus 294 scorer slices, and a third
+// 147-pose sweep on a model printing finer than 0.12 mm, so hours of wall clock; the corpus it reads
+// lives outside the repo under $ORCA_AUTOTILT_CORPUS
 // (tests/AGENTS.md:44). It measures the scorer's regret against ground truth; it does not pin it.
 TEST_CASE("Auto-tilt validation harness over a corpus", "[AutoTilt][.]")
 {
-    const AutoTilt::Constants k;
+    // $ORCA_AUTOTILT_COARSE trades the 147-pose grid for the 9-pose one, presence-tested the way
+    // tests/fff_print/test_multifilament.cpp:648 does. Thresholds keep their production defaults.
+    const AutoTilt::Constants k = std::getenv("ORCA_AUTOTILT_COARSE") != nullptr ? coarse_constants() : AutoTilt::Constants();
 
     // Model::get_backup_path() builds from temporary_dir(), which is "" in a test process, so each
     // 3mf load logs two "Failed to create backup path /orcaslicer_model/...: Read-only file system"
@@ -821,18 +872,32 @@ TEST_CASE("Auto-tilt validation harness over a corpus", "[AutoTilt][.]")
             ++ index;
             continue;
         }
-        if (model->objects.empty() || model->objects.front()->instances.empty()) {
+        if (model->objects.empty()) {
             std::cout << "model " << index << " " << stem << " skipped: no printable instance" << std::endl;
             ++ index;
             continue;
         }
-        // The scorer poses one object's one instance, so ground truth has to print exactly that.
-        while (model->objects.size() > 1)
-            model->delete_object(model->objects.size() - 1);
-        while (model->objects.front()->instances.size() > 1)
-            model->objects.front()->delete_last_instance();
+        const DynamicPrintConfig config = corpus_config(loaded);
+        // One harness model per object: the scorer poses one object's one instance, so ground truth
+        // has to print exactly that. The scorers cache m_root_box = instance_bounding_box(0) in their
+        // constructor (AutoTiltScorer.cpp:24), so the instance is centred on the bed and dropped onto
+        // it first, or every root-height fraction would be measured off a shifted box.
+        for (const ModelObject *src : model->objects) {
+            const std::string obj_stem = corpus_stem(path, model->objects.size(), src->name);
+            if (src->instances.empty()) {
+                std::cout << "model " << index << " " << obj_stem << " skipped: no printable instance" << std::endl;
+                ++ index;
+                continue;
+            }
+            Model        one;
+            ModelObject *obj = one.add_object(*src);
+            while (obj->instances.size() > 1)
+                obj->delete_last_instance();
+            one.center_instances_around_point(unscale(BoundingBox(get_bed_shape(config)).center()));
+            obj->ensure_on_bed();
 
-        run_harness_model(index, stem, *model, corpus_config(loaded), corpus_dir, k);
-        ++ index;
+            run_harness_model(index, obj_stem, one, config, corpus_dir, k);
+            ++ index;
+        }
     }
 }
