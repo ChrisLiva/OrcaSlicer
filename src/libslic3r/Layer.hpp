@@ -299,6 +299,8 @@ public:
     // support contact a print carries without opening the generator's own members up for writing.
     const ExPolygons& tree_roof_areas() const { return roof_areas; }
     const ExPolygons& tree_roof_1st_layer() const { return roof_1st_layer; }
+    // The gap layer between roof and overhang: sharp-tail clusters reach it when roof_areas stay empty.
+    const ExPolygons& tree_roof_gap_areas() const { return roof_gap_areas; }
 
     // Is there any valid extrusion assigned to this LayerRegion?
     virtual bool                has_extrusions() const { return ! support_fills.empty(); }

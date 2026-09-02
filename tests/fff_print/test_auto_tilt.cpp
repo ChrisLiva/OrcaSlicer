@@ -390,6 +390,22 @@ TEST_CASE("A processed tree-support print exposes its roof areas through Support
 
     REQUIRE(layers_with_roof > 0);
     REQUIRE(layers_with_roof_1st > 0);
+
+    // The fin's root contact is one sharp-tail cluster from end to end: draw_circles() routes those
+    // nodes past roof_areas entirely, but the 0.2 mm support_top_z_distance still buys a gap layer,
+    // so the cluster does land in roof_gap_areas. That is the routing a roof-only truth cannot see.
+    Slic3r::Print fin_print;
+    Slic3r::Test::init_and_process_print({ fin_fixture() }, fin_print, fixture_config({ { "support_style", "tree_slim" } }));
+
+    const PrintObject *fin_po      = fin_print.objects().front();
+    const double       fin_first_z = fin_po->slicing_parameters().first_print_layer_height;
+
+    size_t layers_with_roof_gap = 0;
+    for (const SupportLayer *sl : fin_po->support_layers())
+        if (sl->print_z > fin_first_z + EPSILON && ! sl->tree_roof_gap_areas().empty())
+            ++ layers_with_roof_gap;
+
+    REQUIRE(layers_with_roof_gap > 0);
 }
 
 // ---------------------------------------------------------------------------------------------
