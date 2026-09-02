@@ -416,8 +416,9 @@ namespace {
 
 constexpr double harness_nan = std::numeric_limits<double>::quiet_NaN();
 
-// Ground truth for one pose: the tree-support roof area a full Print::process() lays against the
-// object, at the model's own print layer height. `ok` is false when process() refused the pose.
+// Ground truth for one pose: the tree generator's contact-tip area (`roof_gap_areas`, every tip
+// node sharp-tail or not) a full Print::process() lays against the object, at the model's own print
+// layer height. `ok` is false when process() refused the pose.
 struct TruthValue
 {
     double weighted   = harness_nan;
@@ -427,19 +428,21 @@ struct TruthValue
 
 TruthValue ground_truth(const Model &base, const DynamicPrintConfig &config, const AutoTilt::Pose &pose, const AutoTilt::Constants &k)
 {
-    Model        posed = base;
-    ModelObject *obj   = posed.objects.front();
-    const Transform3d root  = obj->instances.front()->get_transformation().get_matrix();
-    const Vec3d       pivot = obj->instance_bounding_box(0).center();
+    Model        posed_model = base;
+    ModelObject *obj         = posed_model.objects.front();
+    const Transform3d   root     = obj->instances.front()->get_transformation().get_matrix();
+    const BoundingBoxf3 root_box = obj->instance_bounding_box(0);
+    const Vec3d         pivot    = root_box.center();
     obj->instances.front()->set_transformation(Geometry::Transformation(AutoTilt::candidate_transform(root, pivot, pose)));
     obj->invalidate_bounding_box();
     obj->ensure_on_bed();
+    const Transform3d posed = obj->instances.front()->get_transformation().get_matrix();
 
     TruthValue    t;
     Slic3r::Print print;
     print.set_status_silent();
     try {
-        print.apply(posed, config);
+        print.apply(posed_model, config);
         print.process();
     } catch (const std::exception &) {
         // Print::validate rejects some poses outright (exclusion areas, off-bed); the plan says to
@@ -455,16 +458,22 @@ TruthValue ground_truth(const Model &base, const DynamicPrintConfig &config, con
     for (const SupportLayer *sl : po->support_layers()) {
         if (sl->print_z <= first_z + EPSILON)
             continue; // plate contact, not object contact
-        for (const ExPolygons *areas : { &sl->tree_roof_areas(), &sl->tree_roof_1st_layer() })
-            for (const ExPolygon &p : *areas) {
-                const double a = p.area() * SCALING_FACTOR * SCALING_FACTOR;
-                double       perimeter_scaled = p.contour.length();
-                for (const Polygon &hole : p.holes)
-                    perimeter_scaled += hole.length();
-                const double perimeter = unscale<double>(perimeter_scaled);
-                unweighted += a * k.h_ref_mm;
-                weighted += AutoTilt::fragility_weight(a, perimeter, false, k) * a * k.h_ref_mm;
-            }
+        for (const ExPolygon &p : sl->tree_roof_gap_areas()) {
+            // The same exclusion plane the scorer applies, read off the `k` the harness was handed.
+            // A zero-area polygon adds 0 either way, and centroid() returns an integer Point, so the
+            // fraction is finite, as in the scorer.
+            const Vec3d centroid_world =
+                to_3d(unscale(p.contour.centroid()) + unscale(po->instances().front().shift), sl->print_z);
+            if (AutoTilt::root_height_fraction(root, posed, root_box, centroid_world) < k.bottom_exclusion_fraction)
+                continue;
+            const double a = p.area() * SCALING_FACTOR * SCALING_FACTOR;
+            double       perimeter_scaled = p.contour.length();
+            for (const Polygon &hole : p.holes)
+                perimeter_scaled += hole.length();
+            const double perimeter = unscale<double>(perimeter_scaled);
+            unweighted += a * k.h_ref_mm;
+            weighted += AutoTilt::fragility_weight(a, perimeter, false, k) * a * k.h_ref_mm;
+        }
     }
     t.weighted   = weighted;
     t.unweighted = unweighted;
@@ -573,7 +582,9 @@ Column sweep(AutoTilt::ContactScorer &scorer, const std::vector<AutoTilt::Pose> 
     return col;
 }
 
-// (truth[chosen] - truth_min) / max(truth_min, 1e-9), over the poses whose ground truth landed.
+// (truth[chosen] - truth_min) / truth_min, over the poses whose ground truth landed. When the best
+// pose leaves no contact at all, any contact the search settled for is infinitely worse in relative
+// terms, so say so rather than scaling the gap by an arbitrary epsilon. nan means unmeasured.
 double regret_of(const std::vector<double> &truth, const std::vector<char> &truth_ok, size_t chosen)
 {
     double truth_min = std::numeric_limits<double>::infinity();
@@ -582,7 +593,9 @@ double regret_of(const std::vector<double> &truth, const std::vector<char> &trut
             truth_min = std::min(truth_min, truth[i]);
     if (! truth_ok[chosen] || ! std::isfinite(truth_min))
         return harness_nan;
-    return (truth[chosen] - truth_min) / std::max(truth_min, 1e-9);
+    if (truth_min > 0)
+        return (truth[chosen] - truth_min) / truth_min;
+    return truth[chosen] == 0 ? 0. : std::numeric_limits<double>::infinity();
 }
 
 std::string pose_text(const AutoTilt::Pose &p)
@@ -608,19 +621,25 @@ void run_harness_model(size_t index, const std::string &stem, const Model &base,
     const Column col_plain  = sweep(plain, poses, k);
     const Column col_shadow = sweep(shadow, poses, k);
 
+    // roof_gap_areas is the gap the generator leaves between a contact tip and the object, so a
+    // config that prints the tips straight onto the object files none of it: there is no truth to
+    // measure, and 63 full Print::process() passes would only produce zeros. Score, report, say so.
+    const bool truth_available = config.opt_float("support_top_z_distance") > 0.;
+
     std::vector<double> truth_w(n, harness_nan), truth_u(n, harness_nan);
     std::vector<char>   truth_ok(n, 0);
     size_t              measured = 0;
-    for (size_t i = 0; i < n; ++ i) {
-        const TruthValue t = ground_truth(base, config, poses[i], k);
-        truth_w[i]         = t.weighted;
-        truth_u[i]         = t.unweighted;
-        truth_ok[i]        = t.ok ? 1 : 0;
-        if (t.ok)
-            ++ measured;
-        else
-            std::cout << "model " << index << " " << stem << " pose " << pose_text(poses[i]) << " skipped" << std::endl;
-    }
+    if (truth_available)
+        for (size_t i = 0; i < n; ++ i) {
+            const TruthValue t = ground_truth(base, config, poses[i], k);
+            truth_w[i]         = t.weighted;
+            truth_u[i]         = t.unweighted;
+            truth_ok[i]        = t.ok ? 1 : 0;
+            if (t.ok)
+                ++ measured;
+            else
+                std::cout << "model " << index << " " << stem << " pose " << pose_text(poses[i]) << " skipped" << std::endl;
+        }
 
     if (! corpus_dir.empty()) {
         const std::filesystem::path csv_path = std::filesystem::path(corpus_dir) / (stem + ".autotilt.csv");
@@ -660,10 +679,10 @@ void run_harness_model(size_t index, const std::string &stem, const Model &base,
         }
     }
 
-    const double regret_plain  = regret_of(truth_w, truth_ok, col_plain.chosen);
-    const double regret_shadow = regret_of(truth_w, truth_ok, col_shadow.chosen);
-    const double rho_plain     = spearman(sc_plain, tr_plain);
-    const double rho_shadow    = spearman(sc_shadow, tr_shadow);
+    const double regret_plain  = truth_available ? regret_of(truth_w, truth_ok, col_plain.chosen) : harness_nan;
+    const double regret_shadow = truth_available ? regret_of(truth_w, truth_ok, col_shadow.chosen) : harness_nan;
+    const double rho_plain     = truth_available ? spearman(sc_plain, tr_plain) : harness_nan;
+    const double rho_shadow    = truth_available ? spearman(sc_shadow, tr_shadow) : harness_nan;
     // The root is pose 0 of the grid. A false move is the search leaving a root that was already best.
     const bool false_move = truth_ok[0] && truth_w[0] <= truth_min &&
                             (col_plain.result.outcome == AutoTilt::SearchResult::Outcome::Improved);
@@ -679,21 +698,25 @@ void run_harness_model(size_t index, const std::string &stem, const Model &base,
               << " poses_with_truth=" << measured << "/" << n
               << " chosen_plain=" << pose_text(poses[col_plain.chosen])
               << " chosen_shadow=" << pose_text(poses[col_shadow.chosen])
+              << (truth_available ? "" : " truth_unavailable=support_top_z_distance_0")
               << std::endl;
 
-    REQUIRE(measured > 0);
+    if (truth_available)
+        REQUIRE(measured > 0);
     if (truth_ok[col_plain.chosen]) {
-        REQUIRE(std::isfinite(regret_plain));
+        REQUIRE(! std::isnan(regret_plain));
         REQUIRE(regret_plain >= 0.);
     }
     if (truth_ok[col_shadow.chosen]) {
-        REQUIRE(std::isfinite(regret_shadow));
+        REQUIRE(! std::isnan(regret_shadow));
         REQUIRE(regret_shadow >= 0.);
     }
-    REQUIRE(rho_plain >= -1.);
-    REQUIRE(rho_plain <= 1.);
-    REQUIRE(rho_shadow >= -1.);
-    REQUIRE(rho_shadow <= 1.);
+    if (truth_available) {
+        REQUIRE(rho_plain >= -1.);
+        REQUIRE(rho_plain <= 1.);
+        REQUIRE(rho_shadow >= -1.);
+        REQUIRE(rho_shadow <= 1.);
+    }
 
     // Below 0.12 mm the search slices coarser than the print does, so the winner has to be shown to
     // survive dropping the search height onto the print height.
@@ -733,10 +756,10 @@ std::vector<std::filesystem::path> corpus_files(const std::string &dir)
 
 // The config a corpus model is both scored and ground-truthed under: whatever the file carries, over
 // the fixture's defaults (an .stl carries nothing), with only what ground truth needs forced back in.
-// Ground truth reads roof_areas off the tree generator, so a file that turned supports off, picked a
-// normal support type, or left the organic style (which never fills roof_areas) would make both the
-// truth and the scorer return nothing; each of those three is forced only when the loaded value
-// cannot produce roof areas, so a legacy tree style the file already chose is left alone.
+// Ground truth reads roof_gap_areas off the tree generator, so a file that turned supports off,
+// picked a normal support type, or left the organic style (which never fills roof_gap_areas) would
+// make both the truth and the scorer return nothing; each of those three is forced only when the
+// loaded value cannot produce roof areas, so a legacy tree style the file already chose is left alone.
 DynamicPrintConfig corpus_config(const DynamicPrintConfig &loaded)
 {
     DynamicPrintConfig config = fixture_config();
@@ -773,7 +796,7 @@ TEST_CASE("Auto-tilt validation harness over a corpus", "[AutoTilt][.]")
     const std::string corpus_dir = env != nullptr ? std::string(env) : std::string();
 
     // Model 0 is always the built-in fin fixture, under a legacy tree style: the organic generator
-    // never fills roof_areas, so ground truth would be identically zero under the default style.
+    // never fills roof_gap_areas, so ground truth would be identically zero under the default style.
     const Model model0 = Slic3r::Test::model("fin_fixture", fin_fixture());
     run_harness_model(0, "fin_fixture", model0, fixture_config({ { "support_style", "tree_slim" } }), corpus_dir, k);
 

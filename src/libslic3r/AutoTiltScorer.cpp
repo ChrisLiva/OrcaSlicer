@@ -84,8 +84,8 @@ Contact ContactScorer::score(const Pose &pose)
                                     (! layer->cantilevers.empty() && overlaps(layer->cantilevers, p));
 
             // Contact low on the object in its root pose is what the exclusion plane drops. A
-            // degenerate contour makes centroid() divide by zero and the fraction non-finite, and
-            // `NaN < x` is false, so such a polygon is charged exactly as it is with the plane off.
+            // degenerate contour needs no special case: centroid() returns an integer Point, so the
+            // fraction is finite, and a zero-area polygon adds 0 to both sums either way.
             const Vec3d centroid_world =
                 to_3d(unscale(p.contour.centroid()) + unscale(po->instances().front().shift), layer->print_z);
             const double fraction = root_height_fraction(m_root, posed, m_root_box, centroid_world);
