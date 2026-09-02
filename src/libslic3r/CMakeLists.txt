@@ -76,6 +76,8 @@ set(lisbslic3r_sources
     Arrange.hpp
     AutoTilt.cpp
     AutoTilt.hpp
+    AutoTiltScorer.cpp
+    AutoTiltScorer.hpp
     BlacklistedLibraryCheck.cpp
     BlacklistedLibraryCheck.hpp
     BoundingBox.cpp
