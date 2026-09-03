@@ -3156,7 +3156,10 @@ void TreeSupport::drop_nodes()
                     }
                     if (i_node->child) {
                         i_node->child->parent = i_node->parent;
-                        i_node->child->parents.erase(std::find(i_node->child->parents.begin(), i_node->child->parents.end(), i_node));
+                        // A node reachable from two enqueued leaves is walked twice, and the second walk finds its link already removed.
+                        auto it = std::find(i_node->child->parents.begin(), i_node->child->parents.end(), i_node);
+                        if (it != i_node->child->parents.end())
+                            i_node->child->parents.erase(it);
                         append(i_node->child->parents, i_node->parents);
                     }
                     i_node->is_processed = true;  // mark to be deleted later
