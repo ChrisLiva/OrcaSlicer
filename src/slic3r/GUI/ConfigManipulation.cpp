@@ -927,7 +927,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
         "support_interface_pattern", "support_interface_top_layers", "support_interface_bottom_layers",
         "bridge_no_support", "max_bridge_length", "support_top_z_distance", "support_bottom_z_distance",
         "support_type", "support_on_build_plate_only", "support_critical_regions_only", "support_interface_not_for_body",
-        "support_object_xy_distance", "support_object_first_layer_gap", "independent_support_layer_height"})
+        "support_object_xy_distance", "support_object_first_layer_gap", "independent_support_layer_height",
+        "support_miniature_contacts", "support_contact_min_distance"})
         toggle_field(el, have_support_material);
     toggle_field("support_threshold_angle", have_support_material && is_auto(support_type));
     toggle_field("support_threshold_overlap", config->opt_int("support_threshold_angle") == 0 && have_support_material && is_auto(support_type));
@@ -954,6 +955,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
     toggle_line("max_bridge_length", support_is_tree);
     toggle_line("bridge_no_support", !support_is_tree);
     toggle_line("support_critical_regions_only", is_auto(support_type) && support_is_tree);
+    toggle_line("support_miniature_contacts", is_auto(support_type) && support_is_normal_tree);
+    toggle_line("support_contact_min_distance", is_auto(support_type) && support_is_normal_tree);
+    toggle_field("support_contact_min_distance", have_support_material && config->opt_bool("support_miniature_contacts"));
 
     for (auto el : { "support_interface_filament",
         "support_interface_loop_pattern", "support_bottom_interface_spacing" })
