@@ -46,6 +46,7 @@ ctest --test-dir ./tests/fff_print
 - `#pragma once` for headers. Smart pointers and RAII preferred
 - Parallelization via TBB — be mindful of shared state
 - Always use `SetSizerAndFit(sizer)` instead of `SetSizer(sizer)` on top level window. Unless `SetSizer` must be called before the full layout is built, call `sizer->SetSizeHints(window)` afterwards in this case.
+- In code comments, cite another site by its symbol or by quoting the statement, never by `file:line`: every insertion above a cited line moves it, and a `TreeSupport.cpp:3530`-style citation pointed at unrelated code three commits after it was written.
 
 ## Key Entry Points
 
