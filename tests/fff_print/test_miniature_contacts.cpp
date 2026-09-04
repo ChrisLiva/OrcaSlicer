@@ -181,3 +181,151 @@ TEST_CASE("Miniature contacts keep a long thin overhang lip that the small-overh
     const auto off_no_cull = lip_overhangs({ { "support_miniature_contacts", "0" }, { "support_remove_small_overhang", "0" } });
     REQUIRE(off_no_cull.size() == 1);
 }
+
+TEST_CASE("decimate_contact_nodes honours pinning, identity, the strict bound and a non-positive distance", "[MiniatureContacts]")
+{
+    // The nodes live in a deque so their addresses stay put: decimation erases pointers from the
+    // per-layer vectors and never touches the nodes themselves.
+    std::deque<SupportNode>                pool;
+    std::vector<std::vector<SupportNode*>> nodes(2);
+    auto add = [&](size_t layer, double x_mm, double y_mm, double z_mm, double radius, bool pinned) -> SupportNode* {
+        pool.emplace_back();
+        SupportNode *n = &pool.back();
+        n->position    = Point(scale_(x_mm), scale_(y_mm));
+        n->print_z     = z_mm;
+        n->radius      = radius;
+        n->is_pinned   = pinned;
+        nodes[layer].push_back(n);
+        return n;
+    };
+
+    // Layer 0, in push order: A B C D E G G H, all on the x axis at z 0.
+    SupportNode *A = add(0, 0.0, 0., 0., 0.6, false);
+                     add(0, 0.5, 0., 0., 0.5, false); // B, 0.5 mm from the larger-radius A
+    SupportNode *C = add(0, 3.0, 0., 0., 0.4, false);
+    SupportNode *D = add(0, 3.5, 0., 0., 0.4, true);  // pinned: kept, and suppresses nobody
+    SupportNode *E = add(0, 6.0, 0., 0., 0.4, false);
+    SupportNode *G = add(0, 9.0, 0., 0., 0.4, false);
+    nodes[0].push_back(G);                            // the same pointer listed twice, as the Hybrid
+                                                      // big-overhang path does (TreeSupport.cpp:3523, :3544)
+                     add(0, 9.5, 0., 0., 0.4, false); // H, 0.5 mm from G
+    // Layer 1: F sits exactly 1.0 mm above E.
+    SupportNode *F = add(1, 6.0, 0., 1.0, 0.4, false);
+
+    const std::vector<std::vector<SupportNode*>> original = nodes;
+    // B falls to the larger-radius A at 0.5 mm; C keeps its place because its only neighbour inside
+    // 1.0 mm is the pinned D; D is pinned; G's second entry survives because a node never suppresses
+    // itself; H falls to G at 0.5 mm.
+    const std::vector<SupportNode*> expected0{ A, C, D, E, G, G };
+    // E and F are exactly 1.0 mm apart and the bound is strict, so both survive.
+    const std::vector<SupportNode*> expected1{ F };
+
+    decimate_contact_nodes(nodes, 1.0);
+    REQUIRE(nodes.size() == 2);
+    REQUIRE(nodes[0] == expected0);
+    REQUIRE(nodes[1] == expected1);
+
+    // Idempotent: a second pass over the survivors changes nothing.
+    decimate_contact_nodes(nodes, 1.0);
+    REQUIRE(nodes[0] == expected0);
+    REQUIRE(nodes[1] == expected1);
+
+    // A non-positive distance is a no-op, on the untouched input.
+    std::vector<std::vector<SupportNode*>> copy = original;
+    decimate_contact_nodes(copy, 0.);
+    REQUIRE(copy == original);
+    decimate_contact_nodes(copy, -1.);
+    REQUIRE(copy == original);
+    REQUIRE(copy[0].size() == 8);
+}
+
+TEST_CASE("decimate_contact_nodes keeps the same survivors as a brute-force reference over a total order", "[MiniatureContacts]")
+{
+    for (int seed = 0; seed < 10; ++ seed) {
+        INFO("seed " << seed);
+        std::mt19937                           rng(0x5EED + seed); // fixed seed: the run is deterministic
+        std::uniform_int_distribution<coord_t> dist_xy(0, scale_(20.));
+        std::uniform_int_distribution<int>     dist_k(0, 49);
+        std::uniform_int_distribution<int>     dist_r(0, 2);
+        std::uniform_int_distribution<int>     dist_pin(0, 19);
+
+        // k runs 0..49 and layer = k / 5, so the 500 nodes address exactly these 10 layers and
+        // REQUIRE(actual.size() == 10) asserts the outer vector kept its size.
+        std::deque<SupportNode>                pool;
+        std::vector<std::vector<SupportNode*>> input(10);
+        for (int i = 0; i < 500; ++ i) {
+            pool.emplace_back();
+            SupportNode *n = &pool.back();
+            n->position    = Point(dist_xy(rng), dist_xy(rng));
+            const int k    = dist_k(rng);
+            n->print_z     = 0.2 * k;
+            n->radius      = 0.4 + 0.1 * dist_r(rng);
+            n->is_pinned   = dist_pin(rng) == 0;
+            input[k / 5].push_back(n);
+        }
+
+        // The reference: the same total order, then an O(n^2) sweep keeping every survivor as a
+        // blocker. A pinned node is kept and never becomes a blocker.
+        struct Ref { size_t layer; size_t index; SupportNode *node; };
+        std::vector<Ref> refs;
+        for (size_t layer = 0; layer < input.size(); ++ layer)
+            for (size_t index = 0; index < input[layer].size(); ++ index)
+                refs.push_back({ layer, index, input[layer][index] });
+        std::stable_sort(refs.begin(), refs.end(), [](const Ref &a, const Ref &b) {
+            if (a.node->radius != b.node->radius)
+                return a.node->radius > b.node->radius;
+            if (a.node->print_z != b.node->print_z)
+                return a.node->print_z < b.node->print_z;
+            if (a.layer != b.layer)
+                return a.layer < b.layer;
+            return a.node->position < b.node->position;
+        });
+
+        std::vector<std::vector<bool>> keep(input.size());
+        for (size_t layer = 0; layer < input.size(); ++ layer)
+            keep[layer].assign(input[layer].size(), false);
+        std::vector<const SupportNode*> blockers;
+        for (const Ref &r : refs) {
+            if (r.node->is_pinned) {
+                keep[r.layer][r.index] = true;
+                continue;
+            }
+            bool dropped = false;
+            for (const SupportNode *b : blockers) {
+                if (b == r.node)
+                    continue;
+                const double dx = unscale<double>(b->position.x() - r.node->position.x());
+                const double dy = unscale<double>(b->position.y() - r.node->position.y());
+                const double dz = b->print_z - r.node->print_z;
+                if (sqr(dx) + sqr(dy) + sqr(dz) < 1.0) {
+                    dropped = true;
+                    break;
+                }
+            }
+            if (dropped)
+                continue;
+            keep[r.layer][r.index] = true;
+            blockers.push_back(r.node);
+        }
+
+        std::vector<std::vector<SupportNode*>> expected(input.size());
+        size_t                                 total_survivors = 0;
+        for (size_t layer = 0; layer < input.size(); ++ layer)
+            for (size_t index = 0; index < input[layer].size(); ++ index)
+                if (keep[layer][index]) {
+                    expected[layer].push_back(input[layer][index]);
+                    ++ total_survivors;
+                }
+
+        std::vector<std::vector<SupportNode*>> actual = input;
+        decimate_contact_nodes(actual, 1.0);
+        REQUIRE(actual.size() == 10);
+        for (size_t layer = 0; layer < expected.size(); ++ layer) {
+            INFO("layer " << layer);
+            REQUIRE(actual[layer] == expected[layer]);
+        }
+        // 500 nodes in a 20 x 20 x 10 mm box make 124,750 pairs, each within 1.0 mm with probability
+        // about 0.001: some pair collides in every run, so decimation always removes something.
+        REQUIRE(total_survivors < 500);
+    }
+}

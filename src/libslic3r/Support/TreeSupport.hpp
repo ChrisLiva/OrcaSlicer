@@ -123,6 +123,7 @@ struct SupportNode
     bool           is_processed    = false;
     bool           need_extra_wall = false;
     bool           is_sharp_tail   = false;
+    bool           is_pinned       = false; // user-asked contact (enforcer, Hybrid big overhang): decimation keeps it and it suppresses nobody
     bool           valid = true;
     ExPolygon      overhang; // when type==ePolygon, set this value to get original overhang area
 
@@ -533,6 +534,17 @@ private:
         const coordf_t       gap_extra_below,
         const coordf_t       gap_xy);
 };
+
+// Collapses contact nodes lying within min_distance_mm of a stronger neighbour in 3D, where
+// the distance is hypot(unscale(dx), unscale(dy), dz) and dz is the print_z difference in mm.
+// Serial and thread-count independent: the surviving set depends only on the input.
+// Nodes with is_pinned set are always kept and never suppress a neighbour.
+// Suppressed pointers are erased from the per-layer vectors and nothing is deleted: the nodes
+// stay owned by TreeSupportData::contact_nodes (TreeSupport.hpp:249). The outer vector keeps
+// its size and its layer_nr - 1 indexing; a layer may be left empty.
+// A non-positive min_distance_mm is a no-op.
+void decimate_contact_nodes(std::vector<std::vector<SupportNode*>> &contact_nodes,
+                            coordf_t min_distance_mm);
 
 }
 

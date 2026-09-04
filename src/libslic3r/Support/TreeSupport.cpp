@@ -1733,6 +1733,91 @@ void TreeSupport::move_bounds_to_contact_nodes(std::vector<TreeSupport3D::Suppor
     }
 }
 
+void decimate_contact_nodes(std::vector<std::vector<SupportNode*>> &contact_nodes, coordf_t min_distance_mm)
+{
+    if (min_distance_mm <= 0.)
+        return;
+
+    const double d2 = sqr(double(min_distance_mm));
+
+    struct NodeRef { size_t layer; size_t index; SupportNode *node; };
+    size_t total = 0;
+    for (const std::vector<SupportNode*> &inner : contact_nodes)
+        total += inner.size();
+    std::vector<NodeRef> refs;
+    refs.reserve(total);
+    for (size_t layer = 0; layer < contact_nodes.size(); ++ layer)
+        for (size_t index = 0; index < contact_nodes[layer].size(); ++ index)
+            refs.push_back({ layer, index, contact_nodes[layer][index] });
+
+    // A total order over the input: the thickest node wins, and every tie falls through to print_z,
+    // layer and position, so the surviving set depends only on the input, never on which thread or
+    // in which order the nodes were produced.
+    std::stable_sort(refs.begin(), refs.end(), [](const NodeRef &a, const NodeRef &b) {
+        if (a.node->radius != b.node->radius)
+            return a.node->radius > b.node->radius;
+        if (a.node->print_z != b.node->print_z)
+            return a.node->print_z < b.node->print_z;
+        if (a.layer != b.layer)
+            return a.layer < b.layer;
+        return a.node->position < b.node->position;
+    });
+
+    // Survivors indexed by a cell of min_distance_mm side, so a conflict can only sit in the 9 cells
+    // around a node's own. PointHash is the cell hash generate_contact_points already uses (:3494).
+    auto cell_of = [min_distance_mm](const Point &p) {
+        return Point(coord_t(std::floor(unscale<double>(p.x()) / min_distance_mm)),
+                     coord_t(std::floor(unscale<double>(p.y()) / min_distance_mm)));
+    };
+    std::unordered_map<Point, std::vector<SupportNode*>, PointHash> kept;
+
+    std::vector<std::vector<bool>> suppressed(contact_nodes.size());
+    for (size_t layer = 0; layer < contact_nodes.size(); ++ layer)
+        suppressed[layer].assign(contact_nodes[layer].size(), false);
+
+    for (const NodeRef &ref : refs) {
+        if (ref.node->is_pinned)
+            continue; // a user-asked contact is kept and stays out of the grid: it suppresses nobody
+        const Point cell     = cell_of(ref.node->position);
+        bool        conflict = false;
+        for (coord_t dx = -1; dx <= 1 && ! conflict; ++ dx)
+            for (coord_t dy = -1; dy <= 1 && ! conflict; ++ dy) {
+                auto it = kept.find(Point(cell.x() + dx, cell.y() + dy));
+                if (it == kept.end())
+                    continue;
+                for (const SupportNode *k : it->second) {
+                    if (k == ref.node)
+                        continue; // identity is pointer equality: a node listed twice never suppresses itself
+                    const double ddx = unscale<double>(k->position.x() - ref.node->position.x());
+                    const double ddy = unscale<double>(k->position.y() - ref.node->position.y());
+                    const double ddz = k->print_z - ref.node->print_z;
+                    if (sqr(ddx) + sqr(ddy) + sqr(ddz) < d2) {
+                        conflict = true;
+                        break;
+                    }
+                }
+            }
+        if (conflict) {
+            suppressed[ref.layer][ref.index] = true;
+        } else {
+            std::vector<SupportNode*> &column = kept[cell];
+            if (std::find(column.begin(), column.end(), ref.node) == column.end())
+                column.push_back(ref.node);
+        }
+    }
+
+    // Erase the suppressed pointers in place: the outer vector keeps its size and the survivors keep
+    // their input order.
+    for (size_t layer = 0; layer < contact_nodes.size(); ++ layer) {
+        std::vector<SupportNode*> &inner = contact_nodes[layer];
+        size_t                     out   = 0;
+        for (size_t index = 0; index < inner.size(); ++ index)
+            if (! suppressed[layer][index])
+                inner[out ++] = inner[index];
+        inner.resize(out);
+    }
+}
+
 void TreeSupport::generate()
 {
     if (!is_tree(m_object_config->support_type.value)) return;
