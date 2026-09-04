@@ -2,7 +2,9 @@
 
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Layer.hpp"
+#include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Support/TreeSupport.hpp"
 #include "libslic3r/Utils.hpp"
 
@@ -18,6 +20,7 @@
 #include <iostream>
 #include <memory>
 #include <random>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -120,6 +123,55 @@ std::vector<std::pair<double, BoundingBox>> lip_overhangs(std::initializer_list<
             bands.emplace_back(layer->print_z, get_extents(expoly));
     }
     return bands;
+}
+
+// Measures one model both ways for the corpus harness (hidden, see the TEST_CASE at the bottom of
+// this file): runs `run` with the mode off and then on, prints one line per mode, and writes
+// `<stem>.miniature.csv` beside the corpus when `corpus_dir` is set.
+void report(size_t index, const std::string &stem, const std::string &corpus_dir,
+            const std::function<ContactClusters(bool mode_on)> &run)
+{
+    const ContactClusters off = run(false);
+    const ContactClusters on  = run(true);
+
+    // areas_mm2 is sorted ascending, so both read straight off it. An empty set has no area at all.
+    const auto median = [](const std::vector<double> &a) {
+        const size_t n = a.size();
+        return n == 0 ? 0. : (n % 2 ? a[n / 2] : 0.5 * (a[n / 2 - 1] + a[n / 2]));
+    };
+    const auto p90 = [](const std::vector<double> &a) {
+        const size_t n = a.size();
+        return n == 0 ? 0. : a[(n - 1) * 9 / 10];
+    };
+
+    const std::pair<const char *, const ContactClusters *> modes[2] = { { "off", &off }, { "on", &on } };
+    std::cout << std::setprecision(6);
+    for (const auto &mode : modes)
+        std::cout << "model " << index << " " << stem << " mode=" << mode.first
+                  << " clusters=" << mode.second->count()
+                  << " area_median=" << median(mode.second->areas_mm2)
+                  << " area_p90=" << p90(mode.second->areas_mm2)
+                  << " area_total=" << mode.second->total_mm2 << std::endl;
+
+    if (corpus_dir.empty())
+        return;
+
+    const std::filesystem::path csv_path = std::filesystem::path(corpus_dir) / (stem + ".miniature.csv");
+    std::ofstream               csv(csv_path.string());
+    csv << std::setprecision(12);
+    csv << "model,stem,mode,clusters,area_median_mm2,area_p90_mm2,area_total_mm2\n";
+    for (const auto &mode : modes)
+        csv << index << "," << stem << "," << mode.first << "," << mode.second->count() << ","
+            << median(mode.second->areas_mm2) << "," << p90(mode.second->areas_mm2) << ","
+            << mode.second->total_mm2 << "\n";
+    csv.close();
+
+    // Read the file back: a header and one row per mode, or the disk took less than was written.
+    size_t        lines = 0;
+    std::ifstream back(csv_path.string());
+    for (std::string line; std::getline(back, line); )
+        ++ lines;
+    REQUIRE(lines == 3);
 }
 
 } // namespace
@@ -348,5 +400,100 @@ TEST_CASE("decimate_contact_nodes keeps the same survivors as a brute-force refe
         // 500 nodes in a 20 x 20 x 10 mm box make 124,750 pairs, each within 1.0 mm with probability
         // about 0.001: some pair collides in every run, so decimation always removes something.
         REQUIRE(total_survivors < 500);
+    }
+}
+
+// Hidden ([.]): one corpus model costs two full Print::process() passes on a miniature at fine
+// layers, minutes each, and the corpus it reads lives outside the repo under
+// $ORCA_MINIATURE_CORPUS (tests/AGENTS.md:44). It measures how far decimation thins the contact
+// set, model by model; it does not pin it.
+TEST_CASE("Miniature contact decimation over a corpus", "[MiniatureContacts][.]")
+{
+    // Model::get_backup_path() builds from temporary_dir(), which is "" in a test process, so each
+    // 3mf load logs two "Failed to create backup path /orcaslicer_model/...: Read-only file system"
+    // errors that read like a failure but are caught and non-fatal. Point it at the OS temp dir the
+    // way the app does at src/OrcaSlicer.cpp:1330.
+    Slic3r::set_temporary_dir(std::filesystem::temp_directory_path().string());
+
+    const char       *env        = std::getenv("ORCA_MINIATURE_CORPUS");
+    const std::string corpus_dir = env != nullptr ? std::string(env) : std::string();
+
+    // Model 0 is always the built-in fin fixture, under the same two settings the pinning test
+    // spells out: the organic generator never fills roof_gap_areas, and at a zero top gap the tips
+    // land outside them, so either default would measure zero both ways.
+    report(0, "fin_fixture", corpus_dir, [&](bool on) {
+        Slic3r::Print print;
+        init_and_process_print({ fin_fixture() }, print,
+            fixture_config({ { "support_style", "tree_slim" }, { "support_top_z_distance", "0.2" },
+                             { "support_miniature_contacts", on ? "1" : "0" } }));
+        return contact_clusters(*print.objects().front());
+    });
+
+    if (corpus_dir.empty()) {
+        std::cout << "corpus dir not set, model 0 only" << std::endl;
+        return;
+    }
+
+    size_t index = 1;
+    for (const std::filesystem::path &path : corpus_files(corpus_dir)) {
+        const std::string      stem = path.stem().string();
+        DynamicPrintConfig     loaded;
+        std::unique_ptr<Model> model;
+        try {
+            // The 3mf importer creates no object without LoadModel and reads no config without
+            // LoadConfig (Format/bbs_3mf.cpp:1419, :1422), so the default strategy hands back an
+            // empty model; load the way the CLI does (src/OrcaSlicer.cpp:1648).
+            model.reset(new Model(Model::read_from_file(path.string(), &loaded, nullptr,
+                LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances)));
+        } catch (const std::exception &e) {
+            std::cout << "model " << index << " " << stem << " skipped: " << e.what() << std::endl;
+            ++ index;
+            continue;
+        }
+        if (model->objects.empty()) {
+            std::cout << "model " << index << " " << stem << " skipped: no printable instance" << std::endl;
+            ++ index;
+            continue;
+        }
+        // corpus_config leaves a Strong or Hybrid style the file chose alone and forces tree_slim
+        // only over default or organic. support_contact_min_distance stays at whatever the loaded
+        // config carries, which is 1.0 for any file saved before this key existed.
+        const DynamicPrintConfig config = corpus_config(fixture_config({ { "support_style", "tree_slim" },
+            { "support_top_z_distance", "0.2" } }), loaded);
+        // roof_gap_areas is the gap the generator leaves between a contact tip and the object, so a
+        // config that prints the tips straight onto the object files none of it: both modes would
+        // measure an empty set, whatever decimation did.
+        if (config.opt_float("support_top_z_distance") <= 0.) {
+            std::cout << "model " << index << " " << stem
+                      << " skipped: support_top_z_distance is 0, roof_gap_areas would be empty" << std::endl;
+            continue;
+        }
+        // One harness model per object: the print measured has to hold exactly the one object, and
+        // its single instance is centred on the bed and dropped onto it before slicing.
+        for (const ModelObject *src : model->objects) {
+            const std::string obj_stem = corpus_stem(path, model->objects.size(), src->name);
+            if (src->instances.empty()) {
+                std::cout << "model " << index << " " << obj_stem << " skipped: no printable instance" << std::endl;
+                ++ index;
+                continue;
+            }
+            Model        one;
+            ModelObject *obj = one.add_object(*src);
+            while (obj->instances.size() > 1)
+                obj->delete_last_instance();
+            one.center_instances_around_point(unscale(BoundingBox(get_bed_shape(config)).center()));
+            obj->ensure_on_bed();
+
+            report(index, obj_stem, corpus_dir, [&](bool on) {
+                DynamicPrintConfig mode_config = config;
+                mode_config.set_deserialize_strict({ { "support_miniature_contacts", on ? "1" : "0" } });
+                Slic3r::Print print;
+                print.set_status_silent();
+                print.apply(one, mode_config);
+                print.process();
+                return contact_clusters(*print.objects().front());
+            });
+            ++ index;
+        }
     }
 }
