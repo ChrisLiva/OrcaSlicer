@@ -438,11 +438,15 @@ private:
     coordf_t base_radius                        = 0.0;
     const coordf_t MAX_BRANCH_RADIUS = 10.0;
     const coordf_t MIN_BRANCH_RADIUS = 0.4;
+    coordf_t contact_radius_floor = MIN_BRANCH_RADIUS; // lower bound of a contact's radius at placement; the branch floor above stays the branch floor
     const coordf_t MAX_BRANCH_RADIUS_FIRST_LAYER = 12.0;
     const coordf_t MIN_BRANCH_RADIUS_FIRST_LAYER = 2.0;
     double diameter_angle_scale_factor = tan(5.0*M_PI/180.0);
     // minimum roof area (1 mm^2), area smaller than this value will not have interface
-    const double minimum_roof_area{SQ(scaled<double>(1.))};
+    double minimum_roof_area{SQ(scaled<double>(1.))};
+    // Dilation applied to enforced overhangs so support tips land on them (STUDIO-7538).
+    // FIXME this is a fudge constant! 0.8 mm was the support tree tip diameter it was tuned on.
+    double enforcer_overhang_offset = scaled<double>(0.8);
     float        top_z_distance = 0.0;
 
     bool  is_strong = false;

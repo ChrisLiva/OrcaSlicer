@@ -652,6 +652,14 @@ TreeSupport::TreeSupport(PrintObject& object, const SlicingParameters &slicing_p
     is_strong = is_tree(support_type) && m_support_params.support_style == smsTreeStrong;
     base_radius                              = std::max(MIN_BRANCH_RADIUS, m_object_config->tree_support_branch_diameter.value / 2);
     miniature_contacts                       = m_object_config->support_miniature_contacts.value;
+    if (miniature_contacts) {
+        // All three scale with the support line width SupportParameters resolved (SupportParameters.hpp:183-185),
+        // never the raw support_line_width option, whose default is an absolute 0.
+        const coordf_t w         = m_support_params.support_extrusion_width;
+        contact_radius_floor     = w;
+        minimum_roof_area        = SQ(scaled<double>(2.38 * w)); // 0.42 * 2.38 = 1.0: today's 1 mm2 at the width it was tuned on
+        enforcer_overhang_offset = scaled<double>(2. * w);
+    }
     // by default tree support needs no infill, unless it's tree hybrid which contains normal nodes.
     with_infill                              = support_pattern != smpNone && support_pattern != smpDefault;
     m_machine_border.contour = get_bed_shape_with_excluded_area(*m_print_config);
@@ -708,9 +716,6 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
     double thresh_angle = config.support_threshold_angle.value > EPSILON ? config.support_threshold_angle.value + 1 : 30;
     thresh_angle = std::min(thresh_angle, 89.); // should be smaller than 90
     const double threshold_rad = Geometry::deg2rad(thresh_angle);
-    // FIXME this is a fudge constant!
-    double support_tree_tip_diameter = 0.8;
-    auto   enforcer_overhang_offset  = scaled<double>(support_tree_tip_diameter);
 
     // for small overhang removal
     struct OverhangCluster {
@@ -3547,7 +3552,7 @@ void TreeSupport::generate_contact_points()
                 for (auto &overhang : overhangs_regular) {
                     bool add_interface = area(overhang) > minimum_roof_area && !is_sharp_tail;
                     BoundingBox overhang_bounds = get_extents(overhang);
-                    double      radius          = std::clamp(unscale_(overhang_bounds.radius()), MIN_BRANCH_RADIUS, base_radius);
+                    double      radius          = std::clamp(unscale_(overhang_bounds.radius()), std::min(contact_radius_floor, base_radius), base_radius);
                     // add supports at corners for both auto and manual overhangs, github #2008
                     auto &points = overhang.contour.points;
                     int   nSize = points.size();
