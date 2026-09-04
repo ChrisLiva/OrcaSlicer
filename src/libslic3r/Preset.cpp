@@ -1122,6 +1122,8 @@ static std::vector<std::string> s_Preset_print_options{
     "support_top_z_distance",
     "support_on_build_plate_only",
     "support_critical_regions_only",
+    "support_miniature_contacts",
+    "support_contact_min_distance",
     "bridge_no_support",
     "thick_bridges",
     "thick_internal_bridges",

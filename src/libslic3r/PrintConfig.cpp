@@ -6780,6 +6780,23 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(true));
 
+    def = this->add("support_miniature_contacts", coBool);
+    def->label    = L("Miniature contacts");
+    def->category = L("Support");
+    def->tooltip  = L("Merge support contact points that sit close together, so cleanup is a few deliberate snaps instead of many slivers. Legacy tree styles only.");
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("support_contact_min_distance", coFloat);
+    def->label    = L("Minimum contact distance");
+    def->category = L("Support");
+    def->tooltip  = L("Support contact points closer together than this in 3D are merged into one.");
+    def->sidetext = L("mm");
+    def->min      = 0;
+    def->max      = 10;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(1.));
+
     // BBS: change type to common float.
     // It may be rounded to mulitple layer height when independent_support_layer_height is false.
     def = this->add("support_top_z_distance", coFloat);
