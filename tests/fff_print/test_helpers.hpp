@@ -8,6 +8,8 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
+#include <filesystem>
+#include <initializer_list>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -67,6 +69,23 @@ inline TriangleMesh cube(double size) { return make_cube(size, size, size); }
 
 // A Model holding one object built from `mesh`.
 Slic3r::Model model(const std::string& model_name, TriangleMesh&& _mesh);
+
+// Tree supports on, threshold 60, 0.4 nozzle, 0.42 line width, 0.2 mm layers; `support_style` is left
+// unset, which SupportParameters resolves to organic, so roof-area tests pass {{"support_style","tree_slim"}}.
+DynamicPrintConfig fixture_config(std::initializer_list<Slic3r::ConfigBase::SetDeserializeItem> extra = {});
+
+// An 8 mm square column carrying an 8 x 1.5 x 44 mm fin leaning 40 deg off vertical.
+TriangleMesh fin_fixture();
+
+// Every .stl and .3mf directly under `dir`, in name order; a missing directory yields nothing.
+std::vector<std::filesystem::path> corpus_files(const std::string &dir);
+
+// The name a corpus object's CSV and log lines carry.
+std::string corpus_stem(const std::filesystem::path &path, size_t object_count, const std::string &object_name);
+
+// `base` overlaid with `loaded`, then support forced on, to a tree type, and to a legacy tree style,
+// each only where the loaded value could not produce roof areas.
+DynamicPrintConfig corpus_config(const DynamicPrintConfig &base, const DynamicPrintConfig &loaded);
 
 // Single-nozzle, `filaments`-filament config from defaults; `extra` is applied last.
 DynamicPrintConfig multifilament_config(unsigned int filaments,

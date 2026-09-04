@@ -37,6 +37,7 @@
 #include "test_helpers.hpp"
 
 using namespace Slic3r;
+using namespace Slic3r::Test;
 using Catch::Matchers::WithinAbs;
 using Catch::Matchers::WithinRel;
 
@@ -46,41 +47,6 @@ namespace {
 AutoTilt::MainThreadRunner inline_runner()
 {
     return [](const std::function<void()> &fn) { fn(); };
-}
-
-// Tree supports on, threshold 60 (so a face counts as an overhang past 29 deg from vertical),
-// 0.2 mm layers. `line_width` is set because it defaults to an absolute 0, which zeroes
-// `extrusion_width_scaled` in TreeSupport::detect_overhangs and kills sharp-tail propagation.
-DynamicPrintConfig fixture_config(std::initializer_list<ConfigBase::SetDeserializeItem> extra = {})
-{
-    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict({
-        { "enable_support",              "1" },
-        { "support_type",                "tree(auto)" },
-        { "support_threshold_angle",     "60" },
-        { "nozzle_diameter",             "0.4" },
-        { "line_width",                  "0.42" },
-        { "layer_height",                "0.2" },
-        { "initial_layer_print_height",  "0.2" },
-        { "support_on_build_plate_only", "0" },
-    });
-    if (extra.size() > 0)
-        config.set_deserialize_strict(extra);
-    return config;
-}
-
-// An 8 mm square column carrying an 8 x 1.5 x 44 mm fin that leans 40 deg off vertical out of the
-// column's y = 0 face near the bottom. At the root pose the fin's underside is 40 deg from vertical,
-// past the detector's 29 deg crossover, so it is an overhang; the column's walls are vertical and are
-// not, and its 8 x 8 base costs little once a tilt lifts it off the plate.
-TriangleMesh fin_fixture()
-{
-    TriangleMesh base = make_cube(8, 8, 20);
-    TriangleMesh fin  = make_cube(8, 1.5, 44);
-    fin.rotate_x(float(Geometry::deg2rad(40.)));
-    fin.translate(0.f, 0.f, 2.f);
-    base.merge(fin);
-    return base;
 }
 
 // Two 4 mm legs 16 mm apart under a 20 x 20 x 3 mm slab. The slab's underside spans the gap as a
@@ -835,65 +801,6 @@ void run_harness_model(size_t index, const std::string &stem, const Model &base,
     }
 }
 
-// Every .stl and .3mf directly under `dir`, in name order, so two runs walk the same models in the
-// same order. A corpus directory that has gone missing yields nothing rather than throwing.
-std::vector<std::filesystem::path> corpus_files(const std::string &dir)
-{
-    std::vector<std::filesystem::path> out;
-    std::error_code                    ec;
-    for (std::filesystem::directory_iterator it(dir, ec), end; ! ec && it != end; it.increment(ec)) {
-        if (! it->is_regular_file(ec))
-            continue;
-        std::string ext = it->path().extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return char(std::tolower(c)); });
-        if (ext == ".stl" || ext == ".3mf")
-            out.push_back(it->path());
-    }
-    std::sort(out.begin(), out.end());
-    return out;
-}
-
-// The name a corpus object's CSV and log lines carry. Slic3r::sanitize_filename (Utils.hpp:279)
-// replaces only /\:*?"<>| and would leave the spaces of an object name like `10_Dark Elves 1.stl`
-// in a path that gets typed on a command line, so this keeps a tighter character class.
-std::string corpus_stem(const std::filesystem::path &path, size_t object_count, const std::string &object_name)
-{
-    const std::string file = path.stem().string();
-    if (object_count == 1)
-        return file;
-    std::string s = object_name;
-    for (char &c : s) {
-        const bool keep = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-                          c == '.' || c == '_' || c == '-';
-        if (! keep)
-            c = '_';
-    }
-    return file + "#" + s;
-}
-
-// The config a corpus model is both scored and ground-truthed under: whatever the file carries, over
-// the fixture's defaults (an .stl carries nothing), with only what ground truth needs forced back in.
-// Ground truth reads roof_gap_areas off the tree generator, so a file that turned supports off,
-// picked a normal support type, or left the organic style (which never fills roof_gap_areas) would
-// make both the truth and the scorer return nothing; each of those three is forced only when the
-// loaded value cannot produce roof areas, so a legacy tree style the file already chose is left alone.
-DynamicPrintConfig corpus_config(const DynamicPrintConfig &loaded)
-{
-    DynamicPrintConfig config = fixture_config();
-    if (! loaded.keys().empty())
-        config.apply(loaded);
-    const auto *enable = config.option<ConfigOptionBool>("enable_support");
-    if (enable == nullptr || ! enable->value)
-        config.set_deserialize_strict({ { "enable_support", "1" } });
-    const auto *type = config.option<ConfigOptionEnum<SupportType>>("support_type");
-    if (type == nullptr || ! is_tree(type->value))
-        config.set_deserialize_strict({ { "support_type", "tree(auto)" } });
-    const auto *style = config.option<ConfigOptionEnum<SupportMaterialStyle>>("support_style");
-    if (style == nullptr || style->value == smsDefault || style->value == smsTreeOrganic)
-        config.set_deserialize_strict({ { "support_style", "tree_slim" } });
-    return config;
-}
-
 } // namespace
 
 TEST_CASE("The auto-tilt corpus stem keeps a one-object file's name and sanitises a multi-object one", "[AutoTilt]")
@@ -952,7 +859,7 @@ TEST_CASE("Auto-tilt validation harness over a corpus", "[AutoTilt][.]")
             ++ index;
             continue;
         }
-        const DynamicPrintConfig config = corpus_config(loaded);
+        const DynamicPrintConfig config = corpus_config(fixture_config(), loaded);
         // One harness model per object: the scorer poses one object's one instance, so ground truth
         // has to print exactly that. The scorers cache m_root_box = instance_bounding_box(0) in their
         // constructor (AutoTiltScorer.cpp:24), so the instance is centred on the bed and dropped onto
