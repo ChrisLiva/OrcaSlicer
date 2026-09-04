@@ -654,6 +654,15 @@ TreeSupport::TreeSupport(PrintObject& object, const SlicingParameters &slicing_p
     // Legacy tree styles only: the organic generator reaches detect_overhangs() too, and the mode
     // must not shift organic geometry.
     miniature_contacts                       = m_object_config->support_miniature_contacts.value && m_support_params.support_style != smsTreeOrganic;
+    // The detector's overhang threshold, hoisted out of detect_overhangs so the island pass can reuse
+    // it as the band-gap angle. Assigned unconditionally: detect_overhangs runs with the mode off too,
+    // and a 0 here would divide lower_layer_offset by tan(0.).
+    // +1 makes the threshold inclusive; it must stay below 90.
+    {
+        double thresh_angle = m_object_config->support_threshold_angle.value > EPSILON ? m_object_config->support_threshold_angle.value + 1 : 30;
+        thresh_angle        = std::min(thresh_angle, 89.);
+        m_threshold_rad     = Geometry::deg2rad(thresh_angle);
+    }
     if (miniature_contacts) {
         // All three scale with the support line width SupportParameters resolved (SupportParameters.hpp:183-185),
         // never the raw support_line_width option, whose default is an absolute 0.
@@ -714,11 +723,6 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
     static const double sharp_tail_max_support_height = 16.f;
     // a region is considered well supported if the number of layers below it exceeds this threshold
     const int thresh_layers_below = 10 / config.layer_height;
-    // +1 makes the threshold inclusive
-    double thresh_angle = config.support_threshold_angle.value > EPSILON ? config.support_threshold_angle.value + 1 : 30;
-    thresh_angle = std::min(thresh_angle, 89.); // should be smaller than 90
-    const double threshold_rad = Geometry::deg2rad(thresh_angle);
-
     // for small overhang removal
     struct OverhangCluster {
         std::map<int, const ExPolygon*> layer_overhangs;
@@ -851,7 +855,7 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
                 }
 
                 Layer* lower_layer = layer->lower_layer;
-                coordf_t lower_layer_offset = layer_nr < enforce_support_layers ? -0.15 * extrusion_width : (float)lower_layer->height / tan(threshold_rad);
+                coordf_t lower_layer_offset = layer_nr < enforce_support_layers ? -0.15 * extrusion_width : (float)lower_layer->height / tan(m_threshold_rad);
                 //lower_layer_offset = std::min(lower_layer_offset, extrusion_width);
                 coordf_t support_offset_scaled = scale_(lower_layer_offset);
                 ExPolygons& curr_polys = layer->lslices_extrudable;
@@ -1735,6 +1739,92 @@ void TreeSupport::move_bounds_to_contact_nodes(std::vector<TreeSupport3D::Suppor
     }
 }
 
+void assign_contact_islands(std::vector<std::vector<SupportNode*>> &contact_nodes,
+                            const std::vector<coord_t> &dilation, size_t layer_gap)
+{
+    assert(dilation.size() == contact_nodes.size());
+
+    // One entry per distinct overhang polygon on a layer: every node placed on that polygon shares its
+    // island. Entries are created in (layer asc, index asc) order, which is the order the dense ids
+    // follow below.
+    struct Entry {
+        ExPolygon                 poly;
+        BoundingBox               bbox;
+        std::vector<SupportNode*> nodes;
+    };
+    std::vector<Entry>               entries;
+    std::vector<std::vector<size_t>> by_layer(contact_nodes.size());
+
+    for (size_t layer = 0; layer < contact_nodes.size(); ++ layer)
+        for (SupportNode *node : contact_nodes[layer]) {
+            if (node->overhang.empty()) {
+                node->island = -1; // no polygon to group by: the shared pool
+                continue;
+            }
+            size_t entry = size_t(-1);
+            for (size_t idx : by_layer[layer])
+                if (entries[idx].poly == node->overhang) {
+                    entry = idx;
+                    break;
+                }
+            if (entry == size_t(-1)) {
+                entry = entries.size();
+                entries.push_back({ node->overhang, get_extents(node->overhang), {} });
+                by_layer[layer].push_back(entry);
+            }
+            std::vector<SupportNode*> &members = entries[entry].nodes;
+            if (std::find(members.begin(), members.end(), node) == members.end())
+                members.push_back(node); // a pointer listed twice in the layer is still one node
+        }
+
+    // Union-find over the entries, linking each entry to the entries at most layer_gap indices above it.
+    std::vector<size_t> parent(entries.size());
+    for (size_t i = 0; i < parent.size(); ++ i)
+        parent[i] = i;
+    auto find = [&parent](size_t x) {
+        while (parent[x] != x) {
+            parent[x] = parent[parent[x]];
+            x         = parent[x];
+        }
+        return x;
+    };
+
+    for (size_t layer = 0; layer < contact_nodes.size(); ++ layer)
+        for (size_t e : by_layer[layer])
+            for (size_t k = 0; k <= layer_gap && layer + k < contact_nodes.size(); ++ k) {
+                // The band the detector leaves between two layers of one overhang grows with the higher
+                // layer's height, so the gap is measured with that layer's dilation.
+                const coord_t d      = dilation[layer + k];
+                ExPolygons    grown;
+                bool          has_grown = false;
+                for (size_t f : by_layer[layer + k]) {
+                    if (f == e || find(e) == find(f))
+                        continue;
+                    if (! entries[e].bbox.inflated(d).overlap(entries[f].bbox))
+                        continue;
+                    if (! has_grown) {
+                        grown     = offset_ex(entries[e].poly, float(d));
+                        has_grown = true;
+                    }
+                    if (overlaps(grown, entries[f].poly)) {
+                        const size_t ra = find(e), rb = find(f);
+                        parent[std::max(ra, rb)] = std::min(ra, rb);
+                    }
+                }
+            }
+
+    // Dense ids, 0..n-1, handed out in entry creation order.
+    std::vector<int> island_of(entries.size(), -1);
+    int              next_id = 0;
+    for (size_t e = 0; e < entries.size(); ++ e) {
+        const size_t root = find(e);
+        if (island_of[root] < 0)
+            island_of[root] = next_id ++;
+        for (SupportNode *node : entries[e].nodes)
+            node->island = island_of[root];
+    }
+}
+
 void decimate_contact_nodes(std::vector<std::vector<SupportNode*>> &contact_nodes, coordf_t min_distance_mm)
 {
     if (min_distance_mm <= 0.)
@@ -1752,14 +1842,14 @@ void decimate_contact_nodes(std::vector<std::vector<SupportNode*>> &contact_node
         for (size_t index = 0; index < contact_nodes[layer].size(); ++ index)
             refs.push_back({ layer, index, contact_nodes[layer][index] });
 
-    // A total order over the input: the thickest node wins, and every tie falls through to print_z,
-    // layer and position, so the surviving set depends only on the input, never on which thread or
-    // in which order the nodes were produced.
+    // A total order over the input: the lowest node of an island wins, then the thickest, and every
+    // tie falls through to layer and position, so the surviving set depends only on the input, never
+    // on which thread or in which order the nodes were produced.
     std::stable_sort(refs.begin(), refs.end(), [](const NodeRef &a, const NodeRef &b) {
-        if (a.node->radius != b.node->radius)
-            return a.node->radius > b.node->radius;
         if (a.node->print_z != b.node->print_z)
             return a.node->print_z < b.node->print_z;
+        if (a.node->radius != b.node->radius)
+            return a.node->radius > b.node->radius;
         if (a.layer != b.layer)
             return a.layer < b.layer;
         return a.node->position < b.node->position;
@@ -1791,6 +1881,8 @@ void decimate_contact_nodes(std::vector<std::vector<SupportNode*>> &contact_node
                 for (const SupportNode *k : it->second) {
                     if (k == ref.node)
                         continue; // identity is pointer equality: a node listed twice never suppresses itself
+                    if (k->island != ref.node->island)
+                        continue; // a neighbouring overhang island keeps its own contacts
                     const double ddx = unscale<double>(k->position.x() - ref.node->position.x());
                     const double ddy = unscale<double>(k->position.y() - ref.node->position.y());
                     const double ddz = k->print_z - ref.node->print_z;
@@ -1853,8 +1945,18 @@ void TreeSupport::generate()
 
     // Serial 3-D decimation: already_inserted in generate_contact_points is scoped to one layer inside a
     // tbb::parallel_for, so the cross-layer exclusion has to run here, after every worker has written.
-    if (miniature_contacts && m_object_config->support_contact_min_distance.value > 0)
+    // The island pass runs here for the same reason and because overhang_types and loverhangs are
+    // complete by now: every node carries the overhang polygon the grouping reads.
+    if (miniature_contacts && m_object_config->support_contact_min_distance.value > 0) {
+        // Index i of contact_nodes holds the contacts of object layer i + 1, whose band gap the detector
+        // derives from layer i's height; a whole extrusion width is the floor for a near-vertical wall.
+        std::vector<coord_t> dilation(contact_nodes.size());
+        for (size_t i = 0; i < dilation.size(); ++ i)
+            dilation[i] = scaled<double>(std::max(m_support_params.support_extrusion_width,
+                                                  2.5 * m_object->get_layer(i)->height / tan(m_threshold_rad)));
+        assign_contact_islands(contact_nodes, dilation, 2);
         decimate_contact_nodes(contact_nodes, m_object_config->support_contact_min_distance.value);
+    }
 
     m_ts_data->layer_heights = plan_layer_heights();
 

@@ -89,6 +89,7 @@ struct SupportNode
                 parents.push_back(neighbor);
             }
             is_sharp_tail = parent->is_sharp_tail;
+            island = parent->island;
             skin_direction = parent->skin_direction;
         }
     }
@@ -124,6 +125,7 @@ struct SupportNode
     bool           need_extra_wall = false;
     bool           is_sharp_tail   = false;
     bool           is_pinned       = false; // user-asked contact (enforcer, Hybrid big overhang): decimation keeps it and it suppresses nobody
+    int            island          = -1; // 3-D overhang island from assign_contact_islands; -1 = no polygon (vertical enforcer): decimation treats it as one shared pool
     bool           valid = true;
     ExPolygon      overhang; // when type==ePolygon, set this value to get original overhang area
 
@@ -440,6 +442,7 @@ private:
     const coordf_t MAX_BRANCH_RADIUS = 10.0;
     const coordf_t MIN_BRANCH_RADIUS = 0.4;
     coordf_t contact_radius_floor = MIN_BRANCH_RADIUS; // lower bound of a contact's radius at placement; the branch floor above stays the branch floor
+    double m_threshold_rad = 0.; // support_threshold_angle + 1 deg, capped at 89, in radians: the detector's overhang threshold, also the island band-gap angle
     const coordf_t MAX_BRANCH_RADIUS_FIRST_LAYER = 12.0;
     const coordf_t MIN_BRANCH_RADIUS_FIRST_LAYER = 2.0;
     double diameter_angle_scale_factor = tan(5.0*M_PI/180.0);
@@ -535,8 +538,19 @@ private:
         const coordf_t       gap_xy);
 };
 
-// Collapses contact nodes lying within min_distance_mm of a stronger neighbour in 3D, where
-// the distance is hypot(unscale(dx), unscale(dy), dz) and dz is the print_z difference in mm.
+// Groups contact nodes into 3-D overhang islands and writes SupportNode::island. Two nodes share an
+// island when their overhang polygons lie at most layer_gap outer-vector indices apart and one polygon,
+// dilated by dilation[i] of the higher index i (scaled units), overlaps the other; membership is
+// transitive. Nodes whose overhang is empty keep island -1. Ids are dense, 0..n-1, in first-seen order
+// over (layer asc, index asc), so the result depends only on the input; a pointer listed twice is one
+// node. Serial and idempotent. dilation.size() must equal contact_nodes.size().
+void assign_contact_islands(std::vector<std::vector<SupportNode*>> &contact_nodes,
+                            const std::vector<coord_t> &dilation, size_t layer_gap);
+
+// Collapses contact nodes lying within min_distance_mm of a stronger neighbour of the same island
+// in 3D, where the distance is hypot(unscale(dx), unscale(dy), dz) and dz is the print_z difference
+// in mm. The survivor order is print_z ascending, then radius descending, then layer, then position;
+// a kept node suppresses a candidate only when their `island` values are equal (-1 equals -1).
 // Serial and thread-count independent: the surviving set depends only on the input.
 // Nodes with is_pinned set are always kept and never suppress a neighbour.
 // Suppressed pointers are erased from the per-layer vectors and nothing is deleted: the nodes

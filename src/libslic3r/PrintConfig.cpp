@@ -6790,7 +6790,7 @@ void PrintConfigDef::init_fff_params()
     def = this->add("support_contact_min_distance", coFloat);
     def->label    = L("Minimum contact distance");
     def->category = L("Support");
-    def->tooltip  = L("Support contact points closer together than this in 3D are merged into one.");
+    def->tooltip  = L("Support contact points on the same overhang closer together than this in 3D are merged into one; the lowest survives.");
     def->sidetext = L("mm");
     def->min      = 0;
     def->max      = 10;

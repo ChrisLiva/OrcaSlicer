@@ -99,6 +99,21 @@ TriangleMesh lip_fixture()
     return base;
 }
 
+// lip_fixture plus a 0.5 x 0.5 x 0.8 mm peg under the lip's -x, -y corner: model x 2.5..3.0, y 8.1..8.6,
+// z 7.4..8.2, so its top 0.2 mm is inside the lip and its bottom hangs 0.6 mm (3 layers) under the lip's
+// underside. In the centred object frame the lip corner contact node sits at (-12.5, 3.51) print_z 8.0
+// and every peg corner node at print_z 7.4 lies within 0.60..0.92 mm of it in 3-D, inside the 1 mm
+// distance, while the peg's overhang polygon (print_z 7.6) is 3 outer-vector layers under the lip band
+// (print_z 8.2), outside the 2-layer island window.
+TriangleMesh peg_fixture()
+{
+    TriangleMesh base = lip_fixture();
+    TriangleMesh peg  = make_cube(0.5, 0.5, 0.8);
+    peg.translate(2.5f, 8.1f, 7.4f);
+    base.merge(peg);
+    return base;
+}
+
 // Every overhang band detect_overhangs() leaves on a layer above the first, as (print_z, band bbox),
 // under fixture_config's tree_slim settings overlaid with `extra`. fixture_config takes one
 // initializer_list, so `extra` is applied to the config it returns.
@@ -265,19 +280,62 @@ TEST_CASE("Miniature contacts keep a long thin overhang lip that the small-overh
     REQUIRE(organic.empty());
 }
 
+TEST_CASE("Miniature contacts keep a small overhang island that sits within the contact distance of a larger one", "[MiniatureContacts]")
+{
+    // support_remove_small_overhang = 0 is the user's own cull setting, and the leg needs it: with the
+    // stock cull on, the peg's 0.25 mm2 overhang polygon is discarded with the mode off and the mode-off
+    // leg has no baseline to compare against.
+    const auto clusters_for = [](const char *mode) {
+        const DynamicPrintConfig config = fixture_config({ { "support_style", "tree_slim" },
+                                                           { "support_top_z_distance", "0.2" },
+                                                           { "support_remove_small_overhang", "0" },
+                                                           { "support_miniature_contacts", mode },
+                                                           { "support_contact_min_distance", "1" } });
+        Slic3r::Print print;
+        init_and_process_print({ peg_fixture() }, print, config);
+        return contact_clusters(*print.objects().front());
+    };
+
+    // Centroids are scaled Points in the centred object frame paired with their print_z in mm.
+    const auto count_in_box = [](const ContactClusters &cl, double x0, double x1, double y0, double y1, double z) {
+        int n = 0;
+        for (const std::pair<Point, double> &c : cl.centroids) {
+            const double x = unscale<double>(c.first.x());
+            const double y = unscale<double>(c.first.y());
+            if (x >= x0 && x <= x1 && y >= y0 && y <= y1 && std::abs(c.second - z) < 1e-6)
+                ++ n;
+        }
+        return n;
+    };
+
+    // Leg 1, the mode off: the peg is its own overhang island and keeps one contact cluster under it at
+    // print_z 7.4, while the lip keeps its cluster at print_z 8.0.
+    const ContactClusters off = clusters_for("0");
+    REQUIRE(count_in_box(off, -12.8, -11.7, 3.2, 4.3, 7.4) == 1);
+    REQUIRE(count_in_box(off, -13.0, 13.0, 3.0, 6.0, 8.0) >= 1);
+
+    // Leg 2, the mode on: the peg's contact sits 0.60..0.92 mm from the lip's corner contact, inside the
+    // 1 mm support_contact_min_distance, so today's radius-first, cross-island decimation suppresses it
+    // and the peg is left unsupported. Decimation is per overhang island, so both clusters must survive.
+    const ContactClusters on = clusters_for("1");
+    REQUIRE(count_in_box(on, -12.8, -11.7, 3.2, 4.3, 7.4) == 1);
+    REQUIRE(count_in_box(on, -13.0, 13.0, 3.0, 6.0, 8.0) >= 1);
+}
+
 TEST_CASE("decimate_contact_nodes honours pinning, identity, the strict bound and a non-positive distance", "[MiniatureContacts]")
 {
     // The nodes live in a deque so their addresses stay put: decimation erases pointers from the
     // per-layer vectors and never touches the nodes themselves.
     std::deque<SupportNode>                pool;
     std::vector<std::vector<SupportNode*>> nodes(2);
-    auto add = [&](size_t layer, double x_mm, double y_mm, double z_mm, double radius, bool pinned) -> SupportNode* {
+    auto add = [&](size_t layer, double x_mm, double y_mm, double z_mm, double radius, bool pinned, int island = -1) -> SupportNode* {
         pool.emplace_back();
         SupportNode *n = &pool.back();
         n->position    = Point(scale_(x_mm), scale_(y_mm));
         n->print_z     = z_mm;
         n->radius      = radius;
         n->is_pinned   = pinned;
+        n->island      = island;
         nodes[layer].push_back(n);
         return n;
     };
@@ -297,13 +355,23 @@ TEST_CASE("decimate_contact_nodes honours pinning, identity, the strict bound an
     // Layer 1: F sits exactly 1.0 mm above E.
     SupportNode *F = add(1, 6.0, 0., 1.0, 0.4, false);
 
+    // Islands. P and Q are 0.5 mm apart but in different islands, so both survive; T is the pendant tip:
+    // the lowest node of island 3, so it beats U, the thicker node 0.58 mm above it in the same island;
+    // V is 0.72 mm from T in another island and survives.
+    SupportNode *P = add(0, 12.0, 0., 0.,  0.4,  false, 1);
+    SupportNode *Q = add(0, 12.5, 0., 0.,  0.6,  false, 2);
+    SupportNode *T = add(0, 20.0, 0., 0.,  0.22, false, 3);
+                     add(1, 20.3, 0., 0.5, 0.6,  false, 3); // U, suppressed by T
+    SupportNode *V = add(1, 20.6, 0., 0.4, 0.6,  false, 4);
+
     const std::vector<std::vector<SupportNode*>> original = nodes;
     // B falls to the larger-radius A at 0.5 mm; C keeps its place because its only neighbour inside
     // 1.0 mm is the pinned D; D is pinned; G's second entry survives because a node never suppresses
-    // itself; H falls to G at 0.5 mm.
-    const std::vector<SupportNode*> expected0{ A, C, D, E, G, G };
-    // E and F are exactly 1.0 mm apart and the bound is strict, so both survive.
-    const std::vector<SupportNode*> expected1{ F };
+    // itself; H falls to G at 0.5 mm; P and Q both survive because they sit in different islands.
+    const std::vector<SupportNode*> expected0{ A, C, D, E, G, G, P, Q, T };
+    // E and F are exactly 1.0 mm apart and the bound is strict, so both survive. Layer-1 push order is
+    // F, U, V; U falls to T, the lower node of its own island, and V keeps its place in another island.
+    const std::vector<SupportNode*> expected1{ F, V };
 
     decimate_contact_nodes(nodes, 1.0);
     REQUIRE(nodes.size() == 2);
@@ -321,7 +389,66 @@ TEST_CASE("decimate_contact_nodes honours pinning, identity, the strict bound an
     REQUIRE(copy == original);
     decimate_contact_nodes(copy, -1.);
     REQUIRE(copy == original);
-    REQUIRE(copy[0].size() == 8);
+    REQUIRE(copy[0].size() == 11);
+}
+
+TEST_CASE("assign_contact_islands links overhang polygons across nearby layers and nothing else", "[MiniatureContacts]")
+{
+    // The nodes live in a deque so their addresses stay put: the pass writes SupportNode::island and
+    // leaves the per-layer vectors alone.
+    std::deque<SupportNode>                pool;
+    std::vector<std::vector<SupportNode*>> nodes(7);
+    // An axis-aligned square in scaled units, lower-left corner at (x_mm, y_mm).
+    const auto square = [](double x_mm, double y_mm, double side_mm) {
+        ExPolygon ex;
+        ex.contour.points = { Point(scale_(x_mm),           scale_(y_mm)),
+                              Point(scale_(x_mm + side_mm), scale_(y_mm)),
+                              Point(scale_(x_mm + side_mm), scale_(y_mm + side_mm)),
+                              Point(scale_(x_mm),           scale_(y_mm + side_mm)) };
+        return ex;
+    };
+    auto add = [&](size_t layer, const ExPolygon &overhang) -> SupportNode* {
+        pool.emplace_back();
+        SupportNode *n = &pool.back();
+        n->overhang    = overhang;
+        nodes[layer].push_back(n);
+        return n;
+    };
+
+    SupportNode *A0   = add(0, square(0., 0., 1.));
+    SupportNode *B0   = add(0, square(5., 0., 1.));
+    nodes[0].push_back(B0);                             // the same pointer listed twice: still one node
+    SupportNode *Bdup = add(0, square(5., 0., 1.));     // a distinct node on B0's square
+    SupportNode *A1   = add(1, square(0.2, 0., 1.));    // overlaps A0 outright, 1 index above it
+    SupportNode *C    = add(2, ExPolygon());            // no polygon at all
+    SupportNode *A2   = add(3, square(1.25, 0., 1.));   // 2 indices above A1, XY gap 0.05 < 0.3
+    SupportNode *D    = add(4, square(1.25, 1.35, 1.)); // 1 index above A2, XY gap 0.35 > 0.3
+    SupportNode *A3   = add(6, square(0., 0., 1.));     // 3 indices above A2, outside the 2-layer window
+
+    const std::vector<coord_t> dilation(7, scale_(0.3));
+    assign_contact_islands(nodes, dilation, 2);
+
+    // Ids are dense and first-seen over (layer asc, index asc): A0's chain is 0, B0's pair 1, D 2, A3 3.
+    REQUIRE(A0->island == 0);
+    REQUIRE(A1->island == 0);
+    REQUIRE(A2->island == 0);
+    REQUIRE(B0->island == 1);
+    REQUIRE(Bdup->island == 1);
+    REQUIRE(C->island == -1);
+    REQUIRE(D->island == 2);
+    REQUIRE(A3->island == 3);
+
+    // Idempotent, and the pass never edits the vectors.
+    assign_contact_islands(nodes, dilation, 2);
+    REQUIRE(A0->island == 0);
+    REQUIRE(A1->island == 0);
+    REQUIRE(A2->island == 0);
+    REQUIRE(B0->island == 1);
+    REQUIRE(Bdup->island == 1);
+    REQUIRE(C->island == -1);
+    REQUIRE(D->island == 2);
+    REQUIRE(A3->island == 3);
+    REQUIRE(nodes[0].size() == 4);
 }
 
 TEST_CASE("decimate_contact_nodes keeps the same survivors as a brute-force reference over a total order", "[MiniatureContacts]")
@@ -333,6 +460,7 @@ TEST_CASE("decimate_contact_nodes keeps the same survivors as a brute-force refe
         std::uniform_int_distribution<int>     dist_k(0, 49);
         std::uniform_int_distribution<int>     dist_r(0, 2);
         std::uniform_int_distribution<int>     dist_pin(0, 19);
+        std::uniform_int_distribution<int>     dist_island(-1, 3);
 
         // k runs 0..49 and layer = k / 5, so the 500 nodes address exactly these 10 layers and
         // REQUIRE(actual.size() == 10) asserts the outer vector kept its size.
@@ -346,6 +474,7 @@ TEST_CASE("decimate_contact_nodes keeps the same survivors as a brute-force refe
             n->print_z     = 0.2 * k;
             n->radius      = 0.4 + 0.1 * dist_r(rng);
             n->is_pinned   = dist_pin(rng) == 0;
+            n->island      = dist_island(rng);
             input[k / 5].push_back(n);
         }
 
@@ -357,10 +486,10 @@ TEST_CASE("decimate_contact_nodes keeps the same survivors as a brute-force refe
             for (size_t index = 0; index < input[layer].size(); ++ index)
                 refs.push_back({ layer, index, input[layer][index] });
         std::stable_sort(refs.begin(), refs.end(), [](const Ref &a, const Ref &b) {
-            if (a.node->radius != b.node->radius)
-                return a.node->radius > b.node->radius;
             if (a.node->print_z != b.node->print_z)
                 return a.node->print_z < b.node->print_z;
+            if (a.node->radius != b.node->radius)
+                return a.node->radius > b.node->radius;
             if (a.layer != b.layer)
                 return a.layer < b.layer;
             return a.node->position < b.node->position;
@@ -379,6 +508,8 @@ TEST_CASE("decimate_contact_nodes keeps the same survivors as a brute-force refe
             for (const SupportNode *b : blockers) {
                 if (b == r.node)
                     continue;
+                if (b->island != r.node->island)
+                    continue; // a kept node suppresses only inside its own island
                 const double dx = unscale<double>(b->position.x() - r.node->position.x());
                 const double dy = unscale<double>(b->position.y() - r.node->position.y());
                 const double dz = b->print_z - r.node->print_z;
