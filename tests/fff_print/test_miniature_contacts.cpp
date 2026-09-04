@@ -76,6 +76,52 @@ bool same_clusters(const ContactClusters &a, const ContactClusters &b)
     return true;
 }
 
+// A 30 x 8 x 10 mm base carrying a 25 x 1.2 x 2 mm lip on its +y face: make_cube builds from the
+// origin corner (src/libslic3r/TriangleMesh.cpp:886-894), so the lip spans x 2.5..27.5, y 8..9.2,
+// z 8..10. At threshold 60 and 0.2 mm layers the band on the lip's first layer is the lip minus the
+// base offset by 0.2 / tan 61 deg = 0.1109 mm (TreeSupport.cpp:706-708, :846-848), 25 x 1.089 mm.
+// Today's cull erodes it by one 0.42 mm line width to 24.16 x 0.249 mm and 0.249 < 0.84 discards it
+// (:1027-1029); eroded by half a line width it is 24.58 x 0.669 mm and survives. Its far point sits
+// 0.68 mm from the base boundary, under the 3 mm cantilever test (:905), and the 30 x 8 base clears
+// the 6 x 6 layer-0 sharp-tail threshold (:702, :833-843).
+TriangleMesh lip_fixture()
+{
+    TriangleMesh base = make_cube(30, 8, 10);
+    TriangleMesh lip  = make_cube(25, 1.2, 2);
+    lip.translate(2.5f, 8.f, 8.f);
+    base.merge(lip);
+    return base;
+}
+
+// Every overhang band detect_overhangs() leaves on a layer above the first, as (print_z, band bbox),
+// under fixture_config's tree_slim settings overlaid with `extra`. fixture_config takes one
+// initializer_list, so `extra` is applied to the config it returns.
+std::vector<std::pair<double, BoundingBox>> lip_overhangs(std::initializer_list<ConfigBase::SetDeserializeItem> extra)
+{
+    DynamicPrintConfig config = fixture_config({ { "support_style", "tree_slim" }, { "support_top_z_distance", "0.2" } });
+    // set_deserialize_strict drops a key print_config_def does not carry instead of throwing, so every
+    // key spelled here has to match a declared option exactly.
+    config.set_deserialize_strict(extra);
+
+    Slic3r::Print print;
+    Slic3r::Model model;
+    init_print({ lip_fixture() }, print, model, config);
+
+    PrintObject *po = print.objects_mutable().front();
+    po->slice();
+    TreeSupport ts(*po, po->slicing_parameters());
+    ts.detect_overhangs();
+
+    std::vector<std::pair<double, BoundingBox>> bands;
+    for (const Layer *layer : po->layers()) {
+        if (layer->id() == 0)
+            continue;
+        for (const ExPolygon &expoly : layer->loverhangs)
+            bands.emplace_back(layer->print_z, get_extents(expoly));
+    }
+    return bands;
+}
+
 } // namespace
 
 TEST_CASE("Miniature contacts leave a stock slice untouched when off and thin the contact set when on", "[MiniatureContacts]")
@@ -108,4 +154,30 @@ TEST_CASE("Miniature contacts leave a stock slice untouched when off and thin th
     REQUIRE(same_clusters(off, stock));
 
     // Legs 3 (the mode on) and 4 (the mode on under one TBB thread) arrive with the wiring step.
+}
+
+TEST_CASE("Miniature contacts keep a long thin overhang lip that the small-overhang cull would discard", "[MiniatureContacts]")
+{
+    // Leg 1, stock: the bounding-box cull fails the band on its 0.249 mm y extent and drops it.
+    const auto culled = lip_overhangs({ { "support_miniature_contacts", "0" } });
+    REQUIRE(culled.empty());
+
+    // Leg 2, the mode on: half a line width is the room one extrusion needs, so the band survives on
+    // the layer whose bottom is the lip's z = 8.0, the 41st layer at 0.2 mm with a 0.2 mm first layer.
+    const auto kept = lip_overhangs({ { "support_miniature_contacts", "1" } });
+    REQUIRE(kept.size() == 1);
+    REQUIRE_THAT(kept[0].first, WithinAbs(8.2, 1e-6));
+    const Vec2d sz = unscale(kept[0].second.size());
+    REQUIRE_THAT(sz.x(), WithinAbs(25.0, 0.05));
+    REQUIRE_THAT(sz.y(), WithinAbs(1.089, 0.05));
+
+    // Leg 3, the mode on with the cull switched off: clusters are still built (TreeSupport.cpp:995-1004),
+    // but the whole sharp-tail/small-overhang classification sits under the support_remove_small_overhang
+    // gate at :1012, so every cluster is kept and the predicate never runs.
+    const auto on_no_cull = lip_overhangs({ { "support_miniature_contacts", "1" }, { "support_remove_small_overhang", "0" } });
+    REQUIRE(on_no_cull.size() == 1);
+
+    // Leg 4, the same with the mode off: the band's survival here is the cull's doing, not the mode's.
+    const auto off_no_cull = lip_overhangs({ { "support_miniature_contacts", "0" }, { "support_remove_small_overhang", "0" } });
+    REQUIRE(off_no_cull.size() == 1);
 }

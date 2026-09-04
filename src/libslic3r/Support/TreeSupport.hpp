@@ -447,6 +447,7 @@ private:
 
     bool  is_strong = false;
     bool  is_slim                            = false;
+    bool  miniature_contacts                 = false; // support_miniature_contacts, legacy tree styles only
     bool  with_infill                        = false;
 
 

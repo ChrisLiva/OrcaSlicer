@@ -651,6 +651,7 @@ TreeSupport::TreeSupport(PrintObject& object, const SlicingParameters &slicing_p
     is_slim                                  = is_tree_slim(support_type, m_support_params.support_style);
     is_strong = is_tree(support_type) && m_support_params.support_style == smsTreeStrong;
     base_radius                              = std::max(MIN_BRANCH_RADIUS, m_object_config->tree_support_branch_diameter.value / 2);
+    miniature_contacts                       = m_object_config->support_miniature_contacts.value;
     // by default tree support needs no infill, unless it's tree hybrid which contains normal nodes.
     with_infill                              = support_pattern != smpNone && support_pattern != smpDefault;
     m_machine_border.contour = get_bed_shape_with_excluded_area(*m_print_config);
@@ -1023,11 +1024,17 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
             }
 
             if (!cluster.is_sharp_tail && !cluster.is_cantilever) {
-                // 2. check overhang cluster size is smaller than 3.0 * fw_scaled
-                auto erode1 = offset_ex(cluster.merged_poly, -1 * extrusion_width_scaled);
-                Point bbox_sz = get_extents(erode1).size();
-                if (bbox_sz.x() < 2 * extrusion_width_scaled || bbox_sz.y() < 2 * extrusion_width_scaled) {
-                    cluster.is_small_overhang = true;
+                if (miniature_contacts) {
+                    // Cull only what cannot be extruded at all: half a line width is the room one extrusion needs, so
+                    // a cape hem 25 mm long and 1 mm wide survives where the bounding-box test below fails it on one axis.
+                    cluster.is_small_overhang = offset_ex(cluster.merged_poly, -0.5f * float(extrusion_width_scaled)).empty();
+                } else {
+                    // 2. check overhang cluster size is smaller than 3.0 * fw_scaled
+                    auto erode1 = offset_ex(cluster.merged_poly, -1 * extrusion_width_scaled);
+                    Point bbox_sz = get_extents(erode1).size();
+                    if (bbox_sz.x() < 2 * extrusion_width_scaled || bbox_sz.y() < 2 * extrusion_width_scaled) {
+                        cluster.is_small_overhang = true;
+                    }
                 }
             }
 
