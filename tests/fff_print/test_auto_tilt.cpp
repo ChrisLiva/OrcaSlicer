@@ -638,7 +638,7 @@ void run_harness_model(size_t index, const std::string &stem, const Model &base,
 
     // roof_gap_areas is the gap the generator leaves between a contact tip and the object, so a
     // config that prints the tips straight onto the object files none of it: there is no truth to
-    // measure, and 147 Print::process() passes would only produce zeros. Score, report, say so.
+    // measure, and 77 Print::process() passes would only produce zeros. Score, report, say so.
     const bool truth_available = config.opt_float("support_top_z_distance") > 0.;
 
     std::vector<double> truth_w(n, harness_nan), truth_u(n, harness_nan);
@@ -902,13 +902,13 @@ TEST_CASE("The auto-tilt corpus stem keeps a one-object file's name and sanitise
     CHECK(corpus_stem("/c/Ratmen_Test.3mf", 3, "10_Dark Elves 1.stl") == "Ratmen_Test#10_Dark_Elves_1.stl");
 }
 
-// Hidden ([.]): one model costs 147 full Print::process() passes plus 294 scorer slices, and a third
-// 147-pose sweep on a model printing finer than 0.12 mm, so hours of wall clock; the corpus it reads
+// Hidden ([.]): one model costs 77 full Print::process() passes plus 154 scorer slices, and a third
+// 77-pose sweep on a model printing finer than 0.12 mm, so hours of wall clock; the corpus it reads
 // lives outside the repo under $ORCA_AUTOTILT_CORPUS
 // (tests/AGENTS.md:44). It measures the scorer's regret against ground truth; it does not pin it.
 TEST_CASE("Auto-tilt validation harness over a corpus", "[AutoTilt][.]")
 {
-    // $ORCA_AUTOTILT_COARSE trades the 147-pose grid for the 9-pose one, presence-tested the way
+    // $ORCA_AUTOTILT_COARSE trades the 77-pose grid for the 9-pose one, presence-tested the way
     // tests/fff_print/test_multifilament.cpp:648 does. Thresholds keep their production defaults.
     const AutoTilt::Constants k = std::getenv("ORCA_AUTOTILT_COARSE") != nullptr ? coarse_constants() : AutoTilt::Constants();
 

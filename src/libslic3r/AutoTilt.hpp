@@ -14,11 +14,10 @@ namespace Slic3r { namespace AutoTilt {
 // and fragility_weight() so no loop bakes a number in.
 struct Constants
 {
-    std::vector<double> tilts_deg {0,   -2,  -4,  -6,  -8,  -10, -12, -14, -16, -18, -20,
-                                   -22, -24, -26, -28, -30, -32, -34, -36, -38, -40};
+    std::vector<double> tilts_deg {0, -2, -4, -6, -8, -10, -12, -14, -16, -18, -20};
     std::vector<double> leans_deg {-15, -10, -5, 0, 5, 10, 15};
     double threshold_base             = 0.05;   // fraction of the root score
-    double threshold_per_degree       = 0.0025; // added per degree of |tilt|
+    double threshold_per_degree       = 0.005;  // added per degree of |tilt|, so the -20 deg cap asks 15%
     double negligible_volume_fraction = 0.0002; // of object volume
     double t_ref_mm                   = 2.0;
     double w_max                      = 8.0;

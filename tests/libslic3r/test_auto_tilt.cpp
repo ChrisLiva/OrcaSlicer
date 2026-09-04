@@ -22,7 +22,7 @@ TEST_CASE("grid lists the root pose first and then every tilt/lean pair tilt-maj
     const Constants         k;
     const std::vector<Pose> g = grid(k);
 
-    REQUIRE(g.size() == 147);
+    REQUIRE(g.size() == 77);
     REQUIRE(g[0].is_root());
     REQUIRE(g[1] == Pose{0, -15});
     REQUIRE(g[7] == Pose{-2, -15});
@@ -219,12 +219,12 @@ TEST_CASE("the shipped thresholds ask 5% of a lean and 15% of the steepest tilt"
 
     SECTION("the steepest tilt has to earn 15%") {
         FakeScorer scorer(legal, Contact{100, 100, 1000});
-        scorer.set(Pose{-40, 0}, Contact{85.1, 85.1, 1000}); // 14.9% against 5% + 0.25%/deg * 40 = 15%
+        scorer.set(Pose{-20, 0}, Contact{85.1, 85.1, 1000}); // 14.9% against 5% + 0.5%/deg * 20 = 15%
 
         const SearchResult r = search(legal, scorer, k, never_stop, no_progress);
 
         REQUIRE(r.outcome == SearchResult::Outcome::NoImprovement);
-        REQUIRE(r.best == Pose{-40, 0});
+        REQUIRE(r.best == Pose{-20, 0});
         REQUIRE_THAT(r.required_improvement, WithinAbs(0.15, 1e-12));
     }
 }
@@ -236,14 +236,14 @@ TEST_CASE("search rejects a gain that misses the threshold for its tilt", "[Auto
     k.threshold_per_degree        = 0.0025;
     const std::vector<Pose> legal = grid(k);
     FakeScorer              scorer(legal, Contact{100, 100, 1000});
-    scorer.set(Pose{-40, 0}, Contact{95, 95, 1000}); // 5% gain against 10% + 0.25%/deg * 40 = 20%
+    scorer.set(Pose{-20, 0}, Contact{95, 95, 1000}); // 5% gain against 10% + 0.25%/deg * 20 = 15%
 
     const SearchResult r = search(legal, scorer, k, never_stop, no_progress);
 
     REQUIRE(r.outcome == SearchResult::Outcome::NoImprovement);
-    REQUIRE(r.best == Pose{-40, 0});
+    REQUIRE(r.best == Pose{-20, 0});
     REQUIRE_THAT(r.improvement, WithinAbs(0.05, 1e-12));
-    REQUIRE_THAT(r.required_improvement, WithinAbs(0.20, 1e-12));
+    REQUIRE_THAT(r.required_improvement, WithinAbs(0.15, 1e-12));
 }
 
 TEST_CASE("search requires a 10.5% gain from a 2 degree tilt", "[AutoTilt]")
@@ -282,8 +282,8 @@ TEST_CASE("search ranks inside the admissible set, not over the whole grid", "[A
     k.threshold_per_degree        = 0.0025;
     const std::vector<Pose> legal = grid(k);
     FakeScorer              scorer(legal, Contact{100, 100, 1000});
-    scorer.set(Pose{-40, 0}, Contact{81, 81, 1000});  // the lowest score, but 19% < 20% required
-    scorer.set(Pose{-10, 0}, Contact{85, 85, 1000});  // 15% clears the 12.5% required
+    scorer.set(Pose{-20, 0}, Contact{86, 86, 1000});  // the lowest score, but 14% < 15% required
+    scorer.set(Pose{-10, 0}, Contact{87, 87, 1000});  // 13% clears the 12.5% required
 
     const SearchResult r = search(legal, scorer, k, never_stop, no_progress);
 
