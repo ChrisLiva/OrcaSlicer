@@ -200,7 +200,7 @@ TEST_CASE("search breaks a tie between two admissible poses by the smaller devia
     REQUIRE(r.best == Pose{-4, 0});
 }
 
-TEST_CASE("the shipped thresholds ask 5% of a lean and 15% of the steepest tilt", "[AutoTilt]")
+TEST_CASE("the shipped thresholds ask 5% of a lean and 10% of the steepest tilt", "[AutoTilt]")
 {
     // The values Constants ships, asserted in one place so moving them lands here and nowhere else.
     const Constants         k;
@@ -217,15 +217,15 @@ TEST_CASE("the shipped thresholds ask 5% of a lean and 15% of the steepest tilt"
         REQUIRE_THAT(r.required_improvement, WithinAbs(0.05, 1e-12));
     }
 
-    SECTION("the steepest tilt has to earn 15%") {
+    SECTION("the steepest tilt has to earn 10%") {
         FakeScorer scorer(legal, Contact{100, 100, 1000});
-        scorer.set(Pose{-20, 0}, Contact{85.1, 85.1, 1000}); // 14.9% against 5% + 0.5%/deg * 20 = 15%
+        scorer.set(Pose{-20, 0}, Contact{90.1, 90.1, 1000}); // 9.9% against 5% + 0.25%/deg * 20 = 10%
 
         const SearchResult r = search(legal, scorer, k, never_stop, no_progress);
 
         REQUIRE(r.outcome == SearchResult::Outcome::NoImprovement);
         REQUIRE(r.best == Pose{-20, 0});
-        REQUIRE_THAT(r.required_improvement, WithinAbs(0.15, 1e-12));
+        REQUIRE_THAT(r.required_improvement, WithinAbs(0.10, 1e-12));
     }
 }
 
