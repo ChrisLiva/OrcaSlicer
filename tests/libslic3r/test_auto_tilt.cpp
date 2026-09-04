@@ -190,7 +190,7 @@ TEST_CASE("search breaks a tie between two admissible poses by the smaller devia
     const Constants         k;
     const std::vector<Pose> legal = grid(k);
     FakeScorer              scorer(legal, Contact{100, 100, 1000});
-    // Both halve the root score (50% gain) against thresholds of 11% and 12.5%.
+    // Both halve the root score, so both clear their own threshold whatever the constants ask.
     scorer.set(Pose{-4, 0}, Contact{50, 50, 1000});
     scorer.set(Pose{-10, 0}, Contact{50, 50, 1000});
 
@@ -200,9 +200,40 @@ TEST_CASE("search breaks a tie between two admissible poses by the smaller devia
     REQUIRE(r.best == Pose{-4, 0});
 }
 
+TEST_CASE("the shipped thresholds ask 5% of a lean and 15% of the steepest tilt", "[AutoTilt]")
+{
+    // The values Constants ships, asserted in one place so moving them lands here and nowhere else.
+    const Constants         k;
+    const std::vector<Pose> legal = grid(k);
+
+    SECTION("a lean-only pose clears at 5%") {
+        FakeScorer scorer(legal, Contact{100, 100, 1000});
+        scorer.set(Pose{0, 5}, Contact{94, 94, 1000}); // 6% against the 5% base, no tilt to add to it
+
+        const SearchResult r = search(legal, scorer, k, never_stop, no_progress);
+
+        REQUIRE(r.outcome == SearchResult::Outcome::Improved);
+        REQUIRE(r.best == Pose{0, 5});
+        REQUIRE_THAT(r.required_improvement, WithinAbs(0.05, 1e-12));
+    }
+
+    SECTION("the steepest tilt has to earn 15%") {
+        FakeScorer scorer(legal, Contact{100, 100, 1000});
+        scorer.set(Pose{-40, 0}, Contact{85.1, 85.1, 1000}); // 14.9% against 5% + 0.25%/deg * 40 = 15%
+
+        const SearchResult r = search(legal, scorer, k, never_stop, no_progress);
+
+        REQUIRE(r.outcome == SearchResult::Outcome::NoImprovement);
+        REQUIRE(r.best == Pose{-40, 0});
+        REQUIRE_THAT(r.required_improvement, WithinAbs(0.15, 1e-12));
+    }
+}
+
 TEST_CASE("search rejects a gain that misses the threshold for its tilt", "[AutoTilt]")
 {
-    const Constants         k;
+    Constants k;
+    k.threshold_base              = 0.10;
+    k.threshold_per_degree        = 0.0025;
     const std::vector<Pose> legal = grid(k);
     FakeScorer              scorer(legal, Contact{100, 100, 1000});
     scorer.set(Pose{-40, 0}, Contact{95, 95, 1000}); // 5% gain against 10% + 0.25%/deg * 40 = 20%
@@ -217,7 +248,9 @@ TEST_CASE("search rejects a gain that misses the threshold for its tilt", "[Auto
 
 TEST_CASE("search requires a 10.5% gain from a 2 degree tilt", "[AutoTilt]")
 {
-    const Constants         k;
+    Constants k; // 10% + 0.25%/deg * 2
+    k.threshold_base              = 0.10;
+    k.threshold_per_degree        = 0.0025;
     const std::vector<Pose> legal = grid(k);
 
     SECTION("a 10.4% gain misses the threshold") {
@@ -244,7 +277,9 @@ TEST_CASE("search requires a 10.5% gain from a 2 degree tilt", "[AutoTilt]")
 
 TEST_CASE("search ranks inside the admissible set, not over the whole grid", "[AutoTilt]")
 {
-    const Constants         k;
+    Constants k;
+    k.threshold_base              = 0.10;
+    k.threshold_per_degree        = 0.0025;
     const std::vector<Pose> legal = grid(k);
     FakeScorer              scorer(legal, Contact{100, 100, 1000});
     scorer.set(Pose{-40, 0}, Contact{81, 81, 1000});  // the lowest score, but 19% < 20% required
