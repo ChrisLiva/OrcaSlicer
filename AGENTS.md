@@ -40,6 +40,13 @@ ctest --test-dir ./tests/libslic3r              # individual suite
 ctest --test-dir ./tests/fff_print
 ```
 
+The legacy tree support's output is not run-to-run reproducible. Seven `--slice` runs of one Release
+binary on one project (plate 2 of a 32 mm miniature, Tree Slim) spread the `Support` extrusion-move
+count over 139166..141475 and the `Skirt` count over 88..102 while every other feature's count stayed
+byte-identical (measured 2026-09-04). An oracle that expects byte-identical G-code or an exact
+support-move count from `TreeSupport` therefore fails on an unchanged engine; compare the other features
+exactly and the support count within a band (2 % held here).
+
 ## Code Style
 
 - C++17, selective C++20. PascalCase classes, snake_case functions/variables
