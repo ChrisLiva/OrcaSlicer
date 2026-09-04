@@ -153,7 +153,28 @@ TEST_CASE("Miniature contacts leave a stock slice untouched when off and thin th
     REQUIRE(off.count() == stock.count());
     REQUIRE(same_clusters(off, stock));
 
-    // Legs 3 (the mode on) and 4 (the mode on under one TBB thread) arrive with the wiring step.
+    // Leg 3, the mode on: decimation drops every contact within 1 mm of a stronger neighbour, so the
+    // set thins. Each removed node takes its gap area with it, and every sliver has positive area.
+    DynamicPrintConfig on_config = base;
+    on_config.set_deserialize_strict({ { "support_miniature_contacts", "1" }, { "support_contact_min_distance", "1" } });
+
+    Slic3r::Print on_print;
+    init_and_process_print({ fin_fixture() }, on_print, on_config);
+    const ContactClusters on = contact_clusters(*on_print.objects().front());
+    REQUIRE(on.count() < off.count());
+    REQUIRE(on.total_mm2 < off.total_mm2);
+
+    // Leg 4, the mode on under one TBB worker: generate_contact_points() runs in a tbb::parallel_for,
+    // so the decimation post-pass has to reach the same survivors whatever the worker count.
+    ContactClusters on_one;
+    {
+        tbb::global_control gc(tbb::global_control::max_allowed_parallelism, 1);
+        Slic3r::Print       on_one_print;
+        init_and_process_print({ fin_fixture() }, on_one_print, on_config);
+        on_one = contact_clusters(*on_one_print.objects().front());
+    }
+    REQUIRE(on_one.count() == on.count());
+    REQUIRE(same_clusters(on_one, on));
 }
 
 TEST_CASE("Miniature contacts keep a long thin overhang lip that the small-overhang cull would discard", "[MiniatureContacts]")

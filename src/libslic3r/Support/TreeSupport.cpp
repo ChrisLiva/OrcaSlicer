@@ -1848,6 +1848,11 @@ void TreeSupport::generate()
     generate_contact_points();
     profiler.stage_finish(STAGE_GENERATE_CONTACT_NODES);
 
+    // Serial 3-D decimation: already_inserted in generate_contact_points is scoped to one layer inside a
+    // tbb::parallel_for, so the cross-layer exclusion has to run here, after every worker has written.
+    if (miniature_contacts && m_object_config->support_contact_min_distance.value > 0)
+        decimate_contact_nodes(contact_nodes, m_object_config->support_contact_min_distance.value);
+
     m_ts_data->layer_heights = plan_layer_heights();
 
     //Drop nodes to lower layers.
@@ -3580,6 +3585,7 @@ void TreeSupport::generate_contact_points()
             auto                                 bottom_z = m_object->get_layer(layer_nr)->bottom_z();
             bool                                 added = false; // Did we add a point this way?
             bool                                 is_sharp_tail = false;
+            bool                                 is_pinned     = false;
 
             // take the least restrictive avoidance possible
             ExPolygons relevant_forbidden = offset_ex(m_ts_data->m_layer_outlines[layer_nr - 1], scale_(MIN_BRANCH_RADIUS));
@@ -3603,6 +3609,7 @@ void TreeSupport::generate_contact_points()
                                                           radius);
                     contact_node->overhang = overhang;
                     contact_node->is_sharp_tail = is_sharp_tail;
+                    contact_node->is_pinned = is_pinned;
                     curr_nodes.emplace_back(contact_node);
                     added = true;
                 };
@@ -3612,6 +3619,7 @@ void TreeSupport::generate_contact_points()
             for (const auto& overhang_part : layer->loverhangs)  {
                 const auto& overhang_type = this->overhang_types[&overhang_part];
                 is_sharp_tail = overhang_type == OverhangType::SharpTail;
+                is_pinned = overhang_type == OverhangType::Enforced; // a painted area enforcer: keep every contact placed for it
                 ExPolygons overhangs_regular;
                 if (m_support_params.support_style == smsTreeHybrid && overhang_part.area() > m_support_params.thresh_big_overhang && !is_sharp_tail) {
                     overhangs_regular           = offset_ex(intersection_ex({overhang_part}, m_ts_data->m_layer_outlines_below[layer_nr - 1]), radius_scaled);
@@ -3624,6 +3632,7 @@ void TreeSupport::generate_contact_points()
                             Point        candidate       = overhang_bounds.center();
                             SupportNode *contact_node    = insert_point(candidate, overhang, radius, true, true);
                             contact_node->type           = ePolygon;
+                            contact_node->is_pinned      = true;
                             curr_nodes.emplace_back(contact_node);
                         }
                     }else{
@@ -3689,6 +3698,7 @@ void TreeSupport::generate_contact_points()
             }
             for (auto& pt_and_normal : vertical_enforcer_points_by_layers[layer_nr]) {
                 is_sharp_tail = true;// fake it as sharp tail point so the contact distance will be 0
+                is_pinned = true;
                 auto vertical_enforcer_point= pt_and_normal.first;
                 auto node=insert_point(vertical_enforcer_point, ExPolygon(), false);
                 if (node)
