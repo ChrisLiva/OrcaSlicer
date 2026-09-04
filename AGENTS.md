@@ -11,14 +11,24 @@ brew install cmake ninja automake libtool texinfo
 ./build_release_macos.sh -d -a arm64 -x
 
 # macOS
-cmake --build build/arm64 --config RelWithDebInfo --target all --
+cmake --build build/arm64 --config Release --target all --
 
 # Linux
-cmake --build build --config RelWithDebInfo --target all --
+cmake --build build --config Release --target all --
 
-# Windows (replace %build_type% with Debug/Release/RelWithDebInfo)
+# Windows (replace %build_type% with Debug/Release)
 cmake --build . --config %build_type% --target ALL_BUILD -- -m
 ```
+
+Build `Release` to run the slicer. `CMakeLists.txt:685` strips the optimizer out of
+`RelWithDebInfo`, rewriting `-O2` to `-O0` under Clang and `/O2` to `/Od`, `/Ob1` to `/Ob0`
+under MSVC. Eigen's accessors and Clipper's point math then stop inlining and go through call
+stubs, so a `RelWithDebInfo` build crawls through model loading, slicing and the GUI alike.
+Reach for it only when you need a debugger, and expect the slowdown.
+
+`CMakeCache.txt` still reports `CMAKE_CXX_FLAGS_RELWITHDEBINFO:STRING=-O2 -g -DNDEBUG`, because
+that rewrite assigns normal variables rather than cache entries. To read the flags a target
+actually gets, grep the generated `build/<dir>/CMakeFiles/impl-<Config>.ninja` for its `.o` rule.
 
 ## Testing
 
