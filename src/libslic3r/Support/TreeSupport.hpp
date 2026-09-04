@@ -540,7 +540,7 @@ private:
 // Serial and thread-count independent: the surviving set depends only on the input.
 // Nodes with is_pinned set are always kept and never suppress a neighbour.
 // Suppressed pointers are erased from the per-layer vectors and nothing is deleted: the nodes
-// stay owned by TreeSupportData::contact_nodes (TreeSupport.hpp:249). The outer vector keeps
+// stay owned by TreeSupportData::contact_nodes, its vector of unique_ptr. The outer vector keeps
 // its size and its layer_nr - 1 indexing; a layer may be left empty.
 // A non-positive min_distance_mm is a no-op.
 void decimate_contact_nodes(std::vector<std::vector<SupportNode*>> &contact_nodes,

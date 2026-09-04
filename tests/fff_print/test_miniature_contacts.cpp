@@ -82,11 +82,14 @@ bool same_clusters(const ContactClusters &a, const ContactClusters &b)
 // A 30 x 8 x 10 mm base carrying a 25 x 1.2 x 2 mm lip on its +y face: make_cube builds from the
 // origin corner (src/libslic3r/TriangleMesh.cpp:886-894), so the lip spans x 2.5..27.5, y 8..9.2,
 // z 8..10. At threshold 60 and 0.2 mm layers the band on the lip's first layer is the lip minus the
-// base offset by 0.2 / tan 61 deg = 0.1109 mm (TreeSupport.cpp:706-708, :846-848), 25 x 1.089 mm.
-// Today's cull erodes it by one 0.42 mm line width to 24.16 x 0.249 mm and 0.249 < 0.84 discards it
-// (:1027-1029); eroded by half a line width it is 24.58 x 0.669 mm and survives. Its far point sits
-// 0.68 mm from the base boundary, under the 3 mm cantilever test (:905), and the 30 x 8 base clears
-// the 6 x 6 layer-0 sharp-tail threshold (:702, :833-843).
+// base offset by 0.2 / tan 61 deg = 0.1109 mm (detect_overhangs' thresh_angle is
+// support_threshold_angle + 1, its lower_layer_offset is lower_layer->height / tan(threshold_rad)),
+// 25 x 1.089 mm. Today's cull erodes it by one 0.42 mm line width to 24.16 x 0.249 mm and 0.249 < 0.84
+// discards it (the bounding-box test in detect_overhangs' else branch); eroded by half a line width it
+// is 24.58 x 0.669 mm and survives. Its far point sits 0.68 mm from the base boundary, under the 3 mm
+// cantilever test (dist_max > scale_(3) in detect_overhangs), and the 30 x 8 base clears the 6 x 6
+// layer-0 sharp-tail threshold (length_thresh_well_supported, applied in detect_overhangs' branch for
+// layer->lower_layer == nullptr).
 TriangleMesh lip_fixture()
 {
     TriangleMesh base = make_cube(30, 8, 10);
@@ -244,9 +247,10 @@ TEST_CASE("Miniature contacts keep a long thin overhang lip that the small-overh
     REQUIRE_THAT(sz.x(), WithinAbs(25.0, 0.05));
     REQUIRE_THAT(sz.y(), WithinAbs(1.089, 0.05));
 
-    // Leg 3, the mode on with the cull switched off: clusters are still built (TreeSupport.cpp:995-1004),
-    // but the whole sharp-tail/small-overhang classification sits under the support_remove_small_overhang
-    // gate at :1012, so every cluster is kept and the predicate never runs.
+    // Leg 3, the mode on with the cull switched off: clusters are still built (detect_overhangs'
+    // find_and_insert_cluster loop), but the whole sharp-tail/small-overhang classification sits under
+    // its is_auto(stype) && config_remove_small_overhangs gate, so every cluster is kept and the
+    // predicate never runs.
     const auto on_no_cull = lip_overhangs({ { "support_miniature_contacts", "1" }, { "support_remove_small_overhang", "0" } });
     REQUIRE(on_no_cull.size() == 1);
 
@@ -286,7 +290,9 @@ TEST_CASE("decimate_contact_nodes honours pinning, identity, the strict bound an
     SupportNode *E = add(0, 6.0, 0., 0., 0.4, false);
     SupportNode *G = add(0, 9.0, 0., 0., 0.4, false);
     nodes[0].push_back(G);                            // the same pointer listed twice, as the Hybrid
-                                                      // big-overhang path does (TreeSupport.cpp:3523, :3544)
+                                                      // big-overhang path does: insert_point emplaces the
+                                                      // node in generate_contact_points, then its ePolygon
+                                                      // caller emplaces the same pointer again
                      add(0, 9.5, 0., 0., 0.4, false); // H, 0.5 mm from G
     // Layer 1: F sits exactly 1.0 mm above E.
     SupportNode *F = add(1, 6.0, 0., 1.0, 0.4, false);

@@ -1766,7 +1766,8 @@ void decimate_contact_nodes(std::vector<std::vector<SupportNode*>> &contact_node
     });
 
     // Survivors indexed by a cell of min_distance_mm side, so a conflict can only sit in the 9 cells
-    // around a node's own. PointHash is the cell hash generate_contact_points already uses (:3494).
+    // around a node's own. PointHash is the cell hash already_inserted already uses in
+    // generate_contact_points' insert_point.
     auto cell_of = [min_distance_mm](const Point &p) {
         return Point(coord_t(std::floor(unscale<double>(p.x()) / min_distance_mm)),
                      coord_t(std::floor(unscale<double>(p.y()) / min_distance_mm)));
