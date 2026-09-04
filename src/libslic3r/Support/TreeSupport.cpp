@@ -651,7 +651,9 @@ TreeSupport::TreeSupport(PrintObject& object, const SlicingParameters &slicing_p
     is_slim                                  = is_tree_slim(support_type, m_support_params.support_style);
     is_strong = is_tree(support_type) && m_support_params.support_style == smsTreeStrong;
     base_radius                              = std::max(MIN_BRANCH_RADIUS, m_object_config->tree_support_branch_diameter.value / 2);
-    miniature_contacts                       = m_object_config->support_miniature_contacts.value;
+    // Legacy tree styles only: the organic generator reaches detect_overhangs() too, and the mode
+    // must not shift organic geometry.
+    miniature_contacts                       = m_object_config->support_miniature_contacts.value && m_support_params.support_style != smsTreeOrganic;
     if (miniature_contacts) {
         // All three scale with the support line width SupportParameters resolved (SupportParameters.hpp:183-185),
         // never the raw support_line_width option, whose default is an absolute 0.

@@ -253,6 +253,12 @@ TEST_CASE("Miniature contacts keep a long thin overhang lip that the small-overh
     // Leg 4, the same with the mode off: the band's survival here is the cull's doing, not the mode's.
     const auto off_no_cull = lip_overhangs({ { "support_miniature_contacts", "0" }, { "support_remove_small_overhang", "0" } });
     REQUIRE(off_no_cull.size() == 1);
+
+    // Leg 5, the mode on under organic: the organic generator (TreeSupport3D::generate_support_areas)
+    // reaches this same detect_overhangs(), and the mode is a legacy-tree feature, so it must not touch
+    // organic geometry. The band is culled exactly as in leg 1.
+    const auto organic = lip_overhangs({ { "support_style", "organic" }, { "support_miniature_contacts", "1" } });
+    REQUIRE(organic.empty());
 }
 
 TEST_CASE("decimate_contact_nodes honours pinning, identity, the strict bound and a non-positive distance", "[MiniatureContacts]")
