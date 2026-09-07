@@ -54,6 +54,7 @@ exactly and the support count within a band (2 % held here).
 - Parallelization via TBB — be mindful of shared state
 - Always use `SetSizerAndFit(sizer)` instead of `SetSizer(sizer)` on top level window. Unless `SetSizer` must be called before the full layout is built, call `sizer->SetSizeHints(window)` afterwards in this case.
 - In code comments, cite another site by its symbol or by quoting the statement, never by `file:line`: every insertion above a cited line moves it, and a `TreeSupport.cpp:3530`-style citation pointed at unrelated code three commits after it was written.
+- `.clang-format` sets `ColumnLimit: 140`, but no script under `scripts/` and no CMake target runs clang-format, and the tree ignores the limit: 568 lines under `tests/` and 695 under `src/libslic3r/Support/` already exceed 140 (`awk 'length>140'`, 2026-09-07). Match the width of the file you are editing rather than reformatting to the config's number.
 
 ## Key Entry Points
 
