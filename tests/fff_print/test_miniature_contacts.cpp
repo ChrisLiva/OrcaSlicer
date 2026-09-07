@@ -392,12 +392,12 @@ TEST_CASE("decimate_contact_nodes honours pinning, identity, the strict bound an
     REQUIRE(copy[0].size() == 11);
 }
 
-TEST_CASE("assign_contact_islands links overhang polygons across nearby layers and nothing else", "[MiniatureContacts]")
+TEST_CASE("assign_contact_islands links overhang polygons on the same or a nearby layer within the higher layer's dilation and nothing else", "[MiniatureContacts]")
 {
     // The nodes live in a deque so their addresses stay put: the pass writes SupportNode::island and
     // leaves the per-layer vectors alone.
     std::deque<SupportNode>                pool;
-    std::vector<std::vector<SupportNode*>> nodes(7);
+    std::vector<std::vector<SupportNode*>> nodes(12);
     // An axis-aligned square in scaled units, lower-left corner at (x_mm, y_mm).
     const auto square = [](double x_mm, double y_mm, double side_mm) {
         ExPolygon ex;
@@ -424,11 +424,25 @@ TEST_CASE("assign_contact_islands links overhang polygons across nearby layers a
     SupportNode *A2   = add(3, square(1.25, 0., 1.));   // 2 indices above A1, XY gap 0.05 < 0.3
     SupportNode *D    = add(4, square(1.25, 1.35, 1.)); // 1 index above A2, XY gap 0.35 > 0.3
     SupportNode *A3   = add(6, square(0., 0., 1.));     // 3 indices above A2, outside the 2-layer window
+    // Layers 7..11 carry their own dilation (the vector below). x 20 and beyond keeps every square here
+    // out of the A chain's reach, so each pair is judged on its own gap.
+    SupportNode *H7   = add(7,  square(20.,  0., 1.));  // dilation 0.2 on this layer, 0.8 on H8's
+    SupportNode *H8   = add(8,  square(21.5, 0., 1.));  // 0.5 mm from H7 in x: the higher layer's 0.8 spans it
+    SupportNode *L9   = add(9,  square(30.,  0., 1.));  // dilation 0.8 on this layer, 0.2 on L10's
+    SupportNode *L10  = add(10, square(31.5, 0., 1.));  // 0.5 mm from L9 in x: the lower layer's 0.8 does not count
+    SupportNode *S11a = add(11, square(40.,  0., 1.));  // two different polygons on one layer, 0.5 mm apart
+    SupportNode *S11b = add(11, square(41.5, 0., 1.));  // linked to S11a by layer 11's own 0.8
 
-    const std::vector<coord_t> dilation(7, scale_(0.3));
+    // 0.3 on the A chain's layers as before; layers 7..11 pair a small and a large value so which
+    // index the gap rule reads shows in the ids.
+    std::vector<coord_t> dilation(12, scale_(0.3));
+    dilation[7]  = scale_(0.2); dilation[8]  = scale_(0.8);
+    dilation[9]  = scale_(0.8); dilation[10] = scale_(0.2);
+    dilation[11] = scale_(0.8);
     assign_contact_islands(nodes, dilation, 2);
 
-    // Ids are dense and first-seen over (layer asc, index asc): A0's chain is 0, B0's pair 1, D 2, A3 3.
+    // Ids are dense and first-seen over (layer asc, index asc): A0's chain is 0, B0's pair 1, D 2,
+    // A3 3, the H pair 4, L9 5, L10 6, the S pair 7.
     REQUIRE(A0->island == 0);
     REQUIRE(A1->island == 0);
     REQUIRE(A2->island == 0);
@@ -437,6 +451,12 @@ TEST_CASE("assign_contact_islands links overhang polygons across nearby layers a
     REQUIRE(C->island == -1);
     REQUIRE(D->island == 2);
     REQUIRE(A3->island == 3);
+    REQUIRE(H7->island == 4);
+    REQUIRE(H8->island == 4);
+    REQUIRE(L9->island == 5);
+    REQUIRE(L10->island == 6);
+    REQUIRE(S11a->island == 7);
+    REQUIRE(S11b->island == 7);
 
     // Idempotent, and the pass never edits the vectors.
     assign_contact_islands(nodes, dilation, 2);
@@ -448,6 +468,12 @@ TEST_CASE("assign_contact_islands links overhang polygons across nearby layers a
     REQUIRE(C->island == -1);
     REQUIRE(D->island == 2);
     REQUIRE(A3->island == 3);
+    REQUIRE(H7->island == 4);
+    REQUIRE(H8->island == 4);
+    REQUIRE(L9->island == 5);
+    REQUIRE(L10->island == 6);
+    REQUIRE(S11a->island == 7);
+    REQUIRE(S11b->island == 7);
     REQUIRE(nodes[0].size() == 4);
 }
 
