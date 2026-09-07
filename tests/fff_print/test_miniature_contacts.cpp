@@ -312,14 +312,14 @@ TEST_CASE("Miniature contacts keep a small overhang island that sits within the 
     // print_z 7.4, while the lip keeps its cluster at print_z 8.0.
     const ContactClusters off = clusters_for("0");
     REQUIRE(count_in_box(off, -12.8, -11.7, 3.2, 4.3, 7.4) == 1);
-    REQUIRE(count_in_box(off, -13.0, 13.0, 3.0, 6.0, 8.0) >= 1);
+    REQUIRE(count_in_box(off, -13.0, 13.0, 3.3, 6.0, 8.0) >= 1);
 
     // Leg 2, the mode on: the peg's contact sits 0.60..0.92 mm from the lip's corner contact, inside the
-    // 1 mm support_contact_min_distance, so today's radius-first, cross-island decimation suppresses it
-    // and the peg is left unsupported. Decimation is per overhang island, so both clusters must survive.
+    // 1 mm support_contact_min_distance, so the pre-change radius-first, island-blind order suppressed it
+    // and left the peg unsupported. Decimation is per overhang island, so both clusters must survive.
     const ContactClusters on = clusters_for("1");
     REQUIRE(count_in_box(on, -12.8, -11.7, 3.2, 4.3, 7.4) == 1);
-    REQUIRE(count_in_box(on, -13.0, 13.0, 3.0, 6.0, 8.0) >= 1);
+    REQUIRE(count_in_box(on, -13.0, 13.0, 3.3, 6.0, 8.0) >= 1);
 }
 
 TEST_CASE("decimate_contact_nodes honours pinning, identity, the strict bound and a non-positive distance", "[MiniatureContacts]")

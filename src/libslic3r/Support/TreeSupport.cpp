@@ -723,6 +723,7 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
     static const double sharp_tail_max_support_height = 16.f;
     // a region is considered well supported if the number of layers below it exceeds this threshold
     const int thresh_layers_below = 10 / config.layer_height;
+
     // for small overhang removal
     struct OverhangCluster {
         std::map<int, const ExPolygon*> layer_overhangs;
