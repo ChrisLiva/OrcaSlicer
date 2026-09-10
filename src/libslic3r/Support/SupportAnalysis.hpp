@@ -237,18 +237,19 @@ struct Report
 };
 
 // The object's own body, sliced: one slab per object layer, in the object's canonical unshifted
-// instance frame. It is what a branch may terminate against, what has to be standing on the plate
-// itself before such a termination holds anything up, and the first of it is what the object stands on.
+// instance frame. It is what a branch may terminate against, what has to be connected to its own first
+// layer before such a termination holds anything up, and that first layer, which the plate or a raft
+// carries, is what the object stands on.
 std::vector<Slab> model_slabs_of(const PrintObject &object);
 
 // Which polygons of `support` the print would lay in mid-air: one flag per polygon of each slab, set
 // where the polygon's connected component of support material neither starts on the plate nor, where
-// `on_build_plate_only` is off, comes down onto plate-rooted model material within `bottom_gap_mm`
-// plus its own slab of its underside. Components join through positive-area overlap between the
-// polygons of consecutive slabs whose Z intervals touch, so a slab that printed nothing separates
-// what is above it from what is below. A geometric connectivity rule, not a force estimate: it is
-// what the stability measurement counts as unsupported paths, offered to a generator so the material
-// it counts is never printed.
+// `on_build_plate_only` is off, comes down onto model material connected to the object's first layer
+// within `bottom_gap_mm` plus its own slab of its underside. Components join through positive-area
+// overlap between the polygons of consecutive slabs whose Z intervals touch, so a slab that printed
+// nothing separates what is above it from what is below. A geometric connectivity rule, not a force
+// estimate: it is what the stability measurement counts as unsupported paths, offered to a generator
+// so the material it counts is never printed.
 std::vector<std::vector<bool>> floating_pieces(const std::vector<Slab> &support, const std::vector<Slab> &model,
                                                bool on_build_plate_only, double bottom_gap_mm);
 
