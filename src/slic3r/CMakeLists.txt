@@ -906,6 +906,21 @@ if (SLIC3R_PCH AND NOT SLIC3R_SYNTAXONLY)
     add_precompiled_header(libslic3r_gui pchheader.hpp FORCEINCLUDE)
 endif ()
 
+# Only these sources read GIT_COMMIT_HASH, so only they carry the define; the
+# fallback in libslic3r_version.h.in covers builds without git. They skip the
+# precompiled header, which is compiled without the define.
+if (GIT_COMMIT_HASH)
+    set_source_files_properties(
+        GUI/AboutDialog.cpp
+        GUI/TroubleshootDialog.cpp
+        GUI/GUI_App.cpp
+        ../dev-utils/BaseException.cpp
+        PROPERTIES
+            COMPILE_DEFINITIONS "GIT_COMMIT_HASH=\"${GIT_COMMIT_HASH}\""
+            SKIP_PRECOMPILE_HEADERS ON
+    )
+endif ()
+
 if (APPLE)
     # Static FFmpeg from the deps install: nothing to bundle into the .app,
     # no rpath/install_name handling. Order matters: avcodec -> swscale -> avutil.
