@@ -1463,6 +1463,11 @@ void run_exhaustive_case(const SupportValidation::Manifest &manifest, const Supp
                          const std::string &style, const std::string &mode, const AutoTilt::Constants &k,
                          std::ostream &rows)
 {
+    // GeneratedEvaluator refuses Organic before slicing (`organic_or_non_tree_support`), so every
+    // pose would write an Unknown row the validator rejects; measure_case's `if (style == "organic")`
+    // branch carries the case as its estimate instead.
+    if (style == "organic")
+        return;
     const std::vector<AutoTilt::Pose> poses = AutoTilt::grid(k);
     // The evaluator validates each posed plate before slicing it, and relative extruder addressing
     // makes Print::validate demand a per-layer reset; the loaded config still outranks this default.
@@ -1883,6 +1888,37 @@ TEST_CASE("A manifest case naming the Organic style is measured as an estimate, 
     CHECK(legacy.status != SupportValidation::Outcome::OrganicEstimate);
     CHECK(legacy.status != SupportValidation::Outcome::Unknown);
     CHECK_FALSE(legacy.estimate_only);
+}
+
+TEST_CASE("An Organic manifest case writes no auto-tilt rows", "[AutoTilt]")
+{
+    ScopedTemporaryDir root("orca-manifest");
+    const std::string  model = (root.path() / "case.stl").string();
+    const TriangleMesh mesh  = cube(8.);
+    REQUIRE(its_write_stl_binary(model.c_str(), "case", mesh.its));
+
+    SupportValidation::Manifest manifest;
+    manifest.version    = 1;
+    manifest.model_root = root.string();
+    SupportValidation::ManifestCase entry;
+    entry.id            = "organic_sweep_case";
+    entry.model         = "case.stl";
+    entry.selectors     = { "index:0" };
+    entry.repeats       = 1;
+    entry.sha256        = std::string(64, 'a');
+    entry.config_digest = std::string(64, 'b');
+
+    // The evaluator refuses Organic before slicing, so every pose would read Unknown, a status the
+    // validator rejects; the contact harness carries the case as its estimate instead.
+    std::ostringstream organic;
+    run_exhaustive_case(manifest, entry, "organic", "off", coarse_constants(), organic);
+    CHECK(organic.str().empty());
+
+    // A legacy style still sweeps: one row per pose per repeat and one selection row.
+    std::ostringstream legacy;
+    run_exhaustive_case(manifest, entry, "tree_slim", "off", coarse_constants(), legacy);
+    const std::string text = legacy.str();
+    CHECK(size_t(std::count(text.begin(), text.end(), '\n')) == AutoTilt::grid(coarse_constants()).size() * entry.repeats + 1);
 }
 
 TEST_CASE("The exhaustive sweep measures a selected pose against the best pose in the grid", "[AutoTilt]")

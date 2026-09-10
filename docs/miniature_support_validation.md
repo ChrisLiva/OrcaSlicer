@@ -168,8 +168,10 @@ repeats as one series and reject its own correct output.
 a result of zero, so a number is only read where its flag says it was taken; a non-finite number
 under a raised flag fails the run.
 
-A `selection` row is what the auto-tilt exhaustive sweep found for one case, style and feature mode.
-It carries a `selection_summary`:
+A `selection` row is what the auto-tilt exhaustive sweep found for one case, legacy style
+(`tree_slim`, `tree_strong` or `tree_hybrid`) and feature mode. An `organic` style writes no auto-tilt
+rows, because the evaluator refuses Organic before slicing; the contact harness carries that case as its
+`organic_estimate` row. A selection row carries a `selection_summary`:
 
 | Field | Meaning |
 | --- | --- |
