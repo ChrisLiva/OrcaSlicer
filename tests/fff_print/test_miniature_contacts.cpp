@@ -1244,8 +1244,9 @@ TEST_CASE("Explicitly disabled miniature contacts preserve stock legacy output a
     REQUIRE(raft_layers >= 3);
     REQUIRE(raft_object.support_raft_layers() == raft_layers);
 
-    // A second pass over the same object starts from the frozen problem rather than from what the
-    // first pass left behind: its node pool holds the contacts of this pass alone. Legacy tree output
+    // A second pass over the same object starts from a fresh node pool, because clear_support_layers()
+    // reset the cache when the support step was invalidated: the pool holds the contacts of this pass
+    // alone. Legacy tree output
     // is not reproducible run to run (AGENTS.md "Testing"), so the pool is held to a bound rather than
     // to a number; a pass that inherited the previous pool would hold both passes at once.
     const ContactClusters first_anchors = contact_clusters(raft_object);

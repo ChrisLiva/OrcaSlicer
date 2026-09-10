@@ -506,6 +506,9 @@ def _validate_row_shape(row, index, cases, failures):
         failures.append("%s: config digest does not match the manifest case" % where)
     if not isinstance(row["build_revision"], str) or not row["build_revision"]:
         failures.append("%s: no build revision" % where)
+    elif row["build_revision"] == "0000000":
+        # libslic3r_version.h's fallback: the harness was built without the commit stamped.
+        failures.append("%s: build revision is the version header's 0000000 fallback" % where)
     if not _is_finite(row["elapsed_s"]) or row["elapsed_s"] < 0.0:
         failures.append("%s: elapsed_s is not a finite runtime" % where)
 

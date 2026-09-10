@@ -149,7 +149,8 @@ constexpr size_t verified_finalist_count = 5;
 // stands in, taken once and compared against throughout; `selected` is the pose to apply on Improved
 // and a copy of `root` on every other outcome. `shortlist` is the finalists the cheap sweep chose,
 // best cheap score first, and the two counts say how much was actually measured, so no caller can
-// read a `verified_finalist_count`-finalist answer as a swept grid. Canceled says the search stopped before it settled;
+// read a `verified_finalist_count`-finalist answer as a swept grid. Canceled says the search stopped
+// before it settled;
 // VerificationUnavailable says the root itself was never measured; UnresolvedCoverage says the root
 // pose leaves a required region of the object open, which is a finding about the object rather than
 // about any candidate.

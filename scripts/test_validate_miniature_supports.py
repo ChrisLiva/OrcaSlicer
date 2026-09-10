@@ -432,6 +432,14 @@ class ResultOutcomeTest(unittest.TestCase):
         rows = _pose_rows(self.case, status="unresolved_coverage", reason_codes=["MissingAnchor"])
         self.assertTrue(validate_results(self.manifest, rows))
 
+    def test_a_row_stamped_with_the_version_header_fallback_revision_fails(self):
+        # libslic3r_version.h defines GIT_COMMIT_HASH "0000000" wherever the build did not stamp the
+        # real commit, so a row carrying it names no build at all.
+        rows = _pose_rows(self.case, build_revision="0000000")
+        self.assertTrue(validate_results(self.manifest, rows))
+        rows = _pose_rows(self.case, build_revision="")
+        self.assertTrue(validate_results(self.manifest, rows))
+
     def test_an_invalid_pose_row_is_accepted_only_where_the_plate_cannot_hold_it(self):
         rows = _pose_rows(self.case, status="invalid", plate_contained=False, printable=False)
         self.assertEqual(validate_results(self.manifest, rows), [])
@@ -590,7 +598,7 @@ class DemonstrationTest(unittest.TestCase):
                 row["reason_codes"] = ["MissingAnchor"]
         self.assertTrue(validate_demonstrations(manifest, rows))
 
-    def test_overlapping_volume_envelopes_do_not_demonstrate_a_reduction(self):
+    def test_a_gain_below_the_configured_bound_does_not_demonstrate_a_reduction(self):
         manifest = self._suite()
         # Every feature-off reading is 9.9 and the feature-on readings span 9.4..9.8, so the two spreads
         # are disjoint: the case fails on the size of the gain (envelope_clears), not on overlap.
