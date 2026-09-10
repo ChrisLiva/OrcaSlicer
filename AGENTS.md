@@ -10,7 +10,7 @@ OrcaSlicer — open-source C++17 3D slicer. wxWidgets GUI, CMake build system.
 brew install cmake ninja automake libtool texinfo
 ./build_release_macos.sh -d -a arm64 -x
 
-# macOS (CMAKE_BUILD_PARALLEL_LEVEL=5 in ~/.zshrc caps the jobs; see below)
+# macOS
 cmake --build build/arm64 --config Release --target fff_print_tests -- -j5
 cmake --build build/arm64 --config Release --target OrcaSlicer -- -j5
 
@@ -38,13 +38,13 @@ test objects took 395 s at `-j12` and 53 s at `-j5` (measured 2026-09-08). Pass 
 `CMAKE_BUILD_PARALLEL_LEVEL=5` in the shell.
 
 Build the target you are iterating on, not `all`: `all` is 929 objects, `OrcaSlicer` 716,
-`fff_print_tests` 385 (106 of them Catch2, compiled once). Preview what a change will rebuild with
+`fff_print_tests` 385 (106 of them Catch2, compiled once; counted 2026-09-08). Preview what a change will rebuild with
 `ninja -C build/arm64 -f build-Release.ninja -n -d explain <target> | head`. Headers in the
 precompiled header set (`libslic3r.h`, `Point.hpp`, `PrintConfig.hpp`, `Config.hpp`) reach every
 object in libslic3r and the GUI, `Print.hpp` reaches about 120 per config, `Support/*.hpp` reach 7
 or fewer. A `CMakeLists.txt` edit reconfigures but recompiles only what its flags change:
-`GIT_COMMIT_HASH` reaches the four sources that read it (`set_source_files_properties` in
-`src/slic3r/CMakeLists.txt`), where the former global `add_definitions()` re-stamped every object
+`GIT_COMMIT_HASH` reaches the five sources that read it (`set_source_files_properties` in
+`src/slic3r/CMakeLists.txt` and `tests/fff_print/CMakeLists.txt`), where the former global `add_definitions()` re-stamped every object
 after each new commit (1 h 14 min for `--target all`, 2026-09-08).
 
 Never start a second `cmake --build` in a build directory that already has one running: two Ninja
@@ -81,24 +81,19 @@ generator's output. The pass costs the union of every layer's footprints: `STAGE
 -> 6.4 s per attempt on that plate.
 Gate on Catch2 case counts, not assertion counts: `fff_print_tests "[MiniatureContacts]~[.]"` reported
 102184, 103169, 104814, 106441 and 106975 assertions across five runs of one binary while its case count held
-at 32 (2026-09-08/09).
+(2026-09-08/09).
 Under `ctest -j5` a test process occasionally stalls with every thread in `condition_variable::wait`: 2 of
-about 25 suite runs at `f016807825` stalled one `fff_print_tests` case, and one run stalled five cases at once
+about 25 suite runs stalled one `fff_print_tests` case, and one run stalled five cases at once
 from four unrelated suites (`SLASupportGeneration`, `MultiFilament`, `AutoTilt`, `MiniatureContacts`), each of
 which passes alone in under 22 s (2026-09-09). `orcaslicer_discover_tests` in `tests/CMakeLists.txt` sets
 `TIMEOUT 300` on every registered case so a stall fails at 300 s instead of holding the run for ten minutes;
 re-run once before reading a lone timeout as a regression.
-Catch2 splits a `<binary> "<name>"` filter on commas: run a TEST_CASE whose name contains a comma with the comma
-escaped as `\,`, or the binary prints `No tests ran` (2026-09-09).
 ClipperLib's output is not invariant under removing clip polygons that are provably disjoint from the subject: on
 plate 3 of a 36 MB miniature project, clipping 61082 attributed support areas against a bbox-prefiltered clip
 changed the result on 32894 of them by up to 7.4e-7 mm² and joined or split two pieces meeting at a one-unit
 neck on 17, against the whole-layer clip (`intersection_ex`, measured 2026-09-09). An oracle that expects
 byte-identical polygons from a Clipper call whose clip set changed fails on correct code; compare counts and
 areas within an envelope instead.
-`TreeSupportProfiler::stage_finish` assigns `stage_durations[stage]` rather than adding to it, so a stage entered
-twice within one `generate` would print only its last duration; every stage runs once per slice today, so the
-`tree support time` line that `--debug 3` logs is complete (2026-09-09).
 `init_print` in `tests/fff_print/test_helpers.cpp` arranges against `InfiniteBed{}` and leaves the instance at the
 origin, so the stock 0..200 mm `m_machine_border` clips any support branch that walks across x 0 in
 `TreeSupport::draw_circles` (`intersection_ex(base_areas, m_machine_border)`): a fixture centred on the origin whose
@@ -109,9 +104,9 @@ journey in `test_miniature_contacts.cpp`, 2026-09-09).
 attempt's fatter tips split into about three pieces each and the piece count barely moves (47 vs 49 on the wedge)
 while the layers holding a contact and `total_mm2` halve (18 vs 50, 18.92 vs 40.88 mm2). An oracle for contact
 thinning counts distinct contact `print_z` values or area, never pieces (2026-09-09).
-`fff_print_tests "[AutoTilt]"` fails one of its 27 cases about 1 run in 12 with no stall (26 passed, 1 failed; 1 of 8
-runs on 2026-09-09 at b92c756060 and 1 of 15 at 03b5f3a7dc, never captured, every re-run green); re-run once before
-reading a lone `[AutoTilt]` failure as a regression. One such failure named its case: "A processed tree-support print
+`fff_print_tests "[AutoTilt]"` fails one case about 1 run in 12 with no stall (1 of 8 runs and 1 of 15 on 2026-09-09,
+never captured, every re-run green); re-run once before reading a lone `[AutoTilt]` failure as a regression. One such
+failure named its case: "A processed tree-support print
 measures its emitted contact through the support analysis" failed once in the `ctest -j5` gate on 2026-09-10, passing
 alone and on the re-run, assertion not captured. Capture the failing assertion before re-running.
 `[MiniatureContacts]` "Support components come from printed slabs that touch, and material with no root is counted"
@@ -126,7 +121,7 @@ counts 2 critical printable regions without material. `AutoTiltEvaluation` reads
 that wants the region count reads `SupportAnalysis::support_unresolved` or the log line (2026-09-10).
 Plate 3 baselines for a perf or density reading (`--debug 3 --slice 3`, Release, one slice at a time, 2026-09-10):
 main `f3a07a0b37` 13.5 s wall, interface E 1.21 mm on 45 layers and 81 clusters, stable over three runs; the
-miniature-contacts branch at `7a341032bd` 43.1 s, 1.31 to 1.32 mm on 47 layers and 80 to 81 clusters, drifting
+miniature-contacts branch 43.1 s, 1.31 to 1.32 mm on 47 layers and 80 to 81 clusters, drifting
 between runs of one binary. The branch's extra 29.6 s sits in `STAGE_RISK_FIELD` 9.3 s, `STAGE_MEASURE` 7.3 s,
 the serial region-merge double loop in `TreeSupport::build_contact_seeds` 4.7 s (wrapped by no stage),
 `STAGE_SELECT_CONTACTS` 4.0 s and `remove_floating_toolpaths` 3.7 s.

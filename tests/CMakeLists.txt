@@ -74,9 +74,7 @@ function(orcaslicer_copy_test_dlls)
 endfunction()
 
 # Register Catch2 tags as CTest labels so `ctest -L`/`-LE` can filter by tag.
-# TIMEOUT 300: the slowest registered case runs 21 s, and under `-j5` a test process occasionally stalls
-# with every thread waiting on a condition variable (once five cases from four suites at the same moment);
-# the timeout turns a stall into a failure at 300 s instead of a ten-minute hang (see AGENTS.md, Testing).
+# TIMEOUT 300 fails a stalled case at 300 s instead of holding the run (see AGENTS.md, Testing).
 function(orcaslicer_discover_tests TARGET)
     catch_discover_tests(${TARGET} ADD_TAGS_AS_LABELS PROPERTIES TIMEOUT 300)
 endfunction()

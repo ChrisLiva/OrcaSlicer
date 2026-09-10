@@ -153,7 +153,7 @@ repeats as one series and reject its own correct output.
 | `case_id`, `style`, `feature_mode`, `pose`, `repeat` | which measurement this is |
 | `status` | `complete`, `unresolved_coverage`, `organic_estimate`, `invalid`, `unknown` |
 | `measured` | false is a skipped measurement, which always fails |
-| `printable`, `plate_contained` | `invalid` is accepted only where exact plate containment refused the pose |
+| `printable`, `plate_contained` | `invalid` is accepted only where the evaluator refused the pose, through `plate_refusal` or `Print::validate` |
 | `reason_codes` | the measurement's own reason codes |
 | `metrics` | see below |
 | `elapsed_s` | the wall clock the generation took |
@@ -192,7 +192,7 @@ rows, because the evaluator refuses Organic before slicing; the contact harness 
 - An `unresolved_coverage` case is unresolved in every repeat and carries its declared reason. It
   never enters quality ranking, so its numbers are never held to a bound.
 - An Organic row is estimate-only and never verified. `unknown` always fails, and `invalid` is
-  accepted only where the plate refused the pose.
+  accepted only where the evaluator refused the pose (`plate_refusal` or `Print::validate`).
 - Every selection row visited all 77 grid entries, made no false move, carries no worse discrete
   classification than the best pose, and regrets at most 0.10.
 - The suite demonstrated what it claims: at least one `redundant_support_reduction` case where some

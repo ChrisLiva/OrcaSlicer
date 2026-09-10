@@ -142,7 +142,7 @@ PHYSICAL_TEXT_FIELDS = (
     "tool",
 )
 
-# What the twelve prints of one case hold fixed. Only the two feature states, and the orientation the
+# What the PHYSICAL_PRINTS_PER_CASE prints of one case hold fixed. Only the two feature states, and the orientation the
 # tilt state implies, are the experiment's variables.
 PHYSICAL_CONSTANT_FIELDS = (
     "printer",
@@ -537,9 +537,8 @@ def _validate_row_shape(row, index, cases, failures):
 def _expected_for_mode(case, mode):
     """The outcome and reason this case declares for one feature mode.
 
-    One generation runs in either feature mode, and a legacy row reads its measurement: `complete`
-    where the measurement completed, `unresolved_coverage` where it did not. A case may still declare
-    a different outcome for each mode. A case that declares only one outcome is held to it in both.
+    A case may declare a different outcome for each mode; one that declares only one outcome is held
+    to it in both.
     """
     outcome = (case.get("expected_outcome_by_mode") or {}).get(mode, case.get("expected_outcome"))
     reason = (case.get("expected_reason_by_mode") or {}).get(mode, case.get("expected_reason"))
@@ -553,7 +552,8 @@ def _validate_row_outcome(row, case, failures):
     metrics = row["metrics"] if isinstance(row["metrics"], dict) else {}
 
     if status == "invalid":
-        # The exhaustive sweep records Invalid for a pose the plate cannot hold, and for nothing else.
+        # The exhaustive sweep records Invalid where the evaluator refused the pose, through plate_refusal
+        # or Print::validate, and for nothing else.
         if row.get("plate_contained") is not False:
             failures.append("%s: Invalid without a plate that refused the pose" % where)
         return
@@ -947,7 +947,7 @@ def _validate_physical_row(case, record, failures):
 
 
 def _validate_physical_constants(case_id, records):
-    """The one seed a case draws, and the conditions its twelve prints hold fixed."""
+    """The one seed a case draws, and the conditions its PHYSICAL_PRINTS_PER_CASE prints hold fixed."""
     failures = []
     if any(record["order_seed"] is None for record in records):
         failures.append("case %s: order_seed is not an integer on every row" % case_id)
@@ -964,7 +964,7 @@ def _validate_physical_constants(case_id, records):
 
 
 def _validate_physical_orders(case_id, records):
-    """Print order and removal order, each a permutation of 1..12 over the whole case."""
+    """Print order and removal order, each a permutation of 1..PHYSICAL_PRINTS_PER_CASE over the whole case."""
     failures = []
     expected = list(range(1, PHYSICAL_PRINTS_PER_CASE + 1))
     for field in ("run_order", "removal_order"):
@@ -1090,7 +1090,7 @@ def _validate_physical_case(case, records):
     accepted = [seen[key] for key in sorted(seen)]
     failures.extend(_validate_physical_constants(case_id, accepted))
     # An incomplete case has already said so once per missing print; its orders cannot be a
-    # permutation of twelve and its treatments cannot be compared.
+    # permutation of PHYSICAL_PRINTS_PER_CASE and its treatments cannot be compared.
     if len(seen) == PHYSICAL_PRINTS_PER_CASE:
         failures.extend(_validate_physical_orders(case_id, accepted))
         failures.extend(_physical_acceptance(case_id, seen))

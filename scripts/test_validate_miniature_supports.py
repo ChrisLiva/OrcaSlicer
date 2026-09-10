@@ -592,8 +592,8 @@ class DemonstrationTest(unittest.TestCase):
 
     def test_overlapping_volume_envelopes_do_not_demonstrate_a_reduction(self):
         manifest = self._suite()
-        # The feature-on readings reach 9.8 while the feature-off readings reach down to 9.6: the two
-        # spreads overlap, which is inconclusive rather than a verified saving.
+        # Every feature-off reading is 9.9 and the feature-on readings span 9.4..9.8, so the two spreads
+        # are disjoint: the case fails on the size of the gain (envelope_clears), not on overlap.
         rows = self._rows(manifest, redundant_on=[9.8, 9.4, 9.6, 9.5, 9.7, 9.6, 9.5])
         for row in rows:
             if row["case_id"] == "redundant" and row["feature_mode"] == "off":
@@ -638,7 +638,7 @@ class DemonstrationTest(unittest.TestCase):
         self.assertEqual(validate_demonstrations(manifest, rows), [])
 
     def test_a_style_whose_damage_rose_is_not_hidden_by_another_style(self):
-        # Strong's risk trebles with the feature on while Slim's falls. The worst reading either mode
+        # Strong's risk rises from 10 to 95 with the feature on while Slim's falls. The worst reading either mode
         # produced across both styles hides that: 95 under Strong stays below Slim's 100 with the
         # feature off, so a pooled comparison passes a case that got worse under one style.
         manifest = self._suite()
@@ -931,7 +931,7 @@ def _physical_manifest():
 
 
 def _physical_rows(case_id=PHYSICAL_CASE_ID):
-    """One complete record: twelve prints, every one finished, nothing broken, mass down."""
+    """One complete record: PHYSICAL_PRINTS_PER_CASE prints, every one finished, nothing broken, mass down."""
     rows = []
     for position, treatment in enumerate(TREATMENTS):
         for repeat in range(1, PHYSICAL_REPEATS + 1):
@@ -940,7 +940,8 @@ def _physical_rows(case_id=PHYSICAL_CASE_ID):
                 "case_id": case_id,
                 "treatment": treatment,
                 "repeat": str(repeat),
-                # Two independent draws of the one seed, each a permutation of 1..12.
+                # Two draws of the one seed, each a permutation of 1..PHYSICAL_PRINTS_PER_CASE; removal
+                # order is the reverse of run order.
                 "run_order": str(index + 1),
                 "removal_order": str(PHYSICAL_PRINTS_PER_CASE - index),
                 "order_seed": "20260908",
@@ -1267,7 +1268,7 @@ class PhysicalAcceptanceTest(unittest.TestCase):
 
 
 class PhysicalCommandTest(unittest.TestCase):
-    """The oracle the plan names, run end to end over files on disk.
+    """Run end to end over files on disk.
 
     Every example here verifies the recorder. None of them says a support came off a printed
     miniature: the numbers are typed, and a passing example means the record is complete and the
