@@ -15,6 +15,7 @@
 #include "SVG.hpp"
 #include "TreeSupportCommon.hpp"
 #include "TreeSupport.hpp"
+#include "DisjointSets.hpp"
 #include "TreeSupport3D.hpp"
 #include <libnest2d/backends/libslic3r/geometries.hpp>
 #include <libnest2d/placers/nfpplacer.hpp>
@@ -30,7 +31,6 @@
 #include <algorithm>
 #include <functional>
 #include <limits>
-#include <numeric>
 
 #ifndef M_PI
 #define M_PI 3.1415926535897932384626433832795
@@ -2079,15 +2079,7 @@ void TreeSupport::build_contact_seeds(const PreparedLegacy &prepared)
     // it whose polygon its own dilation reaches. Every region is filed under its component, whether a
     // contact was placed for it or not, and the first seed of each component is critical, so thinning
     // can never leave a component unanchored.
-    std::vector<size_t> component(region_count);
-    std::iota(component.begin(), component.end(), size_t(0));
-    std::function<size_t(size_t)> root = [&](size_t i) {
-        while (component[i] != i) {
-            component[i] = component[component[i]];
-            i            = component[i];
-        }
-        return i;
-    };
+    DisjointSets components(region_count);
     {
         std::vector<ExPolygons>  dilated(region_count);
         std::vector<BoundingBox> dilated_bbox(region_count), bbox(region_count);
@@ -2106,7 +2098,7 @@ void TreeSupport::build_contact_seeds(const PreparedLegacy &prepared)
         for (size_t i = 0; i < region_count; ++ i)
             for (size_t j = i + 1; j < region_count &&
                                    m_problem.regions[j].object_layer <= m_problem.regions[i].object_layer + layer_window; ++ j) {
-                const size_t ri = root(i), rj = root(j);
+                const size_t ri = components.find(i), rj = components.find(j);
                 if (ri == rj)
                     continue;
                 // j sits on the same layer as i or above it, so j's own dilation is the one that counts.
@@ -2114,14 +2106,14 @@ void TreeSupport::build_contact_seeds(const PreparedLegacy &prepared)
                     continue;
                 if (intersection_ex(dilated[j], ExPolygons{ m_problem.regions[i].polygon }).empty())
                     continue;
-                component[ri] = rj;
+                components.join(rj, ri);
             }
     }
 
     // Every region's component, seeded or not: the measurement carries cells into regions no
     // contact was placed for.
     for (size_t r = 0; r < region_count; ++ r)
-        m_problem.regions[r].component = root(r);
+        m_problem.regions[r].component = components.find(r);
 
     // One reading per seed, and each is a search over the whole field from a point no other reading
     // depends on. The field is const here and the sampler keeps no state across calls, so the necks are
@@ -2142,7 +2134,7 @@ void TreeSupport::build_contact_seeds(const PreparedLegacy &prepared)
     std::vector<char> component_seeded(region_count, 0);
     for (size_t i = 0; i < m_problem.seeds.size(); ++ i) {
         MiniatureSupport::ContactSeed &seed = m_problem.seeds[i];
-        const size_t owner = root(size_t(seed.region_id));
+        const size_t owner = components.find(size_t(seed.region_id));
         const bool   first = ! component_seeded[owner];
         component_seeded[owner] = 1;
         // Three clauses, and a seed is critical when any of them holds. A painted enforcer's overhang and

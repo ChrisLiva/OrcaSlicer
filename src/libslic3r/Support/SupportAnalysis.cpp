@@ -1,5 +1,6 @@
 #include "SupportAnalysis.hpp"
 
+#include "DisjointSets.hpp"
 #include "../AABBMesh.hpp"
 #include "../ClipperUtils.hpp"
 #include "../Geometry/ConvexHull.hpp"
@@ -13,7 +14,6 @@
 #include <cmath>
 #include <functional>
 #include <limits>
-#include <numeric>
 #include <queue>
 #include <set>
 
@@ -105,15 +105,7 @@ Components build_components(const std::vector<Slab> &slabs, double ground_z)
         out.slab_range[s].second = out.pieces.size();
     }
 
-    std::vector<size_t> parent(out.pieces.size());
-    std::iota(parent.begin(), parent.end(), size_t(0));
-    const std::function<size_t(size_t)> find = [&parent](size_t x) {
-        while (parent[x] != x) {
-            parent[x] = parent[parent[x]];
-            x         = parent[x];
-        }
-        return x;
-    };
+    DisjointSets sets(out.pieces.size());
 
     // Two pieces whose boxes do not overlap intersect in nothing, so the clip runs on the pairs whose
     // boxes do: a few per piece on a layer of hundreds, where the pairwise clip is hundreds per piece.
@@ -132,13 +124,13 @@ Components build_components(const std::vector<Slab> &slabs, double ground_z)
                     continue;
                 out.pieces[i].above.push_back(j);
                 out.pieces[j].below.push_back(i);
-                parent[find(i)] = find(j);
+                sets.join(j, i);
             }
     }
 
     std::vector<size_t> label(out.pieces.size(), size_t(-1));
     for (size_t i = 0; i < out.pieces.size(); ++ i) {
-        const size_t root = find(i);
+        const size_t root = sets.find(i);
         if (label[root] == size_t(-1))
             label[root] = out.count ++;
         out.pieces[i].component = label[root];

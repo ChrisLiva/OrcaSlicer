@@ -1,5 +1,6 @@
 #include "ModelSupportRisk.hpp"
 
+#include "DisjointSets.hpp"
 #include "../ClipperUtils.hpp"
 #include "../AABBMesh.hpp"
 #include "../BoundingBox.hpp"
@@ -10,7 +11,6 @@
 #include <cmath>
 #include <limits>
 #include <map>
-#include <numeric>
 #include <queue>
 
 #include <tbb/blocked_range.h>
@@ -181,17 +181,6 @@ Point inside_point(const ExPolygon &joint)
     Point core;
     return interior_point(joint, core) ? core : joint.contour.centroid();
 }
-
-// Disjoint sets over node indices, so the medial branches of one island can be checked for being one
-// connected piece and joined where the skeleton came back in pieces.
-struct DisjointSets
-{
-    std::vector<size_t> parent;
-
-    explicit DisjointSets(size_t n) : parent(n) { std::iota(parent.begin(), parent.end(), size_t(0)); }
-    size_t find(size_t i) { while (parent[i] != i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; }
-    bool   join(size_t a, size_t b) { a = find(a); b = find(b); if (a == b) return false; parent[b] = a; return true; }
-};
 
 // An island's medial skeleton can come back in pieces even though the solid is one connected body.
 // Joining the pieces at their closest node pair keeps the island one piece of the graph, at the cost

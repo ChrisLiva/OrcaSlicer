@@ -442,6 +442,7 @@ set(lisbslic3r_sources
     SlicingAdaptive.hpp
     Slicing.cpp
     Slicing.hpp
+    Support/DisjointSets.hpp
     Support/MiniatureSupport.cpp
     Support/MiniatureSupport.hpp
     Support/ModelSupportRisk.cpp
