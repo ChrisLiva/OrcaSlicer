@@ -3,6 +3,8 @@ add_executable(${_TEST_NAME}_tests
 	${_TEST_NAME}_tests.cpp
 	test_helpers.cpp
 	test_helpers.hpp
+	support_validation.cpp
+	support_validation.hpp
 	test_auto_tilt.cpp
 	test_cooling.cpp
 	test_extrusion_entity.cpp
