@@ -27,10 +27,10 @@ struct Slice
 };
 
 // What the field found under one queried point. `local_width_mm` is the model's own width there,
-// `neck_width_mm` the narrowest constriction between it and the bed along the path the model is
-// actually held by, `lever_mm` how far the query sits from that constriction, and `risk_per_mm2` the
-// dimensionless weight one mm2 of contact there carries. A relative geometric ranking, not a force
-// estimate and not a material model.
+// `neck_width_mm` the narrowest constriction between it and the object's first slab, which the plate
+// or a raft carries, along the path the model is actually held by, `lever_mm` how far the query sits
+// from that constriction, and `risk_per_mm2` the dimensionless weight one mm2 of contact there
+// carries. A relative geometric ranking, not a force estimate and not a material model.
 struct Sample
 {
     // BelowPrintableWidth is a measured result and keeps its widths: the feature is thinner than one
@@ -61,7 +61,7 @@ struct Field
         size_t island   = 0;
         Point  position;
         double width_mm = 0.;
-        bool   root     = false;   // the island this sample belongs to stands on the bed
+        bool   root     = false;   // its island is part of the object's first slab
     };
 
     // One undirected connection: two medial samples of one island, or two islands on adjacent layers
@@ -104,7 +104,7 @@ Field build(const std::vector<Slice> &slices, double extrusion_width_mm, const s
 
 // What the model under `query` on `layer` is worth carrying a contact on. Unknown wherever the field
 // is not Complete, the query lies in no solid, the local width cannot be measured, or no path over
-// the model's own solids reaches the bed.
+// the model's own solids reaches the object's first slab, which the plate or a raft carries.
 Sample sample(const Field &field, size_t layer, const Point &query);
 
 // The dimensionless weight `(w / max(t, w)) * (1 + L / max(n, w))`: w the resolved support extrusion

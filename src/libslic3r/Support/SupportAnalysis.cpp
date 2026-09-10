@@ -625,8 +625,8 @@ void measure_damage(Report &report, const PrintObject &object, const MiniatureSu
 }
 
 // What the model itself says about each contact the generator placed: the width of the solid under
-// the contact, the narrowest constriction between that solid and the bed, and how far the contact
-// sits from it.
+// the contact, the narrowest constriction between that solid and the object's first slab, and how
+// far the contact sits from it.
 void measure_contact_risk(Report &report, const PrintObject &object, const MiniatureSupport::Problem &problem,
                           const ModelSupportRisk::Field &field)
 {

@@ -145,9 +145,9 @@ struct Stability
 };
 
 // What the model around one placed contact is worth carrying it: its own local width there, the
-// narrowest constriction between it and the bed over the model's own solids, how far it sits from
-// that constriction, and the weight one mm2 of contact there carries. A relative geometric ranking,
-// not a force estimate and not a breakage guarantee.
+// narrowest constriction over the model's own solids between it and the object's first slab, how far
+// it sits from that constriction, and the weight one mm2 of contact there carries. A relative
+// geometric ranking, not a force estimate and not a breakage guarantee.
 struct ContactRisk
 {
     uint64_t                 seed_id = 0;

@@ -357,8 +357,9 @@ Field build(const std::vector<Slice> &slices, double extrusion_width_mm, const s
         }
     }
 
-    // Adjacent layers, both directions: a weapon hanging under its hand reaches the bed by climbing
-    // to the hand first. Only a real overlap connects them, never a bounding box that happens to.
+    // Adjacent layers, both directions: a weapon hanging under its hand reaches the object's first
+    // slab by climbing to the hand first. Only a real overlap connects them, never a bounding box that
+    // happens to.
     for (size_t l = 0; l + 1 < slices.size(); ++ l) {
         if (stopped()) {
             field.status = Field::Status::Canceled;
