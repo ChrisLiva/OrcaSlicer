@@ -529,7 +529,8 @@ public:
 
     // Asks the next legacy tree generation on this object to measure itself. _generate_support_material
     // consumes and clears it, so one request buys one analysis and an ordinary slice measures nothing.
-    // Not a saved setting and not a mode: it changes no geometry.
+    // Not a saved setting and not a mode. It adds the floating pass, which takes out the support
+    // extrusions resting on nothing, and otherwise leaves the generator's output alone.
     void                    request_legacy_support_analysis() { m_legacy_support_analysis_requested = true; }
 
     void                    config_apply(const ConfigBase &other, bool ignore_nonexistent = false) { m_config.apply(other, ignore_nonexistent); }
@@ -982,7 +983,8 @@ public:
     // Asks the next legacy tree support generation on every object of this print to measure itself,
     // reachable afterwards through PrintObject::support_analysis(). PrintObject holds the request
     // privately and consumes it in one generation, so this is the seam a caller owning a Print uses.
-    // It is a request, not a parameter of process(), and it changes no geometry.
+    // It is a request, not a parameter of process(). It adds the floating pass, which takes out the
+    // support extrusions resting on nothing, and otherwise leaves the generator's output alone.
     void                request_legacy_support_analysis();
     // Exports G-code into a file name based on the path_template, returns the file path of the generated G-code file.
     // If preview_data is not null, the preview_data is filled in for the G-code visualization (not used by the command line Slic3r).

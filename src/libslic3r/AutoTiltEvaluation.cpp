@@ -567,7 +567,8 @@ PoseEvaluation GeneratedEvaluator::evaluate(const Pose &pose, const StopPredicat
                 break;
             }
             // With the miniature contact mode on the generator measures itself already; with it off a
-            // legacy pass measures only when it is asked to, and asking changes no geometry.
+            // legacy pass measures only when it is asked to. Asking adds the floating pass, which takes
+            // out the support extrusions resting on nothing, and otherwise leaves the output alone.
             if (! object->config().support_miniature_contacts.value)
                 needs_request = true;
         }

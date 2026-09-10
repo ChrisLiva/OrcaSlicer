@@ -95,12 +95,21 @@ TEST_CASE("Support rests on the model only where the settings allow it and withi
     REQUIRE(SupportAnalysis::floating_pieces(support, model, false, 0.3) ==
             std::vector<std::vector<bool>>{ { false }, { false }, { false } });
 
-    // Model material that is itself floating holds nothing: the same block lifted 0.2 mm off the plate.
+    // The object on a raft: the same block lifted 0.2 mm off the plate. The block's first slab is the
+    // object's ground whether the plate or a raft carries it, so the piece on its top roots.
     std::vector<SupportAnalysis::Slab> lifted = model;
     for (SupportAnalysis::Slab &slab : lifted) {
         slab.bottom_z += 0.2;
         slab.print_z  += 0.2;
     }
     const std::vector<SupportAnalysis::Slab> raised{ slab_mm(1.2, 1.4, { on_top }) };
-    REQUIRE(SupportAnalysis::floating_pieces(raised, lifted, false, 0.) == std::vector<std::vector<bool>>{ { true } });
+    REQUIRE(SupportAnalysis::floating_pieces(raised, lifted, false, 0.) == std::vector<std::vector<bool>>{ { false } });
+
+    // Model material not connected to the first slab holds nothing: an island beside the block from
+    // z 0.6 to 1.0, with a piece standing on its top.
+    std::vector<SupportAnalysis::Slab> island_model = block_model();
+    island_model[3].polygons.push_back(rect_mm(20., 20., 22., 22.));
+    island_model[4].polygons.push_back(rect_mm(20., 20., 22., 22.));
+    const std::vector<SupportAnalysis::Slab> on_island{ slab_mm(1.0, 1.2, { rect_mm(20.5, 20.5, 21.5, 21.5) }) };
+    REQUIRE(SupportAnalysis::floating_pieces(on_island, island_model, false, 0.) == std::vector<std::vector<bool>>{ { true } });
 }

@@ -86,8 +86,10 @@ bool on_bed(double bottom_z)
 // What positive-area overlap between the polygons of consecutive touching slabs joins up. Two slabs
 // take part only when their closed Z intervals touch, so material separated by a slab that printed
 // nothing is separate however far the two overlap in plan, and an overlap that has no area joins
-// nothing either. `slabs` is ordered by ascending print_z.
-Components build_components(const std::vector<Slab> &slabs)
+// nothing either. `slabs` is ordered by ascending print_z. A component is rooted where one of its pieces
+// starts at `ground_z`: the plate for support, whose first slab (the raft's, where there is one) starts
+// there, and the object's own first slab for the model, which the plate or a raft carries.
+Components build_components(const std::vector<Slab> &slabs, double ground_z)
 {
     Components out;
     out.slab_range.resize(slabs.size());
@@ -143,15 +145,16 @@ Components build_components(const std::vector<Slab> &slabs)
     }
     out.bed_rooted.assign(out.count, 0);
     for (const Piece &piece : out.pieces)
-        if (on_bed(piece.bottom_z))
+        if (piece.bottom_z <= ground_z + EPSILON)
             out.bed_rooted[piece.component] = 1;
     return out;
 }
 
 // Which components of `support` stand on something. The plate first, then a termination against the
 // object, which counts only where the settings permit resting on the model at all and where the model
-// it rests on is itself standing on the plate. `model` is the object's own sliced body, in the same
-// frame as the support and already grouped into its own components.
+// it rests on is itself connected to the object's own first layer, which the plate or a raft carries.
+// `model` is the object's own sliced body, in the same frame as the support and already grouped into
+// its own components.
 std::vector<char> rooted_components(const Components &support, const std::vector<Slab> &model_slabs, const Components &model,
                                     bool on_build_plate_only, double bottom_gap)
 {
@@ -315,7 +318,7 @@ void measure_stability(Report &report, const PrintObject &object, const EmittedS
         stability = Stability();
         return; // nothing sliced: there is no frame to measure anything in
     }
-    const Components model = build_components(model_slabs);
+    const Components model = build_components(model_slabs, model_slabs.front().bottom_z);
 
     // What holds each component up: the plate, or model material where the settings permit resting on
     // it. The same rule the generator removes mid-air material by, so what it left standing is what is
@@ -656,9 +659,9 @@ void measure_contact_risk(Report &report, const PrintObject &object, const Minia
 
 } // namespace
 
-// The object's own body, sliced. It is what a branch may terminate against, what has to be standing
-// on the plate itself before such a termination holds anything up, and the first of it is what the
-// object stands on.
+// The object's own body, sliced. It is what a branch may terminate against, what has to be connected
+// to its own first layer before such a termination holds anything up, and that first layer, which the
+// plate or a raft carries, is what the object stands on.
 std::vector<Slab> model_slabs_of(const PrintObject &object)
 {
     std::vector<Slab> slabs;
@@ -676,9 +679,10 @@ std::vector<Slab> model_slabs_of(const PrintObject &object)
 std::vector<std::vector<bool>> floating_pieces(const std::vector<Slab> &support, const std::vector<Slab> &model,
                                                bool on_build_plate_only, double bottom_gap_mm)
 {
-    const Components        components = build_components(support);
+    const Components        components = build_components(support, 0.);
     const std::vector<char> rooted     = model.empty() ? components.bed_rooted :
-        rooted_components(components, model, build_components(model), on_build_plate_only, std::max(0., bottom_gap_mm));
+        rooted_components(components, model, build_components(model, model.front().bottom_z), on_build_plate_only,
+                          std::max(0., bottom_gap_mm));
     std::vector<std::vector<bool>> floating(support.size());
     for (size_t s = 0; s < support.size(); ++ s) {
         floating[s].assign(support[s].polygons.size(), false);
@@ -834,7 +838,7 @@ Report measure(const PrintObject &object, const MiniatureSupport::Problem &probl
     // nothing and damage reads it to find what would come off together.
     std::vector<size_t>     slab_of_layer;
     const std::vector<Slab> support_slabs = printed_support_slabs(object, emitted, slab_of_layer);
-    const Components        support       = build_components(support_slabs);
+    const Components        support       = build_components(support_slabs, 0.);
 
     // Stability reads the emitted material and the object alone, so it is measured whatever the
     // prepared problem asked for, and it is what it is even where coverage stays unresolved.

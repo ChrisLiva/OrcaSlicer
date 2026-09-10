@@ -2288,7 +2288,10 @@ void TreeSupport::generate_legacy(const PreparedLegacy &prepared)
     profiler.stage_start(STAGE_GENERATE_TOOLPATHS);
     m_object->print()->set_status(70, _u8L("Generating support"));
     generate_toolpaths();
-    const std::vector<ExPolygons> printed = remove_floating_toolpaths();
+    // Only a pass that measures itself removes what floats: with the mode off and no analysis asked
+    // for, the slice keeps the generator's own output, and the pass costs a union of every layer's
+    // footprints that such a slice would read nothing from.
+    const std::vector<ExPolygons> printed = m_analyze ? remove_floating_toolpaths() : std::vector<ExPolygons>();
     profiler.stage_finish(STAGE_GENERATE_TOOLPATHS);
 
     // How many of the support layers this attempt laid are the raft under the object.

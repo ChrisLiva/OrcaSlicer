@@ -72,11 +72,13 @@ exactly and the support count within a band (2 % held here).
 The same generator lays branches that end in mid-air: 110 floating components of printed support on plate 3
 of `elf_test.3mf` (Tree Slim, plate only, 0.5 mm xy distance), most of them one-layer slivers where a tip
 circle was clipped against the model, and one branch of the closed-box fixture in roughly 1 run in 8.
-`TreeSupport::remove_floating_toolpaths` takes those extrusions out after `generate_toolpaths`, by the
-connectivity rule `SupportAnalysis::floating_pieces` shares with the stability measurement, so a report
-measured off generated output has `unsupported_paths == 0` (plate 3: 110 -> 0, 2026-09-09); a report whose
-`EmittedSupport` a test edited by hand still counts what the edit left floating. The pass costs the union of
-every layer's footprints: `STAGE_GENERATE_TOOLPATHS` 0.7 s -> 6.4 s per attempt on that plate.
+`TreeSupport::remove_floating_toolpaths` takes those extrusions out after `generate_toolpaths` on a pass that
+measures itself (`m_analyze`: analysis requested or miniature contacts on), by the connectivity rule
+`SupportAnalysis::floating_pieces` shares with the stability measurement, so a report measured off generated
+output has `unsupported_paths == 0` (plate 3: 110 -> 0, 2026-09-09); a report whose `EmittedSupport` a test
+edited by hand still counts what the edit left floating. A stock slice runs no floating pass and keeps the
+generator's output. The pass costs the union of every layer's footprints: `STAGE_GENERATE_TOOLPATHS` 0.7 s
+-> 6.4 s per attempt on that plate.
 Gate on Catch2 case counts, not assertion counts: `fff_print_tests "[MiniatureContacts]~[.]"` reported
 102184, 103169, 104814, 106441 and 106975 assertions across five runs of one binary while its case count held
 at 32 (2026-09-08/09).

@@ -272,6 +272,18 @@ TriangleMesh box_fixture()
     return box;
 }
 
+// box_fixture() with a 19 x 19 x 1 mm platform floating at z 6..7 inside its void, 0.5 mm clear of
+// every wall. The ceiling's branches have no way past the platform, so every branch above z 7 rests on
+// model material connected to nothing below it.
+TriangleMesh caged_island_fixture()
+{
+    TriangleMesh box      = box_fixture();
+    TriangleMesh platform = make_cube(19, 19, 1);
+    platform.translate(2.5f, 2.5f, 6.f);
+    box.merge(platform);
+    return box;
+}
+
 // A 5 x 0.6 x 4 mm block at x -1..4 carrying a 20 x 0.6 x 2 mm slab rotated 10 degrees about Y,
 // its underside rising from z 3.29 at x 0 to 6.76 at x 19.7 and crossing the block's top at
 // x 4.03, so every band from the block's +x face up is an overhang of a face 10 degrees off
@@ -3093,8 +3105,8 @@ TEST_CASE("A branch roots on the model only where the settings allow it", "[Mini
             lowest = std::min(lowest, layer.bottom_z);
     REQUIRE(lowest > 2.);
 
-    // Where the settings permit resting on the object, and the model it rests on is standing on the
-    // plate itself, those branches are rooted.
+    // Where the settings permit resting on the object, and the model it rests on is connected to its
+    // own first layer, which the plate or a raft carries, those branches are rooted.
     REQUIRE(anywhere.report()->stability.available);
 
     // The same emitted geometry read under settings that forbid resting on the model: not one
@@ -3106,6 +3118,43 @@ TEST_CASE("A branch roots on the model only where the settings allow it", "[Mini
     REQUIRE(forbidden.stability.unsupported_paths > anywhere.report()->stability.unsupported_paths);
     REQUIRE_FALSE(SupportAnalysis::stability_admissible(forbidden.stability));
     REQUIRE_FALSE(SupportAnalysis::stability_no_worse(*anywhere.report(), forbidden));
+
+    // The support material a print laid from `z` up, read off the extrusions the measurement reads.
+    const auto volume_above = [](const PrintObject &object, double z) {
+        double volume = 0.;
+        for (const SupportLayer *layer : object.support_layers())
+            if (layer->print_z - layer->height >= z - EPSILON)
+                volume += layer->support_fills.total_volume();
+        return volume;
+    };
+    // The centred bed keeps draw_circles' machine-border clip off branches that cross x 0.
+    const DynamicPrintConfig centred = fixture_config({ { "support_style", "tree_slim" }, { "support_top_z_distance", "0.2" },
+                                                        { "support_on_build_plate_only", "0" },
+                                                        { "printable_area", "-100x-100,100x-100,100x100,-100x100" } });
+
+    // A platform caged in the box, connected to nothing below it. A stock slice keeps every branch the
+    // generator laid on it; a pass that measures itself takes them out, because model material that is
+    // not connected to the object's first layer holds nothing up.
+    AnalysisRun island_stock, island_measured;
+    run_analysis(island_stock, caged_island_fixture(), centred, false);
+    run_analysis(island_measured, caged_island_fixture(), centred);
+    REQUIRE(island_stock.report() == nullptr);
+    REQUIRE(volume_above(island_stock.object(), 7.) > 0.);
+    REQUIRE(island_measured.report() != nullptr);
+    CHECK_THAT(volume_above(island_measured.object(), 7.), WithinAbs(0., 1e-9));
+
+    // The box on a raft, measured so the floating pass runs: its floor is part of the object's first
+    // layer, which the raft carries, so the branches resting on the floor stand and survive the pass.
+    const DynamicPrintConfig rafted = fixture_config({ { "support_style", "tree_slim" }, { "support_top_z_distance", "0.2" },
+                                                       { "support_on_build_plate_only", "0" }, { "raft_layers", "3" },
+                                                       { "printable_area", "-100x-100,100x-100,100x100,-100x100" } });
+    AnalysisRun measured;
+    run_analysis(measured, box_fixture(), rafted);
+    REQUIRE(measured.report() != nullptr);
+    REQUIRE(measured.object().support_raft_layers() >= 3);
+    REQUIRE(measured.report()->stability.available);
+    // Everything from the object's first layer up, so the raft is left out.
+    REQUIRE(volume_above(measured.object(), measured.object().slicing_parameters().object_print_z_min) > 0.);
 }
 
 TEST_CASE("A disabled print measures itself only when asked, and lets the measurement go with its slice", "[MiniatureContacts]")
