@@ -39,6 +39,8 @@ std::vector<VolumeMeshIdentity> mesh_identities(const Model &model);
 struct PlateInput
 {
     size_t                          plate_index = 0;
+    // Where the plate sits in the scene, in mm; instances on it carry this offset.
+    Vec3d                           plate_origin = Vec3d::Zero();
     Model                           model;
     DynamicPrintConfig              full_config;
     std::vector<ObjectID>           affected_instance_ids;

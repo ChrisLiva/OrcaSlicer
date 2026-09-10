@@ -165,6 +165,7 @@ static AutoTilt::EvaluationInput capture_inputs(Plater &plater, int obj_idx)
         PartPlate           *plate = plates.get_plate(plate_idx);
         AutoTilt::PlateInput captured;
         captured.plate_index = size_t(plate_idx);
+        captured.plate_origin = plate->get_origin();
 
         for (size_t j = 0; j < obj.instances.size(); ++j)
             if (plate_of[obj_idx][j] == plate_idx)

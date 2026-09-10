@@ -1064,6 +1064,11 @@ TEST_CASE("evaluation_inputs_unchanged rejects a changed plate config or members
         live.plates.front().plate_index = 2;
         REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
     }
+    SECTION("a plate that moved is a change") {
+        AutoTilt::EvaluationInput live = captured;
+        live.plates.front().plate_origin = Vec3d(240., 0., 0.);
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
     SECTION("a moved exclusion volume is a change") {
         AutoTilt::EvaluationInput live = captured;
         live.plates.front().exclusions.front().translate(-40., 0., 0.);

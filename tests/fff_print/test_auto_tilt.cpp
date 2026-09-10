@@ -1025,6 +1025,30 @@ TEST_CASE("Generated evaluation reproduces an independent full Print and refuses
     }
 }
 
+TEST_CASE("Generated evaluation slices a plate other than the first on its own origin", "[AutoTilt]")
+{
+    // The second plate of a 200 mm bed sits 1.2 bed widths along x, and an instance on it carries that
+    // offset. The machine border the tree generator clips every support area to is placed by the plate
+    // origin, so a pose Print left at the first plate's origin clips this object's support to nothing.
+    Slic3r::Model model = Slic3r::Test::model("fin", fin_fixture());
+    ModelObject  *obj   = model.objects.front();
+    obj->instances.front()->set_offset(Vec3d(340., 100., 0.));
+    obj->ensure_on_bed();
+    const ObjectID id = obj->instances.front()->id();
+
+    const DynamicPrintConfig config = fixture_config({ { "support_style", "tree_slim" }, { "layer_change_gcode", "G92 E0" },
+                                                       { "brim_type", "no_brim" }, { "support_top_z_distance", "0" } });
+    AutoTilt::EvaluationInput input = plate_input(model, config, { id });
+    input.plates.front().plate_index  = 1;
+    input.plates.front().plate_origin = Vec3d(240., 0., 0.);
+
+    AutoTilt::GeneratedEvaluator   evaluator(input, inline_runner());
+    const AutoTilt::PoseEvaluation evaluation = evaluator.evaluate(AutoTilt::Pose{}, {});
+    INFO("reasons: " << reasons_of(evaluation));
+    REQUIRE(evaluation.instances.size() == 1);
+    REQUIRE(evaluation.support_volume_mm3 > 0.);
+}
+
 namespace {
 
 // The settings the cancellation cases slice under: legacy tree support, a stated contact gap, and

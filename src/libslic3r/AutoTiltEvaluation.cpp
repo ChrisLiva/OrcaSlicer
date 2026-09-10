@@ -167,12 +167,12 @@ bool box_unchanged(const BoundingBoxf3 &a, const BoundingBoxf3 &b)
     return a.defined == b.defined && (! a.defined || (a.min == b.min && a.max == b.max));
 }
 
-// Everything about one plate that is not its model: which plate it is, what it would slice under,
-// which instances the pose may move, the ground it has to stay on, the volumes it may not reach
-// into, and the mesh behind every volume id on it.
+// Everything about one plate that is not its model: which plate it is and where it sits, what it
+// would slice under, which instances the pose may move, the ground it has to stay on, the volumes it
+// may not reach into, and the mesh behind every volume id on it.
 bool plate_shell_unchanged(const PlateInput &a, const PlateInput &b)
 {
-    if (a.plate_index != b.plate_index)
+    if (a.plate_index != b.plate_index || a.plate_origin != b.plate_origin)
         return false;
     if (sorted_ids(a.affected_instance_ids) != sorted_ids(b.affected_instance_ids))
         return false;
@@ -527,6 +527,8 @@ PoseEvaluation GeneratedEvaluator::evaluate(const Pose &pose, const StopPredicat
                         }
             m_prints[p] = std::make_unique<Print>();
             m_prints[p]->set_status_silent();
+            // TreeSupport places the machine border it clips every support area to by this origin.
+            m_prints[p]->set_plate_origin(plate.plate_origin);
             m_prints[p]->apply(*m_models[p], plate.full_config);
         });
 
