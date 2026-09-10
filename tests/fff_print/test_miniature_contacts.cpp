@@ -979,6 +979,35 @@ TEST_CASE("Group risk weighs contact area by model risk, lengthens with the run 
         REQUIRE(reachable.damage.available);
         CHECK(reachable.damage.inaccessible_groups == 0);
     }
+
+    SECTION("a contact under a raft is probed against the model where the model prints")
+    {
+        // The raft lifts every contact by the object's first print_z: a probe started against the
+        // model where it would stand without the raft starts inside the lip, which is open on every side.
+        AnalysisRun rafted;
+        run_analysis(rafted, lip_fixture(),
+                     fixture_config({ { "support_style", "tree_slim" }, { "support_top_z_distance", "0.2" },
+                                      { "support_miniature_contacts", "1" }, { "support_contact_min_distance", "0" },
+                                      { "raft_layers", "3" } }),
+                     false);
+        REQUIRE(rafted.report() != nullptr);
+        const SupportAnalysis::CoverageKey raft_key = rafted.report()->key;
+        REQUIRE(raft_key.witnesses.size() == 1);
+        const Point probe = get_extents(raft_key.witnesses.front()).center();
+        Fabricated  open  = fabricate(raft_key, { probe }, { column_at(probe, 1.) });
+        // fabricate prints the column from the plate up; under a raft it stands on the raft, so the
+        // layers below the object's first print_z go, as the generator never prints them.
+        const double object_bottom_z = rafted.object().slicing_parameters().object_print_z_min;
+        std::vector<SupportAnalysis::EmittedLayer> &layers = open.emitted.layers;
+        layers.erase(std::remove_if(layers.begin(), layers.end(),
+                                    [&](const SupportAnalysis::EmittedLayer &layer) { return layer.bottom_z < object_bottom_z - 1e-6; }),
+                     layers.end());
+        REQUIRE(! layers.empty());
+        const SupportAnalysis::Report report = SupportAnalysis::measure(rafted.object(), open.problem, open.emitted);
+        REQUIRE(report.damage.available);
+        CHECK(report.damage.inaccessible_groups == 0);
+        CHECK(report.damage.unknown_contacts == 0);
+    }
 }
 
 TEST_CASE("Miniature contacts leave a stock slice untouched when off", "[MiniatureContacts]")

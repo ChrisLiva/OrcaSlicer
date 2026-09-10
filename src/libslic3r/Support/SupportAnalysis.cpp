@@ -556,7 +556,10 @@ void measure_damage(Report &report, const PrintObject &object, const MiniatureSu
     indexed_triangle_set model;
     if (any_group && object.model_object() != nullptr) {
         model = object.model_object()->raw_indexed_triangle_set();
-        its_transform(model, object.trafo_centered());
+        // The contacts and slab tops are print_z, which a raft lifts, while trafo_centered() puts the
+        // object's bottom at z 0.
+        its_transform(model, Geometry::translation_transform(Vec3d(0., 0., object.slicing_parameters().object_print_z_min)) *
+                                 object.trafo_centered());
     }
     const AABBMesh mesh(model);
 
