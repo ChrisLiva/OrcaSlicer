@@ -51,7 +51,8 @@ using Catch::Matchers::WithinRel;
 
 namespace {
 
-// The runner every test but the refusing one passes: the scorer's "main thread" is this thread.
+// The runner a test passes when it needs neither a refusing, a capturing nor a signalling one: the
+// scorer's "main thread" is this thread.
 AutoTilt::MainThreadRunner inline_runner()
 {
     return [](const std::function<void()> &fn) { fn(); };
@@ -1583,8 +1584,8 @@ void run_exhaustive_case(const SupportValidation::Manifest &manifest, const Supp
               << std::endl;
 }
 
-// Scores and reports one model with the cheap scorer. Writes `<stem>.autotilt.csv` beside the corpus when
-// `corpus_dir` is set; prints the summary line either way.
+// Scores and reports one model with the cheap scorer. Writes `<stem>.autotilt.csv` and
+// `<stem>.autotilt.polygons.csv` beside the corpus when `corpus_dir` is set; prints the summary line either way.
 void run_harness_model(size_t index, const std::string &stem, const Model &base, const DynamicPrintConfig &config,
                        const std::string &corpus_dir, const AutoTilt::Constants &k)
 {
@@ -1598,8 +1599,8 @@ void run_harness_model(size_t index, const std::string &stem, const Model &base,
     const Column col_plain = sweep(plain, poses, k);
 
     // The root-pose shape diagnostics describe the root pose alone, off a scorer of their own: score()
-    // accumulates sharp-tail and cantilever state across calls, so a swept scorer would fold nine poses
-    // of it into the root's rows.
+    // accumulates sharp-tail and cantilever state across calls, so a swept scorer would fold every swept
+    // pose of it into the root's rows.
     AutoTilt::ContactScorer                            diag(obj, config, k, inline_runner());
     std::vector<AutoTilt::ContactScorer::PolygonRecord> records;
     diag.records                   = &records;
@@ -1970,7 +1971,7 @@ TEST_CASE("The exhaustive sweep measures a selected pose against the best pose i
 
 // Hidden ([.]): with a manifest one case costs 77 poses times its repeats in full Print::process()
 // passes, so hours of wall clock, and the corpus it reads lives outside the repo under
-// $ORCA_AUTOTILT_CORPUS (tests/AGENTS.md). Without a manifest it is the cheap-scorer diagnostic over
+// $ORCA_AUTOTILT_CORPUS (docs/miniature_support_validation.md). Without a manifest it is the cheap-scorer diagnostic over
 // the built-in fin, which scripts/validate_miniature_supports.py accepts as no acceptance run at all.
 TEST_CASE("Auto-tilt validation harness over a corpus", "[AutoTilt][.]")
 {

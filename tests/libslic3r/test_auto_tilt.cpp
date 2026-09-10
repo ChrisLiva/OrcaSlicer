@@ -817,7 +817,7 @@ TEST_CASE("verified ranking compares damage, then volume, and gates the first im
             double cheap = 1.;
             for (const auto &entry : candidates) {
                 const Pose pose{entry.first.first, entry.first.second};
-                scorer.set(pose, Contact{cheap, cheap, 1000}); // all five shortlisted, none of it decisive
+                scorer.set(pose, Contact{cheap, cheap, 1000}); // both shortlisted, the other finalist slots grid fill; none of it decisive
                 cheap += 1.;
                 verifier.set(pose, entry.second);
             }

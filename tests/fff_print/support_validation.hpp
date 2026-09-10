@@ -237,8 +237,9 @@ struct Manifest
     std::vector<ManifestCase> cases;
 };
 
-// Reads the manifest at `path`. Throws std::runtime_error naming the file when it does not exist,
-// does not parse, or is not version 1.
+// Reads the manifest at `path`. Throws std::runtime_error naming the file on any structural error:
+// it does not exist, does not parse, is not version 1, lists no cases, or lists a case with no id,
+// no model or no selected object.
 Manifest load_manifest(const std::string &path);
 
 // Model::get_backup_path() builds from temporary_dir(), which is "" in a test process, so each 3mf
@@ -247,8 +248,9 @@ Manifest load_manifest(const std::string &path);
 // app's CLI startup does with set_temporary_dir.
 void use_os_temporary_dir();
 
-// One corpus object as both harnesses slice it: exactly one object carrying exactly one instance,
-// centred on the bed and dropped onto it, under the config its file carried overlaid on the base.
+// One corpus object as for_each_corpus_object hands it out: exactly one object carrying exactly one
+// instance, centred on the bed and dropped onto it, under the config its file carried overlaid on the
+// base. case_object keeps every object and instance the case selected instead.
 struct CorpusObject
 {
     std::string        stem;

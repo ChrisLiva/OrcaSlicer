@@ -174,7 +174,7 @@ void require_same_envelope(const std::string &name, const Envelope &a, const Env
 // and 0.2 mm layers the band on the lip's first layer is the lip minus the base offset by
 // 0.2 / tan 61 deg = 0.1109 mm (detect_overhangs' thresh_angle is support_threshold_angle + 1, its
 // lower_layer_offset is lower_layer->height / tan(threshold_rad)),
-// 25 x 1.089 mm. Today's cull erodes it by one 0.42 mm line width to 24.16 x 0.249 mm and 0.249 < 0.84
+// 25 x 1.089 mm. With the mode off the cull erodes it by one 0.42 mm line width to 24.16 x 0.249 mm and 0.249 < 0.84
 // discards it (the bounding-box test in detect_overhangs' else branch); eroded by half a line width it
 // is 24.58 x 0.669 mm and survives. Its far point sits 0.68 mm from the base boundary, under the 3 mm
 // cantilever test (dist_max > scale_(3) in detect_overhangs), and the 30 x 8 base clears the 6 x 6
@@ -485,7 +485,7 @@ size_t critical_anchors_of(const SupportAnalysis::Report &report, const SupportA
     return n;
 }
 
-// A report written out by hand for the two stability-predicate cases: one prepared problem naming
+// A report written out by hand for the stability-predicate case: one prepared problem naming
 // one region whose provenance reached printed material, its contact at `contact_z`, and the four
 // stability measures at a comfortable middle. Each leg changes the one thing it is about.
 SupportAnalysis::Report stability_report(double contact_z)
@@ -577,7 +577,8 @@ std::vector<ModelSupportRisk::Slice> guard_and_blade(double length)
     return { slab_mm(0., { guard }), slab_mm(1., { guard, blade }) };
 }
 
-// The same guard and 3 mm blade, plus a 3 x 3 mm pad hanging half a millimetre off the blade's tip and
+// A 12 x 6 mm guard (`rect_mm(-6., ...)`) and the same 3 mm blade, plus a 3 x 3 mm pad hanging half a
+// millimetre off the blade's tip and
 // standing on a 0.4 x 0.4 mm foot of its own. The pad is thick material reached only through a joint
 // narrower than one extrusion, and the half millimetre between blade and pad is model nowhere at all,
 // so one band laid along y = 3 crosses printable ground, unmeasurable ground and unprintable ground.
@@ -1673,7 +1674,7 @@ TEST_CASE("A bar between two pads restores the one contact decimation took from 
 
 TEST_CASE("A contact moves only inside its own region, within its legal reach and over every witness it held", "[MiniatureContacts]")
 {
-    // A 12 x 6 mm guard bar standing on the bed with a 0.8 mm blade off its +x face, and one overhang
+    // A 6 x 6 mm guard block standing on the bed with a 0.8 mm blade off its +x face, and one overhang
     // band laid along the blade's centre line from 4 mm inside the guard to 2 mm out along the blade.
     // The band is the same 0.8 mm strip end to end; what changes across it is the model under it.
     const ModelSupportRisk::Field field =
@@ -1904,9 +1905,10 @@ TEST_CASE("Placement weighs a contact over the width it will be printed at and n
 
 TEST_CASE("A blade beside a broader guard is placed off the print's own geometry without giving up its coverage", "[MiniatureContacts]")
 {
-    // tree_support_branch_diameter sizes generate_contact_points' per-layer hash grid (pt / (radius_scaled
-    // + 1)), so at the 5 mm default one contact per 5 mm of overhang is all this band ever gets and there
-    // is nothing for a placement to have room in. At 1 mm the detector places the contacts it means to.
+    // tree_support_branch_diameter sizes generate_contact_points' per-layer hash grid: the cell is
+    // `radius_scaled + 1`, half the branch diameter, so at the 5 mm default one contact per 2.5 mm of
+    // overhang is all this band ever gets and there is nothing for a placement to have room in. At
+    // 1 mm the detector places the contacts it means to.
     const auto config = [](const char *mode) {
         return fixture_config({ { "support_style", "tree_slim" }, { "support_top_z_distance", "0.2" },
                                 { "support_remove_small_overhang", "0" },
@@ -2338,8 +2340,6 @@ TEST_CASE("A requested support analysis names required regions and contact seeds
     // support_style, because the default resolves to organic, which the analysis does not run under;
     // support_top_z_distance explicitly at PrintConfig.cpp's own default, so the gap the tips are
     // planned against is a stated number rather than whatever the fixture happens to resolve.
-    // tail_fixture, because its floating bar is what makes detection file sharp tails, and the
-    // sharp-tail leg below needs a region of that type carrying more than one contact.
     // support_remove_small_overhang = 0 keeps the lip's thin band as well, so the problem carries a
     // detected region beside the tail; sharp tail detection sits under its own gate and is untouched
     // by that key.
@@ -2393,9 +2393,10 @@ TEST_CASE("A requested support analysis names required regions and contact seeds
         INFO("region " << region.region_id);
         REQUIRE(region.critical == (critical_anchors_of(*report, region) > 0));
     }
-    // Nothing here is pinned and nothing is a sharp tail with a contact of its own, so the marking
-    // that is left is the component rule: the first seed of each directed overhang component and no
-    // other. Every region keeps at most one critical seed, and the problem still keeps some.
+    // Of the clauses `seed.critical = seed.pinned || first || critical_by_neck[i]` ORs, nothing here
+    // is pinned and no neck reads narrower than an extrusion, so the marking that is left is `first`:
+    // the first seed of each directed overhang component and no other. Every region keeps at most one
+    // critical seed, and the problem still keeps some.
     REQUIRE(report->pinned_anchor_ids.empty());
     REQUIRE(report->critical_anchor_ids.size() < anchors.size());
     for (const SupportAnalysis::RegionCoverage &region : report->coverage) {
@@ -2999,16 +3000,14 @@ TEST_CASE("Branch slenderness divides the longest unbraced run by the thinnest p
 
 TEST_CASE("stability_no_worse fails any measure that got worse and matches no source id across poses", "[MiniatureContacts]")
 {
-    // The hand-written reports `stability_report` builds, under the name each leg calls them by.
-    const auto make = stability_report;
-    const SupportAnalysis::Report reference = make(0.8);
+    const SupportAnalysis::Report reference = stability_report(0.8);
 
     // The same numbers again: nothing got worse.
-    REQUIRE(SupportAnalysis::stability_no_worse(reference, make(0.8)));
+    REQUIRE(SupportAnalysis::stability_no_worse(reference, stability_report(0.8)));
 
     // An unmeasured domain on either side establishes nothing, so it answers no rather than yes.
     {
-        SupportAnalysis::Report unknown = make(0.8);
+        SupportAnalysis::Report unknown = stability_report(0.8);
         unknown.stability.available     = false;
         REQUIRE_FALSE(SupportAnalysis::stability_no_worse(reference, unknown));
         REQUIRE_FALSE(SupportAnalysis::stability_no_worse(unknown, reference));
@@ -3017,15 +3016,15 @@ TEST_CASE("stability_no_worse fails any measure that got worse and matches no so
     // Counts compare exactly and in both directions: one more floating path or one more routed group
     // that never printed fails, one fewer passes.
     {
-        SupportAnalysis::Report worse = make(0.8);
+        SupportAnalysis::Report worse = stability_report(0.8);
         worse.stability.unsupported_paths = 2;
         REQUIRE_FALSE(SupportAnalysis::stability_no_worse(reference, worse));
-        SupportAnalysis::Report better = make(0.8);
+        SupportAnalysis::Report better = stability_report(0.8);
         better.stability.unsupported_paths = 0;
         REQUIRE(SupportAnalysis::stability_no_worse(reference, better));
     }
     {
-        SupportAnalysis::Report worse = make(0.8);
+        SupportAnalysis::Report worse = stability_report(0.8);
         worse.stability.unrooted_groups = 3;
         REQUIRE_FALSE(SupportAnalysis::stability_no_worse(reference, worse));
     }
@@ -3033,24 +3032,24 @@ TEST_CASE("stability_no_worse fails any measure that got worse and matches no so
     // The floating measures carry the numeric tolerance: a difference inside it is not a difference,
     // and a difference outside it is.
     {
-        SupportAnalysis::Report same = make(0.8);
+        SupportAnalysis::Report same = stability_report(0.8);
         same.stability.min_bed_margin = 0.5 - 4e-7;
         REQUIRE(SupportAnalysis::stability_no_worse(reference, same));
-        SupportAnalysis::Report worse = make(0.8);
+        SupportAnalysis::Report worse = stability_report(0.8);
         worse.stability.min_bed_margin = 0.5 - 1e-4;
         REQUIRE_FALSE(SupportAnalysis::stability_no_worse(reference, worse));
-        SupportAnalysis::Report wider = make(0.8);
+        SupportAnalysis::Report wider = stability_report(0.8);
         wider.stability.min_bed_margin = 0.6;
         REQUIRE(SupportAnalysis::stability_no_worse(reference, wider));
     }
     {
-        SupportAnalysis::Report same = make(0.8);
+        SupportAnalysis::Report same = stability_report(0.8);
         same.stability.max_slenderness = 12. + 1e-5;
         REQUIRE(SupportAnalysis::stability_no_worse(reference, same));
-        SupportAnalysis::Report worse = make(0.8);
+        SupportAnalysis::Report worse = stability_report(0.8);
         worse.stability.max_slenderness = 12.001;
         REQUIRE_FALSE(SupportAnalysis::stability_no_worse(reference, worse));
-        SupportAnalysis::Report stouter = make(0.8);
+        SupportAnalysis::Report stouter = stability_report(0.8);
         stouter.stability.max_slenderness = 8.;
         REQUIRE(SupportAnalysis::stability_no_worse(reference, stouter));
     }
@@ -3058,7 +3057,7 @@ TEST_CASE("stability_no_worse fails any measure that got worse and matches no so
     // Same prepared problem, so the groups answer one for one: a group cannot leave the comparison
     // by losing the provenance that put it in, however good the four measures look.
     {
-        SupportAnalysis::Report dropped = make(0.8);
+        SupportAnalysis::Report dropped = stability_report(0.8);
         dropped.coverage.front().emitted_path = false;
         dropped.stability.unsupported_paths   = 0;
         dropped.stability.unrooted_groups     = 0;
@@ -3068,10 +3067,10 @@ TEST_CASE("stability_no_worse fails any measure that got worse and matches no so
     // A different prepared problem is a different pose. Its source ids name different regions, so
     // nothing is matched by id across the pair and only the measures are compared.
     {
-        SupportAnalysis::Report elsewhere = make(1.0);
+        SupportAnalysis::Report elsewhere = stability_report(1.0);
         elsewhere.coverage.front().emitted_path = false;
         REQUIRE(SupportAnalysis::stability_no_worse(reference, elsewhere));
-        SupportAnalysis::Report elsewhere_worse = make(1.0);
+        SupportAnalysis::Report elsewhere_worse = stability_report(1.0);
         elsewhere_worse.stability.max_slenderness = 20.;
         REQUIRE_FALSE(SupportAnalysis::stability_no_worse(reference, elsewhere_worse));
     }
@@ -3079,7 +3078,7 @@ TEST_CASE("stability_no_worse fails any measure that got worse and matches no so
     // Absolute admissibility is zero floating paths, zero routed groups that never printed and a
     // margin that is not negative. No slenderness threshold is invented to sit beside them.
     {
-        SupportAnalysis::Report admissible = make(0.8);
+        SupportAnalysis::Report admissible = stability_report(0.8);
         admissible.stability.unsupported_paths = 0;
         admissible.stability.unrooted_groups   = 0;
         admissible.stability.min_bed_margin    = 0.;
@@ -3346,8 +3345,8 @@ TEST_CASE("An overhang no branch can reach warns the user, and one every branch 
     REQUIRE(reachable.report()->coverage.front().covered_count() > 0);
     REQUIRE(reachable.report()->coverage.front().anchored);
     REQUIRE(reachable.report()->missing_anchor_ids.empty());
-    // And that condition holds: the generator takes what it would have laid in mid-air out of its
-    // layers before the toolpaths are made (draw_circles), so the paths this pass laid are
+    // And that condition holds: the generator takes the extrusions resting on nothing out of its
+    // toolpaths after generate_toolpaths (remove_floating_toolpaths), so the paths this pass laid are
     // admissible run after run of a generator that is otherwise not reproducible (AGENTS.md
     // "Testing"), the requirement is met, and nothing reaches the user.
     REQUIRE(reachable.report()->stability.unsupported_paths == 0);
@@ -3495,7 +3494,7 @@ TEST_CASE("A corpus row reads every object the case selected rather than whichev
 
 // Hidden ([.]): one corpus model costs two full Print::process() passes on a miniature at fine
 // layers, minutes each, and the corpus it reads lives outside the repo under
-// $ORCA_MINIATURE_CORPUS (tests/AGENTS.md:44). It measures how far decimation thins the contact
+// $ORCA_MINIATURE_CORPUS (docs/miniature_support_validation.md). It measures how far decimation thins the contact
 // set, model by model; it does not pin it.
 TEST_CASE("Miniature contact decimation over a corpus", "[MiniatureContacts][.]")
 {
@@ -3534,9 +3533,10 @@ TEST_CASE("Miniature contact decimation over a corpus", "[MiniatureContacts][.]"
         return;
     }
 
-    // Model 0 is always the built-in fin fixture, under the same two settings the pinning test
-    // spells out: the organic generator never fills roof_gap_areas, and at a zero top gap the tips
-    // land outside them, so either default would measure zero both ways.
+    // Model 0 is always the built-in fin fixture, under the two settings "A requested support analysis
+    // names required regions and contact seeds by value" states: tree_slim, because the organic
+    // generator never fills roof_gap_areas, and support_top_z_distance at its PrintConfig default of
+    // 0.2, so the gap the tips are planned against is a stated number.
     report(0, "fin_fixture", corpus_dir, [&](bool on) {
         Slic3r::Print print;
         init_and_process_print({ fin_fixture() }, print,

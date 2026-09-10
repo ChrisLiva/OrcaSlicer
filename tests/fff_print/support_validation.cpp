@@ -623,8 +623,6 @@ size_t for_each_corpus_object(const std::string &dir, const DynamicPrintConfig &
             ++ index;
             continue;
         }
-        // corpus_config leaves a Strong or Hybrid style the file chose alone and forces a legacy tree
-        // style only over default or organic; every other loaded setting stays authoritative.
         const DynamicPrintConfig config = corpus_config(base, loaded);
         // One harness model per object: the print measured has to hold exactly the one object, and
         // its single instance is centred on the bed and dropped onto it before slicing.

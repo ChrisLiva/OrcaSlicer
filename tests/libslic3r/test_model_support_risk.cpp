@@ -354,7 +354,8 @@ void add_box(indexed_triangle_set &out, const Vec3d &min, const Vec3d &size)
 }
 
 // A 10 x 10 x 2 mm plate at z 8..10: a contact placed at (5, 5, 8) hangs under the middle of it with
-// nothing else anywhere, which is the open case every blocked one below is measured against.
+// nothing else anywhere, which is the open case the closed cavity, the windowed cavity with a limb
+// across it, and the unmeasured leg are measured against.
 indexed_triangle_set open_plate()
 {
     indexed_triangle_set its;
@@ -384,7 +385,7 @@ indexed_triangle_set cavity(double window)
     return its;
 }
 
-// One slab per print_z of `tops`, each carrying the same footprint.
+// `layers` slabs, each carrying the same footprint.
 std::vector<ExPolygons> stacked(const ExPolygon &footprint, size_t layers)
 {
     return std::vector<ExPolygons>(layers, ExPolygons{ footprint });
@@ -437,8 +438,9 @@ TEST_CASE("Removal access answers with the first clear direction of the fixed or
         const ModelSupportRisk::Access access =
             ModelSupportRisk::assess_access(windowed, no_support, no_layers, Vec3d(3., 3., 3.), probe);
         REQUIRE(access.status == ModelSupportRisk::Access::Status::Clear);
-        // Every direction the order names before it leaves the cavity's centre at an angle and meets
-        // a wall, so the 1.2 mm window is found as the axis it is on.
+        // Five axis directions come before (1, 0, 0) in the order and meet the cavity's walls square-on,
+        // and the diagonals before it meet them at an angle, so the 1.2 mm window is found as the axis
+        // it is on.
         CHECK(access.direction.isApprox(Vec3d(1., 0., 0.)));
     }
 
