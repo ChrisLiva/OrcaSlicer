@@ -356,12 +356,16 @@ namespace {
 // Why one plate cannot print the pose, or nullptr where it can. Membership is the plate's own affected
 // list, never "whichever ids this plate's model happens to carry": two plates can be captured from
 // models that carry the same instance ids, and only one of them prints each of them. An affected id
-// with no snapshot, no object in the plate's model or no defined hull box is "instance_missing";
-// otherwise the first plate_refusal code. Where `posed` is given, the plate's snapshots are collected
-// into it in affected-id order, so the caller applies exactly what was judged.
+// with no snapshot is "instance_missing" for the whole plate before any instance is held to the
+// ground; then, in affected-id order, an instance with no object in the plate's model or no defined
+// hull box is "instance_missing" and the first plate_refusal code is the answer. Where `posed` is
+// given, the plate's snapshots are collected into it in that order, so the caller applies exactly
+// what was judged.
 const char *plate_refusal_of(const PlateInput &plate, const std::vector<InstanceSnapshot> &all_posed,
                              std::vector<InstanceSnapshot> *posed)
 {
+    std::vector<const InstanceSnapshot *> snapshots;
+    snapshots.reserve(plate.affected_instance_ids.size());
     for (const ObjectID &id : plate.affected_instance_ids) {
         const InstanceSnapshot *snapshot = nullptr;
         for (const InstanceSnapshot &candidate : all_posed)
@@ -371,7 +375,10 @@ const char *plate_refusal_of(const PlateInput &plate, const std::vector<Instance
             }
         if (snapshot == nullptr)
             return "instance_missing";
-        const ModelObject   *object   = object_of_instance(plate.model, id);
+        snapshots.push_back(snapshot);
+    }
+    for (const InstanceSnapshot *snapshot : snapshots) {
+        const ModelObject   *object   = object_of_instance(plate.model, snapshot->id);
         const BoundingBoxf3  hull_box = posed_hull_box(plate.model, *snapshot);
         if (object == nullptr || ! hull_box.defined)
             return "instance_missing";

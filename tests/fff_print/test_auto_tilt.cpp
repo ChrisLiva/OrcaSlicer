@@ -927,6 +927,17 @@ TEST_CASE("Generated evaluation reproduces an independent full Print and refuses
         REQUIRE(refuser.print(0).objects().empty());
         REQUIRE(refused.instances.empty());
 
+        // An affected id no captured model carries is settled for the whole plate before any instance
+        // is held to the ground: the plate reads Unknown with "instance_missing", and the off-plate
+        // instance beside it is never reported, so a missing instance is not mistaken for a refusal.
+        AutoTilt::EvaluationInput missing = plate_input(model, config, { obj->instances[0]->id(), ObjectID(size_t(-2)) });
+        missing.plates.front().printable_regions = ExPolygons{ l_shape };
+        AutoTilt::GeneratedEvaluator   missing_evaluator(missing, inline_runner());
+        const AutoTilt::PoseEvaluation unknown = missing_evaluator.evaluate(AutoTilt::Pose{ -8., 0. }, {});
+        REQUIRE(unknown.status == AutoTilt::PoseEvaluation::Status::Unknown);
+        REQUIRE(unknown.reason_codes == std::vector<std::string>{ "instance_missing" });
+        REQUIRE(missing_evaluator.print(0).objects().empty());
+
         // A second plate, whose own instance reaches into a volume nothing may print in.
         AutoTilt::EvaluationInput two_plates = plate_input(model, config, { obj->instances[0]->id() });
         AutoTilt::PlateInput      second     = two_plates.plates.front();
