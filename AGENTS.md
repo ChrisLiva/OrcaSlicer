@@ -94,6 +94,12 @@ changed the result on 32894 of them by up to 7.4e-7 mm² and joined or split two
 neck on 17, against the whole-layer clip (`intersection_ex`, measured 2026-09-09). An oracle that expects
 byte-identical polygons from a Clipper call whose clip set changed fails on correct code; compare counts and
 areas within an envelope instead.
+The non-support features are not byte-identical either: three `--slice 3` runs of one Release binary on plate 3 of
+`elf_test.3mf` read `Outer wall` extrusion moves 399740, 399740 and 399721, the 19 moves being the retraction wipes
+and travel of one layer (z 1.82) while every wall extrusion vertex matched; an oracle for "support code left the
+walls alone" compares wall vertices or excludes `WIPE_START..WIPE_END` and travel, never the move count (2026-09-10).
+The CLI's `--debug 3` prints about five lines to stderr; the `tree support time` and `Support contact layout for` lines
+land only in the file `--logfile <path>` names (2026-09-10).
 `init_print` in `tests/fff_print/test_helpers.cpp` arranges against `InfiniteBed{}` and leaves the instance at the
 origin, so the stock 0..200 mm `m_machine_border` clips any support branch that walks across x 0 in
 `TreeSupport::draw_circles` (`intersection_ex(base_areas, m_machine_border)`): a fixture centred on the origin whose
