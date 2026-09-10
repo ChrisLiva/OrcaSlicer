@@ -59,8 +59,6 @@ const ModelObject *object_of_instance(const Model &model, const ObjectID &id)
 }
 
 // Whether the generator this object would run is the legacy tree one this evaluator answers for.
-// SupportParameters resolves the style, the unset "default" among them, so the rule is read from the
-// one place that owns it rather than restated here.
 bool legacy_tree_support(const PrintObject &object)
 {
     if (! object.config().enable_support.value || ! is_tree(object.config().support_type.value))
@@ -153,9 +151,8 @@ private:
     Print      *&m_slot;
 };
 
-// `ids` sorted, so a collection the UI reordered reads the same both times. Every collection this
-// comparison walks is keyed by ObjectID, and nothing about a pose depends on the order they arrive
-// in, so ordering is the one difference that is not a difference.
+// `ids` sorted, so an instance list or affected list the UI reordered reads the same both times.
+// Volumes are the exception: volumes_unchanged compares them in list order.
 std::vector<ObjectID> sorted_ids(std::vector<ObjectID> ids)
 {
     std::sort(ids.begin(), ids.end());
@@ -220,9 +217,9 @@ bool instances_unchanged_by_id(const ModelObject &a, const ModelObject &b)
 }
 
 // The volumes of one object, in list order. Order is part of the comparison here rather than sorted
-// away: the paint helpers below walk both volume lists positionally, so the captured order is the
-// only order their answer can be read under, and a reordered list is reported as changed instead of
-// silently compared against the wrong volume.
+// away: the paint comparison in object_unchanged walks both volume lists positionally, so the
+// captured order is the only order their answer can be read under, and a reordered list is reported
+// as changed instead of silently compared against the wrong volume.
 bool volumes_unchanged(const ModelObject &a, const ModelObject &b)
 {
     if (a.volumes.size() != b.volumes.size())
@@ -239,7 +236,7 @@ bool volumes_unchanged(const ModelObject &a, const ModelObject &b)
     return true;
 }
 
-// Everything one object carries that the measurement rests on. The paint of all five kinds is read
+// Everything one object carries that the measurement rests on. Every kind of paint is read
 // through the helpers Print::apply itself uses, so the timestamps that decide a repaint are compared
 // by the code that owns that rule rather than copied into a record here.
 bool object_unchanged(const ModelObject &a, const ModelObject &b)
@@ -328,15 +325,12 @@ std::vector<InstanceSnapshot> posed_instances(const EvaluationInput &input, cons
                 if (instance == nullptr)
                     continue;
                 // This instance's own root and its own pivot, which is the object's bounding box
-                // under this instance's live matrix - the convention the GUI job caches per instance.
+                // under this instance's live matrix.
                 InstanceSnapshot snapshot{ id, candidate_transform(instance->get_transformation().get_matrix(),
                                                                    object->instance_bounding_box(index).center(), pose) };
                 if (instance->auto_drop) {
                     const BoundingBoxf3 box = posed_hull_box(plate.model, snapshot);
                     if (box.defined)
-                        // The transformed convex hull has the same extreme z as the transformed mesh,
-                        // so this drop is exact rather than conservative, and it is this instance's
-                        // own: ensure_on_bed() would have applied instance zero's to all of them.
                         snapshot.matrix = Geometry::translation_transform(Vec3d(0., 0., - box.min.z())) * snapshot.matrix;
                 }
                 out.push_back(snapshot);
@@ -417,9 +411,6 @@ SupportGenerator affected_support_generator(const EvaluationInput &input)
             const PrintObject *object = print_object_of_instance(print, id, index);
             SupportGenerator   here   = SupportGenerator::Unknown;
             if (object != nullptr && object->config().enable_support.value && is_tree(object->config().support_type.value))
-                // SupportParameters owns the rule that turns the unset style into a generator, the
-                // tree default into Organic among it, so the answer is read from there and not from
-                // the raw option value.
                 here = SupportParameters(*object).support_style == smsTreeOrganic ? SupportGenerator::Organic : SupportGenerator::Legacy;
             if (first) {
                 resolved = here;
@@ -566,8 +557,6 @@ PoseEvaluation GeneratedEvaluator::evaluate(const Pose &pose, const StopPredicat
         if (unsupported)
             continue;
         if (needs_request)
-            // Print fans the request over every object of the print, because a shared object reads
-            // the owner's pass and the owner is the one that generates it.
             print.request_legacy_support_analysis();
 
         bool canceled = this->stopped(stop);
@@ -589,8 +578,7 @@ PoseEvaluation GeneratedEvaluator::evaluate(const Pose &pose, const StopPredicat
         }
 
         // One measurement per affected physical instance, in capture order: a generated pass shared
-        // by several copies is counted once per copy that prints it, and no copy stands in for
-        // another.
+        // by several copies is counted once per copy that prints it.
         for (const InstanceSnapshot &instance : posed) {
             size_t             index  = 0;
             const PrintObject *object = print_object_of_instance(print, instance.id, index);

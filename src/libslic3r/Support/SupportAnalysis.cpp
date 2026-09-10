@@ -416,14 +416,12 @@ void measure_stability(Report &report, const PrintObject &object, const EmittedS
     stability.available = true;
 }
 
-// The removal groups of one emitted pass, and what taking one of them off the model would put at
-// risk. A group is a connected component of printed support material - what the extrusions actually
-// covered, so the roof gap the router draws over a tip and never extrudes neither joins two groups
-// nor divides one - and every contact the router carried into a component's printed material belongs
-// to that component, merged branches and shared roots included. One printed area is weighed once
-// whatever it carries, at the worst estimate of the contacts sharing it. Geometric estimates
-// throughout: a ranking of what removing a group would put at risk, never a force calculation and
-// never a safe cutting procedure.
+// The removal groups of one emitted pass (`Damage` states what they are), and what taking one of them
+// off the model would put at risk. A group is what the extrusions actually covered, so the roof gap
+// the router draws over a tip and never extrudes neither joins two groups nor divides one, and every
+// contact the router carried into a component's printed material belongs to that component, merged
+// branches and shared roots included. One printed area is weighed once whatever it carries, at the
+// worst estimate of the contacts sharing it.
 void measure_damage(Report &report, const PrintObject &object, const MiniatureSupport::Problem &problem,
                     const EmittedSupport &emitted, const std::vector<std::vector<ExPolygons>> &printed,
                     const std::vector<uint64_t> &region_of_seed, const std::vector<Slab> &support_slabs,
@@ -609,9 +607,7 @@ void measure_damage(Report &report, const PrintObject &object, const MiniatureSu
     damage.available = true;
 }
 
-// What the model itself says about each contact the generator placed: the width of the solid under
-// the contact, the narrowest constriction between that solid and the object's first slab, and how
-// far the contact sits from it.
+// What the model itself says about each contact the generator placed (ModelSupportRisk::Sample).
 void measure_contact_risk(Report &report, const PrintObject &object, const MiniatureSupport::Problem &problem,
                           const ModelSupportRisk::Field &field)
 {
@@ -647,9 +643,6 @@ void measure_contact_risk(Report &report, const PrintObject &object, const Minia
 
 } // namespace
 
-// The object's own body, sliced. It is what a branch may terminate against, what has to be connected
-// to its own first layer before such a termination holds anything up, and that first layer, which the
-// plate or a raft carries, is what the object stands on.
 std::vector<Slab> model_slabs_of(const PrintObject &object)
 {
     std::vector<Slab> slabs;
@@ -806,15 +799,12 @@ Report measure(const PrintObject &object, const MiniatureSupport::Problem &probl
                     // would report material where none was laid.
                     if (area.virtual_gap || area.source_ids.empty())
                         continue;
-                    // Only the emitted material that reaches this area's box: the prefilter drops the
-                    // emitted vertices lying beyond one side of the box, so the clip carries tens of
-                    // points instead of the layer's thousands. The same shape as intersection() over a
-                    // clipped clip in ClipperUtils.cpp. Clipping against a reduced set moves what
-                    // ClipperLib rounds, so the result differs from clipping against the whole layer by
-                    // up to one scaled unit on a vertex. Measured on the plate 3 fixture over 61534
-                    // areas: 7.4e-7 mm2 of area at worst, and 17 areas where two pieces meeting at a
-                    // one-unit neck came back joined or split, one polygon more or fewer. The fixture
-                    // gates that pin the stability and coverage values hold under that change.
+                    // Only the emitted material that reaches this area's box, through
+                    // ClipperUtils::clip_clipper_polygons_with_subject_bbox, so the clip carries tens of
+                    // points instead of the layer's thousands. Clipping against a reduced set moves what
+                    // ClipperLib rounds, so a vertex may differ from the whole-layer clip by up to one
+                    // scaled unit (AGENTS.md, Testing, keeps the measurement); the fixture gates that pin
+                    // the stability and coverage values hold under that.
                     printed[l][a] = intersection_ex(ExPolygons{ area.area },
                         ClipperUtils::clip_clipper_polygons_with_subject_bbox(layer.emitted,
                             get_extents(area.area).inflated(SCALED_EPSILON)));
@@ -828,9 +818,10 @@ Report measure(const PrintObject &object, const MiniatureSupport::Problem &probl
     const std::vector<Slab> support_slabs = printed_support_slabs(object, emitted, slab_of_layer);
     const Components        support       = build_components(support_slabs, 0.);
 
-    // Stability reads the emitted material and the object alone, so it is measured whatever the
-    // prepared problem asked for, and it is what it is even where coverage stays unresolved. With no
-    // required region it reads the object and whatever raft it stands on, emitted or not.
+    // Stability reads the emitted material and the object alone, so it is measured wherever anything
+    // was emitted, whatever the prepared problem asked for, and it is what it is even where coverage
+    // stays unresolved. With no required region it is measured even when nothing was emitted: it then
+    // reads the object and whatever raft it stands on.
     if (any_emitted || problem.regions.empty())
         measure_stability(report, object, emitted, printed, region_of_seed, support_slabs, slab_of_layer, support);
     if (! report.stability.available)
@@ -901,8 +892,6 @@ Report measure(const PrintObject &object, const MiniatureSupport::Problem &probl
         }
     }
 
-    // The union of every qualifying intersection, taken once: material two regions share is one piece
-    // of printed support, and counting it twice would make a shared branch look like two.
     // Pass one, the material each region's own contacts printed. The region's frozen witness lattice,
     // the one selection ran against, is sized here for every region, anchored or not: a contact of a
     // region one band down writes into a higher region's bitmap under the rule below, and that bitmap
@@ -922,11 +911,9 @@ Report measure(const PrintObject &object, const MiniatureSupport::Problem &probl
         append(all_material, material);
     }
 
-    // Pass two, the cells those contacts stand behind, through the one rule selection thins by: the
-    // region's own cells within its legal reach, and the cells of the bands above it in its overhang
-    // component within the problem's contact distance in 3-D. A cell counts as covered only when the
-    // whole of it lies behind a contact whose material was actually printed, so a cell the measurement
-    // cannot account for stays uncovered rather than being sampled away at its centre.
+    // Pass two, the cells those contacts stand behind, through `CoverageRule`, the one rule selection
+    // thins by. A cell counts as covered only when the whole of it lies behind a contact whose material
+    // was actually printed, so a cell the measurement cannot account for stays uncovered.
     const MiniatureSupport::CoverageRule rule(problem);
     std::vector<char>                    carried(region_count, 0);
     for (size_t i = 0; i < region_count; ++ i)
@@ -937,9 +924,10 @@ Report measure(const PrintObject &object, const MiniatureSupport::Problem &probl
                     carried[cell.region] = 1;
             }
 
-    // Pass three. `measure_stability` has already recorded whether each region's own sources reached
-    // printed material; a region whose cells a reached contact of its component carries has a path
-    // through that contact too, so the two are ORed rather than one overwriting the other.
+    // Pass three. Where stability was measured, `measure_stability` recorded whether each region's own
+    // sources reached printed material; a region whose cells a reached contact of its component
+    // carries has a path through that contact too, so the two are ORed rather than one overwriting
+    // the other.
     for (size_t i = 0; i < region_count; ++ i)
         report.coverage[i].emitted_path = report.coverage[i].emitted_path || carried[i] != 0;
 
@@ -1046,9 +1034,6 @@ bool stability_admissible(const Stability &stability)
            stability.min_bed_margin >= 0.;
 }
 
-// The declaration in SupportAnalysis.hpp states what this predicate asks and why it asks no more
-// than that. It reads `RegionCoverage::printable`, which `measure` copies off the prepared problem's
-// own `RequiredRegion::printable`, so the width clause is decided once, where the region was filed.
 bool support_unresolved(const Report &report)
 {
     for (const RegionCoverage &region : report.coverage)

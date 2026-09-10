@@ -90,9 +90,10 @@ struct Field
 
 // The model width at `query` inside one solid, in mm: the medial-axis width interpolated at the
 // nearest projection of the query that the solid itself contains the sight line to, capped by twice
-// the query's own clearance from the solid's boundary. Answers false, leaving *width_mm alone, for a
-// degenerate polygon, a query no medial segment answers for, a medial axis whose width vector does
-// not carry two entries per segment, and any nonfinite value.
+// the query's own clearance from the solid's boundary. A solid whose skeleton comes back empty (one
+// that is narrow nowhere) answers twice the clearance itself, for a query it contains. Answers false,
+// leaving *width_mm alone, for a degenerate polygon, a query no medial segment answers for, a medial
+// axis whose width vector does not carry two entries per segment, and any nonfinite value.
 bool local_width(const ExPolygon &solid, const Point &query, double *width_mm);
 
 // Builds the field over the model's own slices. Islands on adjacent layers connect in both directions

@@ -33,12 +33,12 @@ public:
         bool   type_floor, excluded;
     };
     // when set, score() appends (never clears) one row per loverhangs polygon on layers >= 1, excluded ones
-    // included; the recorded and the charged sets coincide
+    // included
     std::vector<PolygonRecord> *records = nullptr;
 
-    // No root/pivot accessors: the GUI job caches its own `root_matrix[i]` and `pivot[i]` per instance
-    // from the live ModelObject, and this clone keeps instance 0 only, so exposing the scorer's copies
-    // would create a second source of truth that nothing reads.
+    // No root/pivot accessors: AutoTilt::posed_instances reads root and pivot per instance off the
+    // captured model, and this clone keeps instance 0 only, so exposing the scorer's copies would
+    // create a second source of truth that nothing reads.
     const Print &print() const { return m_print; } // read-only view for tests
 
 private:

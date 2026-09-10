@@ -288,8 +288,6 @@ Witnesses witness_cells(const ExPolygon &polygon, double extrusion_width_mm)
 
 std::shared_ptr<const Witnesses> region_witnesses(const RequiredRegion &region, double extrusion_width_mm)
 {
-    // A region with no room for one extrusion is a sliver, not a place a line can be laid: it carries no
-    // cells whatever lattice was frozen with it, so nothing can be counted for or against it.
     if (! region.printable)
         return std::make_shared<const Witnesses>();
     if (region.witnesses)
@@ -474,11 +472,9 @@ Selection select_contacts(const Problem &problem, const ModelSupportRisk::Field 
             return problem.regions[size_t(problem.seeds[s].region_id)].contact_z_mm;
         };
 
-        // Decimation, over the source positions and by the requested distance alone, which is what main's
-        // `decimate_contact_nodes` did: contact z ascending, radius descending, object layer ascending,
-        // then position, so the order is a function of the frozen problem and a contact is only ever
-        // judged against ones already settled at its z or below it. A seed whose region is past the end
-        // of the problem is in no component and is never decimated.
+        // Decimation, in the order `select_contacts` documents, so a contact is only ever judged against
+        // ones already settled at its z or below it. A seed whose region is past the end of the problem
+        // is in no component and is never decimated.
         std::vector<size_t> order;
         order.reserve(problem.seeds.size());
         for (size_t s = 0; s < problem.seeds.size(); ++ s)
@@ -501,8 +497,7 @@ Selection select_contacts(const Problem &problem, const ModelSupportRisk::Field 
         std::map<size_t, std::vector<size_t>> settled_of_component;
         const double                          distance2 = problem.contact_min_distance_mm * problem.contact_min_distance_mm;
         for (const size_t s : order) {
-            // A pinned contact is one the generator was asked for: it is kept, and it crowds nobody,
-            // the way main's rule skipped a pinned node before reaching its grid at all.
+            // A pinned contact is one the generator was asked for: it is kept, and it crowds nobody.
             if (problem.seeds[s].pinned)
                 continue;
             std::vector<size_t> &settled = settled_of_component[problem.regions[size_t(problem.seeds[s].region_id)].component];
@@ -511,7 +506,7 @@ Selection select_contacts(const Problem &problem, const ModelSupportRisk::Field 
                 const double dx = unscale<double>(problem.seeds[s].position.x() - problem.seeds[k].position.x());
                 const double dy = unscale<double>(problem.seeds[s].position.y() - problem.seeds[k].position.y());
                 const double dz = z - z_of(k);
-                // Strict, as main's was: a contact at exactly the requested distance is not crowded.
+                // Strict: a contact at exactly the requested distance is not crowded.
                 if (dx * dx + dy * dy + dz * dz < distance2) {
                     kept[s] = 0;
                     break;
@@ -521,11 +516,8 @@ Selection select_contacts(const Problem &problem, const ModelSupportRisk::Field 
                 settled.push_back(s);
         }
 
-        // The add-back, read at the contacts' own positions, which is where the decimation judged them.
-        // A printable region that carries contacts of its own and has a witness cell no survivor stands
-        // behind under `CoverageRule` keeps its lowest-id contact. A region too narrow to hold one
-        // extrusion carries no cells at all (`region_witnesses` states that), so nothing comes back for
-        // a sliver: it is not a place a line can be laid.
+        // The add-back, read at the contacts' own positions, which is where the decimation judged them
+        // (the rule is on `select_contacts`; a sliver carries no cells, see `region_witnesses`).
         const CoverageRule             rule(problem);
         std::vector<std::vector<char>> covered(region_count);
         for (size_t r = 0; r < region_count; ++ r)
@@ -572,9 +564,7 @@ Selection select_contacts(const Problem &problem, const ModelSupportRisk::Field 
         }
     }
 
-    // Where each retained contact ends up. It stands where the generator put it until a legal position
-    // over less fragile model material is found for it. An unmeasured field is the absence of a reading,
-    // not a reading of no risk: with nothing to compare positions by, every contact stays put.
+    // Where each retained contact ends up, under the placement rule on `select_contacts`.
     std::vector<Point> position(problem.seeds.size());
     for (size_t s = 0; s < problem.seeds.size(); ++ s)
         position[s] = problem.seeds[s].position;

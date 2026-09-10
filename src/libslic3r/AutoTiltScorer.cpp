@@ -120,8 +120,6 @@ Contact ContactScorer::score(const Pose &pose)
 
 LegacyShortlistScorer::LegacyShortlistScorer(const EvaluationInput &input, const Constants &k, MainThreadRunner run_on_main)
 {
-    // Model::add_object() and the ContactScorer's own clone both bump ObjectIDs, so the whole build
-    // belongs to the main thread. Scoring afterwards does not, and runs on the worker.
     run_on_main([&]() {
         for (const PlateInput &plate : input.plates)
             for (const ObjectID &id : plate.affected_instance_ids)

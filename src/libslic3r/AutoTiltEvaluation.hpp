@@ -64,9 +64,10 @@ struct EvaluationInput
 // the measurement rests on is compared: the plate a candidate has to fit, the config it would slice
 // under - whole, so a key that only one side carries is a difference - the mesh behind each volume,
 // every object, volume and instance transform, override, paint timestamp, layer profile and range,
-// and which plate each instance sits on. Collections keyed by ObjectID are matched by id and sorted
-// before comparison, so a list the UI reordered is not a change; a missing id, an extra one, or a
-// single differing value is. A pose measured against a `captured` this rejects may not be applied.
+// and which plate each instance sits on. Instances and affected ids are matched by id and sorted
+// before comparison, so reordering those is not a change, while volumes compare in list order; a
+// missing id, an extra one, or a single differing value is. A pose measured against a `captured`
+// this rejects may not be applied.
 bool evaluation_inputs_unchanged(const EvaluationInput &captured, const EvaluationInput &live);
 
 // Where every affected instance of `input` stands under `pose`, over all of its plates, one entry
@@ -133,7 +134,7 @@ public:
     // capture order. For tests: nothing in the search reads them.
     const Model &model(size_t plate) const { return *m_models.at(plate); }
     const Print &print(size_t plate) const { return *m_prints.at(plate); }
-    // Tests install a status callback through this; the search itself reads only the const view.
+    // Tests install a status callback through this.
     Print &print(size_t plate) { return *m_prints.at(plate); }
 
 private:

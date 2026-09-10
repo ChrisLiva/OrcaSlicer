@@ -66,8 +66,7 @@ private:
     std::vector<AutoTilt::Pose>              m_legal;
     size_t                                   m_total_poses = 0;
     size_t                                   m_skipped     = 0;
-    // The shortlist scorer the generator on this object calls for: the legacy branch ranks over
-    // every affected instance of every captured plate, Organic over the one live object.
+    // The shortlist scorer the generator on this object calls for: LegacyShortlistScorer or ContactScorer.
     std::unique_ptr<AutoTilt::Scorer>        m_scorer;
     AutoTilt::SearchResult                   m_result;   // Organic: the estimate
     AutoTilt::VerifiedSearchResult           m_verified; // legacy: measured under the actual settings

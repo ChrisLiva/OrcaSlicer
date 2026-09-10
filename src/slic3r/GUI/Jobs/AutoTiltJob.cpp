@@ -51,8 +51,6 @@ static bool root_pose_fits(const ModelObject &obj, const std::vector<PartPlate *
     for (size_t i = 0; i < obj.instances.size(); ++i) {
         const Transform3d matrix = obj.instances[i]->get_transformation().get_matrix();
         boxes[i]                 = obj.instance_convex_hull_bounding_box(i);
-        // The transformed convex hull has the same extreme z as the transformed mesh, so this drop
-        // is exact rather than conservative, and it is this instance's own.
         if (boxes[i].defined && obj.instances[i]->auto_drop)
             boxes[i].translate(0., 0., -boxes[i].min.z());
         if (!boxes[i].defined)
@@ -193,8 +191,6 @@ static AutoTilt::EvaluationInput capture_inputs(Plater &plater, int obj_idx)
         // reaches is refused.
         captured.printable_height_mm = plate->get_build_volume().max.z();
 
-        // The meshes the live volumes of this plate stood for, read off the scene rather than off the
-        // clone: only the pointer the user's volume held says whether its geometry was replaced.
         for (const AutoTilt::VolumeMeshIdentity &identity : scene_meshes) {
             bool on_plate = false;
             for (const ModelObject *cloned : captured.model.objects)
@@ -282,7 +278,7 @@ static std::string organic_note()
 }
 
 // Which way the estimated removal risk moved between the two measured poses. The volume field is
-// zeroed on both tuples first, so compare_objectives ranks the four damage objectives and nothing
+// zeroed on both tuples first, so compare_objectives ranks the Damage fields and nothing
 // else: a pose that only cut volume must not read as one that made removal safer. A tuple no
 // evaluation filled in says so rather than passing as a tie.
 static std::string damage_direction_text(const AutoTilt::PoseEvaluation &root, const AutoTilt::PoseEvaluation &selected)
@@ -396,8 +392,9 @@ std::string AutoTiltJob::verified_text() const
 
     text += " " + damage_direction_text(root, selected);
     text += " " + pose_text(selected.pose);
-    // The finalists actually measured, capped by AutoTilt::verified_finalist_count and shorter only
-    // when the plate left fewer legal angles, so the count is never larger than what was sliced.
+    // The finalists actually measured, capped by AutoTilt::verified_finalist_count and shorter when
+    // the plate left fewer legal angles or the shortlist dropped non-finite and duplicate poses, so
+    // the count is never larger than what was sliced.
     text += " " + GUI::format(_L("%1% finalist angles were checked with generated support; physical support removal is not verified."),
                               m_verified.shortlist.size());
     return text;
@@ -421,9 +418,8 @@ bool AutoTiltJob::prepare(Plater &plater)
         push_result(_u8L("Auto-tilt needs tree supports to be enabled."));
         return false;
     }
-    // Which generator every affected instance would actually run, resolved through SupportParameters
-    // rather than off the raw style value. A plate or object override that puts some copies on the
-    // legacy generator and the rest on Organic is one operation no single search answers for.
+    // A plate or object override that puts some copies on the legacy generator and the rest on
+    // Organic is one operation no single search answers for.
     m_generator = AutoTilt::affected_support_generator(m_captured);
     if (m_generator == AutoTilt::SupportGenerator::Mixed) {
         push_result(_u8L("Auto-tilt cannot verify this object: its copies do not all use the same support generator."));
@@ -454,9 +450,6 @@ bool AutoTiltJob::prepare(Plater &plater)
         return false;
     }
 
-    // Reads m_ctl at call time. It is null until process() sets it, and prepare() itself runs on the
-    // main thread, so the work a scorer's construction hands to this runner is done right here;
-    // every request score() makes comes from the worker and goes through the controller.
     AutoTilt::MainThreadRunner run_on_main = [this](const std::function<void()> &fn) {
         if (m_ctl == nullptr)
             fn();
@@ -464,10 +457,6 @@ bool AutoTiltJob::prepare(Plater &plater)
             m_ctl->call_on_main_thread(fn).wait();
     };
     if (m_generator == AutoTilt::SupportGenerator::Legacy)
-        // What the verified search shortlists over: every affected instance of every captured plate,
-        // each posed about its own root and its own pivot and sliced under its own plate's settings.
-        // A ContactScorer here would order the shortlist from instance 0 under plate 0's config and
-        // ignore the copies standing anywhere else.
         m_scorer = std::make_unique<AutoTilt::LegacyShortlistScorer>(m_captured, m_k, std::move(run_on_main));
     else
         m_scorer = std::make_unique<AutoTilt::ContactScorer>(obj, m_captured.plates.front().full_config, m_k,
@@ -548,8 +537,6 @@ void AutoTiltJob::finalize(bool canceled, std::exception_ptr &eptr)
         push_result(with_skipped_clause(_u8L("Auto-tilt discarded: the model or printer changed while the search was running.")));
     };
 
-    // Every Organic outcome carries the same qualification, because every one of its numbers comes
-    // from the cheap contact estimate rather than from support the slicer generated.
     const auto push_estimate = [this](const std::string &text) { push_result(with_skipped_clause(text) + " " + organic_note()); };
 
     // prepare() refused a Mixed or Unknown generator before the job was queued, so only these two reach here.

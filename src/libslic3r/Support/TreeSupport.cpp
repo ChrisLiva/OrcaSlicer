@@ -737,7 +737,8 @@ std::vector<ExPolygons> TreeSupport::remove_floating_toolpaths()
 }
 
 // Unions one node's sources into another's, keeping the result sorted and carrying no id twice. Both
-// lists are empty unless this attempt was asked to measure itself, so an ordinary pass pays nothing.
+// lists are empty unless this attempt measures itself (an analysis was asked for or
+// support_miniature_contacts is on), so an ordinary pass pays nothing.
 static void merge_source_ids(std::vector<uint64_t> &dst, const std::vector<uint64_t> &src)
 {
     if (src.empty())
@@ -1934,10 +1935,6 @@ void TreeSupport::build_required_regions(PreparedLegacy &prepared)
     problem.regions.clear();
     problem.seeds.clear();
     problem.extrusion_width_mm = m_support_params.support_extrusion_width;
-    // How far from a required region a contact may sit and still anchor it: half the smaller of the
-    // two limits generate_contact_points already samples under, its branch spacing and its bridge
-    // length. A conservative geometric policy read off the settings in force, not a calibrated
-    // unsupported-span guarantee.
     const double reach = MiniatureSupport::legal_reach(m_object->config().tree_support_branch_distance.value,
                                                        m_object->config().max_bridge_length.value);
     // Object layer 0 owns no contact: generate_contact_points() places contacts for the overhangs of
@@ -1953,9 +1950,8 @@ void TreeSupport::build_required_regions(PreparedLegacy &prepared)
             // what keeps two overhangs on different layers two separate places to anchor.
             region.contact_z_mm   = layer->bottom_z();
             region.legal_reach_mm = reach;
-            // Whether one support extrusion fits in the overhang at all. A band narrower than that is a
-            // sliver the overhang detector filed - what a shallow slope adds per layer, a speck - not a
-            // place a line can be laid, so nothing may be counted for or against it.
+            // Whether one support extrusion fits in the overhang at all; `holds_an_extrusion` says what
+            // a band narrower than that is.
             region.printable      = MiniatureSupport::holds_an_extrusion(ExPolygons{ region.polygon },
                                                                          problem.extrusion_width_mm);
             // The lattice every later pass counts witnesses on, laid here once and carried by value
@@ -2077,8 +2073,9 @@ void TreeSupport::build_contact_seeds(const PreparedLegacy &prepared)
 
     // The directed overhang components: a region links downwards to one no more than two layers under
     // it whose polygon its own dilation reaches. Every region is filed under its component, whether a
-    // contact was placed for it or not, and the first seed of each component is critical, so thinning
-    // can never leave a component unanchored.
+    // contact was placed for it or not. Decimation walks seeds by z ascending and a component's first
+    // seed meets an empty `settled_of_component`, so it always survives; `critical` marks it for the
+    // analysis, which reports a component none of its critical seeds anchored.
     DisjointSets components(region_count);
     {
         std::vector<ExPolygons>  dilated(region_count);
@@ -2139,13 +2136,14 @@ void TreeSupport::build_contact_seeds(const PreparedLegacy &prepared)
         component_seeded[owner] = 1;
         // Three clauses, and a seed is critical when any of them holds. A painted enforcer's overhang and
         // a Hybrid big overhang both reach the contact pass as a pinned contact, which selection refuses
-        // to drop. The first seed of a component is its lowest, so thinning can never leave a component
-        // unanchored. And a seed whose model neck is narrower than one support extrusion stands on a
-        // feature the print cannot rebuild if the contact under it is thinned away, which is the whole
-        // reason a miniature is being measured; the neck is the constriction on the run to the root, which
-        // `measure_contact_risk` reads with this same `ModelSupportRisk::sample` call at this same layer
-        // index. Everything else thins like any other seed, as main's decimate_contact_nodes thinned
-        // them, which skipped pinned nodes and nothing else.
+        // to drop. The first seed of a component is its lowest, and decimation keeps it because nothing
+        // of its component is settled yet when it is judged. And a seed whose model neck is narrower
+        // than one support extrusion stands on a feature the print cannot rebuild if the contact under
+        // it is thinned away, which is the whole reason a miniature is being measured; the neck is the
+        // constriction on the run to the root, which `measure_contact_risk` reads with this same
+        // `ModelSupportRisk::sample` call at this same layer index. Selection never reads `critical`:
+        // it feeds SupportAnalysis, which lists critical seeds without material. Everything else thins
+        // by distance alone, skipping pinned seeds and nothing else.
         // The sample's `local_width_mm` is deliberately not read: a contact stands on an overhang band at
         // the model's own edge, where the local width reads zero however thick the feature behind it is,
         // so that clause would mark every seed critical and thin nothing.
@@ -2213,10 +2211,8 @@ void TreeSupport::generate_legacy(const PreparedLegacy &prepared)
     // that runs no selection generates support for every seed the problem carried and put none back.
     size_t seeds_kept = m_problem.seeds.size(), seeds_restored = 0, seeds_retained = m_problem.seeds.size();
     if (prepared.optimizes_contacts()) {
-        // Which contacts this attempt keeps. Selection runs against the frozen problem's required
-        // regions rather than against distance alone, so a contact goes only when another retained
-        // contact of its overhang component, on its own region or a lower one within the distance,
-        // already stands behind every witness cell it holds.
+        // Which contacts this attempt keeps: decimated by 3-D distance within an overhang component,
+        // then one contact put back per printable region no survivor covers (select_contacts).
         const MiniatureSupport::Selection selection = MiniatureSupport::select_contacts(m_problem, prepared.risk);
         seeds_retained = selection.retained.size();
         seeds_restored = selection.seeds_restored;

@@ -1595,9 +1595,9 @@ bool PrintObject::invalidate_step(PrintObjectStep step)
 		invalidated |= this->invalidate_steps({ posPerimeters, posPrepareInfill, posInfill, posIroning, posContouring, posSupportMaterial, posSimplifyPath, posSimplifyInfill });
         invalidated |= m_print->invalidate_steps({ psSkirtBrim });
         m_slicing_params.valid = false;
-        // invalidate_steps() reaches PrintBase::invalidate_step(), never this override, so the
-        // posSupportMaterial branch below does not run for a slice invalidation. Drop the pass here
-        // too: the geometry it was generated for and measured against is gone.
+        // invalidate_steps() goes straight to m_state.invalidate_multiple(), never through this
+        // override, so the posSupportMaterial branch below does not run for a slice invalidation. Drop
+        // the pass here too: the geometry it was generated for and measured against is gone.
         this->clear_support_layers();
     } else if (step == posSupportMaterial) {
         invalidated |= this->invalidate_steps({ posSimplifySupportPath });
@@ -4479,8 +4479,7 @@ void PrintObject::combine_infill()
 
 void PrintObject::_generate_support_material()
 {
-    // One request buys one analysis: it is consumed here whether or not this pass can honour it, so
-    // an ordinary slice that follows measures nothing.
+    // Consumed here whether or not this pass can honour it (Print::request_legacy_support_analysis).
     const bool analysis_requested = m_legacy_support_analysis_requested;
     m_legacy_support_analysis_requested = false;
 

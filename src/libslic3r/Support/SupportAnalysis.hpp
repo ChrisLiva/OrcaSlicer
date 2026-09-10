@@ -144,10 +144,8 @@ struct Stability
     bool   available          = false;
 };
 
-// What the model around one placed contact is worth carrying it: its own local width there, the
-// narrowest constriction over the model's own solids between it and the object's first slab, how far
-// it sits from that constriction, and the weight one mm2 of contact there carries. A relative
-// geometric ranking, not a force estimate and not a breakage guarantee.
+// What the model around one placed contact is worth carrying it: the readings ModelSupportRisk::Sample
+// defines, taken at the contact.
 struct ContactRisk
 {
     uint64_t                 seed_id = 0;
@@ -157,8 +155,6 @@ struct ContactRisk
 // What taking the generated support off the model would put at risk, group by group. A removal group
 // is a connected component of printed support material and the contacts the router carried into it.
 // Geometric estimates and a ranking of them: no force is calculated here and no cut is called safe.
-// The four fields are compared in the order they are written, so a count that got worse is never
-// bought back by a weight that got better.
 struct Damage
 {
     // Contacts the measurement could not answer for: the model under them was never measured, or no

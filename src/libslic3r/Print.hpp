@@ -438,7 +438,8 @@ public:
     void            set_support_raft_layers(size_t raft_layers) { m_support_raft_layers = raft_layers; }
 
     // The measurement of the support pass this object is holding, or null when it holds none: an
-    // ordinary slice measures nothing, and only a pass that was asked for an analysis produces one.
+    // ordinary slice measures nothing, and only a pass that was asked for an analysis, or that ran
+    // with support_miniature_contacts on, produces one.
     // Immutable once installed, and the seam verification and tests read the pass through.
     std::shared_ptr<const SupportAnalysis::Report> support_analysis() const { return m_support_analysis; }
     // What the tree generator recorded of the pass before its polygon union destroyed source
@@ -526,10 +527,7 @@ public:
 	PrintObject(Print* print, ModelObject* model_object, const Transform3d& trafo, PrintInstances&& instances);
 	~PrintObject();
 
-    // Asks the next legacy tree generation on this object to measure itself. _generate_support_material
-    // consumes and clears it, so one request buys one analysis and an ordinary slice measures nothing.
-    // Not a saved setting and not a mode. It adds the floating pass, which takes out the support
-    // extrusions resting on nothing, and otherwise leaves the generator's output alone.
+    // The per-object half of Print::request_legacy_support_analysis(), which states the contract.
     void                    request_legacy_support_analysis() { m_legacy_support_analysis_requested = true; }
 
     void                    config_apply(const ConfigBase &other, bool ignore_nonexistent = false) { m_config.apply(other, ignore_nonexistent); }

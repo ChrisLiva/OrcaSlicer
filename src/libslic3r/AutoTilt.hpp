@@ -114,14 +114,13 @@ SearchResult search(const std::vector<Pose> &legal,
                     const StopPredicate     &stop,
                     const ProgressSink      &progress);
 
-// One evaluated pose reduced to what the verified ranking compares. The four Damage fields are
-// aggregated over every affected instance - counts added up, the worst group the worst of them, the
-// sums added - so no instance hides behind another, and the volume is the support plus the raft
-// every instance prints. `damage.available` is false unless the pose measured every affected
-// instance in full, because a domain nothing measured is not damage of zero.
+// One evaluated pose reduced to what the verified ranking compares. The Damage fields are aggregated
+// over every affected instance - counts added up, the worst group the worst of them, the sums added -
+// and the volume is the support plus the raft every instance prints. `damage.available` is false
+// unless the pose measured every affected instance in full, because a domain nothing measured is not
+// damage of zero.
 struct Objectives
 {
-    // aggregated over every affected instance; `damage.available` is the tuple's, not one instance's
     SupportAnalysis::Damage damage;
     double                  volume_mm3 = 0.; // support plus raft
 };
@@ -150,7 +149,7 @@ constexpr size_t verified_finalist_count = 5;
 // stands in, taken once and compared against throughout; `selected` is the pose to apply on Improved
 // and a copy of `root` on every other outcome. `shortlist` is the finalists the cheap sweep chose,
 // best cheap score first, and the two counts say how much was actually measured, so no caller can
-// read a five-finalist answer as a swept grid. Canceled says the search stopped before it settled;
+// read a `verified_finalist_count`-finalist answer as a swept grid. Canceled says the search stopped before it settled;
 // VerificationUnavailable says the root itself was never measured; UnresolvedCoverage says the root
 // pose leaves a required region of the object open, which is a finding about the object rather than
 // about any candidate.
@@ -169,10 +168,10 @@ struct VerifiedSearchResult
     std::vector<std::string> reason_codes;
 };
 
-// Precondition: `legal` contains the root pose. Evaluates the root in full first, cheap-scores every
-// other legal pose, and verifies the best `verified_finalist_count` of them under the actual
-// settings. The cheap score orders the shortlist and grants nothing else: a pose wins only on what
-// the full evaluation measured.
+// Answers VerificationUnavailable with "no_root_pose" unless `legal` contains the root pose. Evaluates
+// the root in full first, cheap-scores every other legal pose, and verifies the best
+// `verified_finalist_count` of them under the actual settings. The cheap score orders the shortlist
+// and grants nothing else: a pose wins only on what the full evaluation measured.
 VerifiedSearchResult search_verified(const std::vector<Pose> &legal,
                                      Scorer                  &scorer,
                                      Verifier                &verifier,

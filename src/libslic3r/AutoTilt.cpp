@@ -255,8 +255,7 @@ Gain gain_over_root(const Objectives &root, const Objectives &candidate, const P
 
 // Whether one verified pose may stand against the root at all. Coverage and stability are
 // constraints, not scores: measured in full, no required region left open, nothing standing on air,
-// and the centroid over what it stands on. Compared instance by instance, in capture order, because a
-// copy that got safer never stands in for one that got worse.
+// and the centroid over what it stands on. Compared instance by instance, in capture order.
 bool candidate_admissible(const PoseEvaluation &root, const PoseEvaluation &candidate)
 {
     if (candidate.status != PoseEvaluation::Status::Complete)
@@ -466,7 +465,7 @@ VerifiedSearchResult search_verified(const std::vector<Pose> &legal,
     }
 
     // Each finalist once, at the settings the print would use. A finalist that fails is a finalist
-    // that failed: it is not retried, and no sixth pose takes its place.
+    // that failed: it is not retried, and no pose past `verified_finalist_count` takes its place.
     std::vector<Candidate> admissible;
     const Objectives       root_objectives = objectives(result.root);
     for (size_t i = 0; i < result.shortlist.size(); ++ i) {

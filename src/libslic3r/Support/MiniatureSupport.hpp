@@ -50,9 +50,8 @@ struct RequiredRegion
     double    contact_z_mm   = 0.;  // the underside of that layer: where a tip has to reach
     double    legal_reach_mm = 0.;  // how far from the polygon a contact may sit and still anchor it
     bool      critical       = false;
-    // Whether the region has room for one extrusion of the problem's resolved width (`holds_an_extrusion`).
-    // A region narrower than that is a sliver no line can be laid in, so it carries no witness lattice and
-    // nothing may be counted for or against it.
+    // Whether the region has room for one extrusion of the problem's resolved width (`holds_an_extrusion`);
+    // a region that has not carries no witness lattice (`region_witnesses`).
     bool      printable      = true;
     // The directed overhang component the seeding pass filed the region under: the root index of the
     // union-find over regions linked downward within two layers. A region built by hand is its own
@@ -162,11 +161,11 @@ struct Selection
 
 // What one prepared problem's contacts come to, under three rules in this order.
 //
-// Decimation first, over the source positions and by `contact_min_distance_mm` alone, which is main's
-// `decimate_contact_nodes` rule: contacts are walked by contact z ascending, radius descending, object
-// layer ascending, then position, and one goes when a contact already kept of its own overhang component
-// lies strictly within the distance of it in 3-D. The bound is strict, a pinned contact is kept and
-// crowds nobody, and a distance of 0 or less decimates nothing at all.
+// Decimation first, over the source positions and by `contact_min_distance_mm` alone: contacts are
+// walked by contact z ascending, radius descending, object layer ascending, then position, and one
+// goes when a contact already kept of its own overhang component lies strictly within the distance of
+// it in 3-D. The bound is strict, a pinned contact is kept and crowds nobody, and a distance of 0 or
+// less decimates nothing at all.
 //
 // The add-back then reads what the survivors stand behind under `CoverageRule`, at the contacts' own
 // positions: a printable region that carries contacts of its own and has a witness cell no survivor

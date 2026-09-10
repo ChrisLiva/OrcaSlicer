@@ -21,8 +21,9 @@ namespace ModelSupportRisk {
 
 namespace {
 
-// Twice the query's own clearance: no circle inside the solid centred on the query is wider, so no
-// medial width the query reads may exceed it. Contours and holes alike, in scaled units.
+// The query's own clearance from the solid's boundary, contours and holes alike, in scaled units. No
+// circle inside the solid centred on the query is wider than twice this, so no medial width the query
+// reads may exceed that; the callers double it.
 double clearance_scaled(const ExPolygon &solid, const Point &query)
 {
     double best = std::numeric_limits<double>::max();
@@ -512,8 +513,6 @@ Sample sample(const Field &field, size_t layer, const Point &query)
     result.neck_width_mm  = neck;
     result.lever_mm       = lever;
     result.risk_per_mm2   = weight;
-    // Below one extrusion width the model cannot be printed as drawn, and the weight's own clamping
-    // would otherwise hand back exactly the number a printable feature gets.
     result.status = local < field.extrusion_width_mm || neck < field.extrusion_width_mm ?
                         Sample::Status::BelowPrintableWidth : Sample::Status::Known;
     return result;
@@ -524,16 +523,13 @@ double risk_weight(double extrusion_width_mm, double local_width_mm, double neck
     if (! std::isfinite(extrusion_width_mm) || extrusion_width_mm <= 0. || ! std::isfinite(local_width_mm) ||
         ! std::isfinite(neck_width_mm) || ! std::isfinite(lever_mm))
         return std::numeric_limits<double>::quiet_NaN();
-    // Both widths clamp at one extrusion: below it the model cannot be printed as drawn at all, and
-    // no ratio taken there means anything. What that clamping hides, Sample::BelowPrintableWidth says.
+    // Both widths clamp at one extrusion.
     return (extrusion_width_mm / std::max(local_width_mm, extrusion_width_mm)) *
            (1. + lever_mm / std::max(neck_width_mm, extrusion_width_mm));
 }
 
 namespace {
 
-// The 26 directions with coordinates in {-1, 0, 1} bar the zero vector, normalized, in lexicographic
-// order of the integer triples. The first one found clear is the answer, so this order is part of it.
 const std::vector<Vec3d> &escape_directions()
 {
     static const std::vector<Vec3d> directions = []() {
@@ -739,8 +735,7 @@ bool clip_to_z(const Vec3d &a, const Vec3d &b, double lo, double hi, double &t0,
 }
 
 // Whether the capsule of radius `r` around [a, b] shares volume with the slab's material, and where
-// on that material it was met. The slab is grown by `r` in Z before the plan-view test, so material
-// the probe passes just over or just under its cap reads as met.
+// on that material it was met.
 bool slab_meets(const AccessSlab &slab, const Vec3d &a, const Vec3d &b, double r, Vec3d &where)
 {
     if (slab.polygons->empty())
@@ -787,8 +782,6 @@ Access assess_access(const AABBMesh &model, const std::vector<ExPolygons> &suppo
             return out;
 
     const double r = clearance_mm;
-    // A slab runs from the print_z of the layer under it; the first from as far below its own as the
-    // second layer stands above it, which is the height that stack was printed at.
     std::vector<AccessSlab> slabs;
     slabs.reserve(layer_z_mm.size());
     for (size_t i = 0; i < layer_z_mm.size(); ++ i) {

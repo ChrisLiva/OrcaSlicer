@@ -131,12 +131,13 @@ struct SupportNode
     bool           is_processed    = false;
     bool           need_extra_wall = false;
     bool           is_sharp_tail   = false;
-    bool           is_pinned       = false; // user-asked contact (enforcer, Hybrid big overhang): contact selection keeps it and it covers for nobody
+    bool           is_pinned       = false; // user-asked contact (enforcer, Hybrid big overhang): contact selection keeps it and it crowds nobody
     bool           valid = true;
     ExPolygon      overhang; // when type==ePolygon, set this value to get original overhang area
     // Which required regions this node is routing material for, by MiniatureSupport::ContactSeed id.
-    // Sorted and unique. A split copies it, a merge unions it; empty when no analysis was asked for
-    // or when the node came from a vertical enforcer point, which has no overhang polygon of its own.
+    // Sorted and unique. A split copies it, a merge unions it; empty unless an analysis was asked for
+    // or support_miniature_contacts is on, and empty for a node that came from a vertical enforcer
+    // point, which has no overhang polygon of its own.
     std::vector<uint64_t> source_ids;
 
     /*!
@@ -565,7 +566,8 @@ private:
 
     // Turns this attempt's contacts into the problem's seeds: sorts them by (object layer, region,
     // position, pin category), hands out dense ids in that order and stamps each contact node with
-    // the one it got. Marks the seeds a thinning pass may not drop.
+    // the one it got. Marks the seeds `critical`, which only SupportAnalysis reads
+    // (`critical_anchor_ids`, `support_unresolved`): selection never consults it.
     void build_contact_seeds(const PreparedLegacy &prepared);
 
     // Runs the legacy generation attempt over a frozen problem: fresh contact nodes, a fresh
