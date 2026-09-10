@@ -403,11 +403,7 @@ long long peak_memory_bytes()
 
 std::string build_revision()
 {
-#ifdef GIT_COMMIT_HASH
     return std::string(GIT_COMMIT_HASH);
-#else
-    return std::string("unknown");
-#endif
 }
 
 namespace {
@@ -609,20 +605,20 @@ size_t for_each_corpus_object(const std::string &dir, const DynamicPrintConfig &
     for (const std::filesystem::path &path : corpus_files(dir)) {
         const std::string      stem = path.stem().string();
         DynamicPrintConfig     loaded;
-        std::unique_ptr<Model> model;
+        Model                  model;
         try {
             // The 3mf importer creates no object without LoadModel and reads no config without
             // LoadConfig (_BBS_3MF_Importer reads both off the strategy), so the default strategy
             // hands back an empty model; load with the LoadStrategy flags the CLI's model loading in
             // OrcaSlicer.cpp uses.
-            model.reset(new Model(Model::read_from_file(path.string(), &loaded, nullptr,
-                LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances)));
+            model = Model::read_from_file(path.string(), &loaded, nullptr,
+                LoadStrategy::LoadModel | LoadStrategy::LoadConfig | LoadStrategy::AddDefaultInstances);
         } catch (const std::exception &e) {
             std::cout << "model " << index << " " << stem << " skipped: " << e.what() << std::endl;
             ++ index;
             continue;
         }
-        if (model->objects.empty()) {
+        if (model.objects.empty()) {
             std::cout << "model " << index << " " << stem << " skipped: no printable instance" << std::endl;
             ++ index;
             continue;
@@ -632,8 +628,8 @@ size_t for_each_corpus_object(const std::string &dir, const DynamicPrintConfig &
         const DynamicPrintConfig config = corpus_config(base, loaded);
         // One harness model per object: the print measured has to hold exactly the one object, and
         // its single instance is centred on the bed and dropped onto it before slicing.
-        for (const ModelObject *src : model->objects) {
-            const std::string obj_stem = corpus_stem(path, model->objects.size(), src->name);
+        for (const ModelObject *src : model.objects) {
+            const std::string obj_stem = corpus_stem(path, model.objects.size(), src->name);
             if (src->instances.empty()) {
                 std::cout << "model " << index << " " << obj_stem << " skipped: no printable instance" << std::endl;
                 ++ index;

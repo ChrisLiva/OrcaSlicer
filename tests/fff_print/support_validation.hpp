@@ -205,7 +205,8 @@ void write_result(const CaseResult &result, std::ostream &out);
 // The process's peak resident set in bytes, or a negative value where the platform offers none.
 long long peak_memory_bytes();
 
-// The commit this binary was built from, or "unknown" where the build did not stamp one.
+// The short commit hash CMake read at configure time, or "0000000" in a build without git (the
+// libslic3r_version.h fallback).
 std::string build_revision();
 
 // One manifest case, as scripts/validate_miniature_supports.py validated it before this binary ran.

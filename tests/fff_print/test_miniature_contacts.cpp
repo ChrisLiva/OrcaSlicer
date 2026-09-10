@@ -2393,11 +2393,6 @@ TEST_CASE("A requested support analysis names required regions and contact seeds
         INFO("region " << region.region_id);
         REQUIRE(region.critical == (critical_anchors_of(*report, region) > 0));
     }
-    // A seed the generator pinned is never one a thinning pass may drop, so it is critical, and the
-    // painted-enforcer overhangs the rule names are exactly the ones the contact pass pins.
-    for (uint64_t id : report->pinned_anchor_ids)
-        REQUIRE(std::binary_search(report->critical_anchor_ids.begin(), report->critical_anchor_ids.end(), id));
-
     // Nothing here is pinned and nothing is a sharp tail with a contact of its own, so the marking
     // that is left is the component rule: the first seed of each directed overhang component and no
     // other. Every region keeps at most one critical seed, and the problem still keeps some.

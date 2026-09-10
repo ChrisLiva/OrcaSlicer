@@ -97,10 +97,6 @@ COMBINED_TREATMENT = TREATMENTS[3]
 PHYSICAL_REPEATS = 3
 PHYSICAL_PRINTS_PER_CASE = len(TREATMENTS) * PHYSICAL_REPEATS
 
-# Where the operator's recorded prints live. Unlike every other path here it is not produced by a
-# run: a human types it, outside the working tree.
-ENV_PHYSICAL_CSV = "ORCA_MINIATURE_PHYSICAL_CSV"
-
 # Every column one printed repeat has to carry.
 PHYSICAL_FIELDS = (
     "case_id",
