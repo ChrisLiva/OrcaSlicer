@@ -40,6 +40,11 @@ class SupportLayer;
 class TreeSupportData;
 class TreeSupport;
 class ExtrusionLayers;
+
+namespace SupportAnalysis {
+struct EmittedSupport;
+struct Report;
+} // namespace SupportAnalysis
 namespace MultiNozzleUtils { class NozzleGroupResultBase; class LayeredNozzleGroupResult; }
 
 #define MAX_OUTER_NOZZLE_DIAMETER   4
@@ -423,6 +428,25 @@ public:
     SupportLayer* add_tree_support_layer(int id, coordf_t height, coordf_t print_z, coordf_t slice_z);
     std::shared_ptr<TreeSupportData> alloc_tree_support_preview_cache();
     void clear_tree_support_preview_cache() { m_tree_support_preview_cache.reset(); }
+    // The tree generator's node pool and collision caches for the support pass this object is holding,
+    // or null when it holds none. An object reading a shared owner's layers reads the owner's.
+    const std::shared_ptr<TreeSupportData>& tree_support_preview_cache() const { return m_tree_support_preview_cache; }
+    // Hands the object the cache one generation attempt built, in place of whatever it was holding.
+    void set_tree_support_preview_cache(std::shared_ptr<TreeSupportData> cache) { m_tree_support_preview_cache = std::move(cache); }
+    // How many of the support layers the pass laid sit under the object as its raft.
+    size_t          support_raft_layers() const { return m_support_raft_layers; }
+    void            set_support_raft_layers(size_t raft_layers) { m_support_raft_layers = raft_layers; }
+
+    // The measurement of the support pass this object is holding, or null when it holds none: an
+    // ordinary slice measures nothing, and only a pass that was asked for an analysis produces one.
+    // Immutable once installed, and the seam verification and tests read the pass through.
+    std::shared_ptr<const SupportAnalysis::Report> support_analysis() const { return m_support_analysis; }
+    // What the tree generator recorded of the pass before its polygon union destroyed source
+    // identity, completed with the footprints the toolpaths actually cover.
+    const std::shared_ptr<const SupportAnalysis::EmittedSupport>& emitted_support() const { return m_emitted_support; }
+    // Handed over by the generator that produced them, in place of whatever the object was holding.
+    void set_support_analysis(std::shared_ptr<const SupportAnalysis::Report> report) { m_support_analysis = std::move(report); }
+    void set_emitted_support(std::shared_ptr<const SupportAnalysis::EmittedSupport> emitted) { m_emitted_support = std::move(emitted); }
 
     size_t          support_layer_count() const { return m_support_layers.size(); }
     void            clear_support_layers();
@@ -498,6 +522,15 @@ public:
 
 	PrintObject(Print* print, ModelObject* model_object, const Transform3d& trafo, PrintInstances&& instances);
 	~PrintObject();
+
+    // Drops the pass this object is holding: an object that owns its support layers deletes them, an
+    // object reading a shared owner's layers only lets go of them.
+    void                    clear_support_result_state();
+
+    // Asks the next legacy tree generation on this object to measure itself. _generate_support_material
+    // consumes and clears it, so one request buys one analysis and an ordinary slice measures nothing.
+    // Not a saved setting and not a mode: it changes no geometry.
+    void                    request_legacy_support_analysis() { m_legacy_support_analysis_requested = true; }
 
     void                    config_apply(const ConfigBase &other, bool ignore_nonexistent = false) { m_config.apply(other, ignore_nonexistent); }
     void                    config_apply_only(const ConfigBase &other, const t_config_option_keys &keys, bool ignore_nonexistent = false) { m_config.apply_only(other, keys, ignore_nonexistent); }
@@ -583,6 +616,13 @@ private:
     SupportLayerPtrs                        m_support_layers;
     // BBS
     std::shared_ptr<TreeSupportData>        m_tree_support_preview_cache;
+    // Leading entries of m_support_layers that are the raft, as the generator that laid them counted it.
+    size_t                                  m_support_raft_layers = 0;
+    // The measurement of the pass the object is holding, and the attributed areas behind it.
+    std::shared_ptr<const SupportAnalysis::Report>         m_support_analysis;
+    std::shared_ptr<const SupportAnalysis::EmittedSupport> m_emitted_support;
+    // Set by Print::request_legacy_support_analysis(), consumed by _generate_support_material().
+    bool                                    m_legacy_support_analysis_requested = false;
 
     // this is set to true when LayerRegion->slices is split in top/internal/bottom
     // so that next call to make_perimeters() performs a union() before computing loops
@@ -939,6 +979,11 @@ public:
     ApplyStatus         apply(const Model &model, DynamicPrintConfig config, bool extruder_applied = false) override;
 
     void                process(long long *time_cost_with_cache = nullptr, bool use_cache = false) override;
+    // Asks the next legacy tree support generation on every object of this print to measure itself,
+    // reachable afterwards through PrintObject::support_analysis(). PrintObject holds the request
+    // privately and consumes it in one generation, so this is the seam a caller owning a Print uses.
+    // It is a request, not a parameter of process(), and it changes no geometry.
+    void                request_legacy_support_analysis();
     // Exports G-code into a file name based on the path_template, returns the file path of the generated G-code file.
     // If preview_data is not null, the preview_data is filled in for the G-code visualization (not used by the command line Slic3r).
     std::string         export_gcode(const std::string& path_template, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
@@ -991,6 +1036,10 @@ public:
     // Orca: Old callers still expect object-keyed brim paths.
     std::map<ObjectID, ExtrusionEntityCollection>&
         get_brimMap() { return m_brimMap; }
+    // Read-only, per instance: the bed adhesion one physical copy actually stands on, which is what a
+    // support measurement taken before the brim existed has to be refreshed against.
+    const std::map<ObjectInstanceID, ExtrusionEntityCollection>&
+        get_brimMapByInstance() const { return m_brimMapByInstance; }
 
     // How many of PrintObject::copies() over all print objects are there?
     // If zero, then the print is empty and the print shall not be executed.
