@@ -844,8 +844,9 @@ Report measure(const PrintObject &object, const MiniatureSupport::Problem &probl
     const Components        support       = build_components(support_slabs, 0.);
 
     // Stability reads the emitted material and the object alone, so it is measured whatever the
-    // prepared problem asked for, and it is what it is even where coverage stays unresolved.
-    if (any_emitted)
+    // prepared problem asked for, and it is what it is even where coverage stays unresolved. With no
+    // required region it reads the object and whatever raft it stands on, emitted or not.
+    if (any_emitted || problem.regions.empty())
         measure_stability(report, object, emitted, printed, region_of_seed, support_slabs, slab_of_layer, support);
     if (! report.stability.available)
         report.reasons.push_back(Reason::StabilityUnavailable);
@@ -855,9 +856,11 @@ Report measure(const PrintObject &object, const MiniatureSupport::Problem &probl
     if (! report.damage.available)
         report.reasons.push_back(Reason::DamageUnavailable);
 
-    if (problem.regions.empty() || ! any_emitted) {
-        // Nothing to intersect against. Coverage is unresolved rather than zero: an unmeasured domain
-        // may not read as a measured absence.
+    // A problem with no required region has nothing to cover, so its coverage is complete by
+    // construction: the passes below walk zero regions and zero seeds, and the final rule decides the
+    // status. Required regions with nothing emitted have nothing to intersect against, and their
+    // coverage is unresolved rather than zero: an unmeasured domain may not read as a measured absence.
+    if (! problem.regions.empty() && ! any_emitted) {
         report.coverage_available = false;
         report.status             = Report::Status::UnresolvedCoverage;
         report.reasons.push_back(Reason::EmittedMaterialMissing);

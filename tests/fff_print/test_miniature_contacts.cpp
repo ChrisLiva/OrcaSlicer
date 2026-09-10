@@ -1010,6 +1010,37 @@ TEST_CASE("Group risk weighs contact area by model risk, lengthens with the run 
     }
 }
 
+TEST_CASE("A measurement that requires nothing is complete and one that printed nothing is unresolved", "[MiniatureContacts]")
+{
+    AnalysisRun run;
+    run_analysis(run, lip_fixture(),
+                 fixture_config({ { "support_style", "tree_slim" }, { "support_top_z_distance", "0.2" },
+                                  { "support_miniature_contacts", "1" }, { "support_contact_min_distance", "0" } }),
+                 false);
+    REQUIRE(run.report() != nullptr);
+
+    // Nothing required and nothing emitted: there is nothing to cover, so coverage is complete by
+    // construction, and stability reads the object standing on the plate by itself.
+    const SupportAnalysis::Report nothing = SupportAnalysis::measure(run.object(), MiniatureSupport::Problem(), SupportAnalysis::EmittedSupport());
+    CHECK(nothing.status == SupportAnalysis::Report::Status::Complete);
+    CHECK(nothing.coverage_available);
+    CHECK(nothing.stability.available);
+    CHECK(nothing.damage.available);
+    CHECK(nothing.has_reason(SupportAnalysis::Reason::NoProblem));
+    CHECK_FALSE(nothing.has_reason(SupportAnalysis::Reason::EmittedMaterialMissing));
+
+    // A region the lip requires, with a contact placed on it and nothing printed: the region is still
+    // owed support, so its coverage stays unresolved rather than reading as measured.
+    const SupportAnalysis::CoverageKey key = run.report()->key;
+    REQUIRE(key.witnesses.size() == 1);
+    const Point                   centre     = get_extents(key.witnesses.front()).center();
+    const Fabricated              fabricated = fabricate(key, { centre }, { column_at(centre, 1.) });
+    const SupportAnalysis::Report report     = SupportAnalysis::measure(run.object(), fabricated.problem, SupportAnalysis::EmittedSupport());
+    CHECK(report.status == SupportAnalysis::Report::Status::UnresolvedCoverage);
+    CHECK_FALSE(report.coverage_available);
+    CHECK(report.has_reason(SupportAnalysis::Reason::EmittedMaterialMissing));
+}
+
 TEST_CASE("Miniature contacts leave a stock slice untouched when off", "[MiniatureContacts]")
 {
     // support_style, because the default resolves to organic and the organic generator never fills

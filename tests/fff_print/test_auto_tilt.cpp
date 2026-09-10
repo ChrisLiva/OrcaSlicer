@@ -706,6 +706,34 @@ TEST_CASE("Generated evaluation measures legacy support read-only and refuses Or
                     (report.coverage_available && report.stability.available && report.damage.available));
 }
 
+TEST_CASE("Generated evaluation reads an object with no overhang as complete", "[AutoTilt]")
+{
+    // A cube standing on its face has no overhang, so the measured pass requires no region: nothing
+    // is left to cover, and the object stands on the plate by itself.
+    Slic3r::Model model = Slic3r::Test::model("cube", cube(8.));
+    model.objects.front()->instances.front()->set_offset(Vec3d(100., 100., 0.));
+    model.objects.front()->ensure_on_bed();
+    const DynamicPrintConfig config =
+        fixture_config({ { "support_style", "tree_slim" }, { "support_top_z_distance", "0.2" }, { "layer_change_gcode", "G92 E0" } });
+
+    AutoTilt::GeneratedEvaluator evaluator(plate_input(model, config, { model.objects.front()->instances.front()->id() }),
+                                           inline_runner());
+    const AutoTilt::PoseEvaluation evaluation = evaluator.evaluate(AutoTilt::Pose{}, {});
+    INFO("reasons: " << reasons_of(evaluation));
+    REQUIRE(evaluation.instances.size() == 1);
+    CHECK(evaluation.status == AutoTilt::PoseEvaluation::Status::Complete);
+
+    const SupportAnalysis::Report &report = evaluation.instances.front();
+    CHECK(report.status == SupportAnalysis::Report::Status::Complete);
+    CHECK(report.coverage_available);
+    CHECK(report.stability.available);
+    CHECK(report.missing_anchor_ids.empty());
+    CHECK(report.has_reason(SupportAnalysis::Reason::NoProblem));
+    CHECK(SupportAnalysis::stability_admissible(report.stability));
+    CHECK(std::find(evaluation.reason_codes.begin(), evaluation.reason_codes.end(),
+                    std::string("required_region_unsupported")) == evaluation.reason_codes.end());
+}
+
 TEST_CASE("Generated evaluation counts every affected instance and refreshes the footprint after brim", "[AutoTilt]")
 {
     // Two copies of the selected object, and a neighbour object nothing selected that needs support
