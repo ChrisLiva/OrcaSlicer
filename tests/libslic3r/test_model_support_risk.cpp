@@ -152,8 +152,9 @@ TEST_CASE("A hanging weapon reaches the bed upward through its hand and the hand
         CHECK(ModelSupportRisk::sample(field, 3, pt_mm(2., 2.)).status == ModelSupportRisk::Sample::Status::Known);
     }
 
-    SECTION("a model that touches no bed has no root, so nothing in it resolves")
+    SECTION("a model lifted onto a raft roots at its own first slab")
     {
+        // A raft under the object puts its first slab 5 mm up; the raft is the ground it stands on.
         std::vector<ModelSupportRisk::Slice> slices = hanging_weapon();
         for (ModelSupportRisk::Slice &slice : slices) {
             slice.bottom_z_mm += 5.;
@@ -161,7 +162,9 @@ TEST_CASE("A hanging weapon reaches the bed upward through its hand and the hand
         }
         const ModelSupportRisk::Field field = ModelSupportRisk::build(slices, 0.42, never_stop);
         REQUIRE(field.status == ModelSupportRisk::Field::Status::Complete);
-        CHECK(ModelSupportRisk::sample(field, 0, pt_mm(2., 2.)).status == ModelSupportRisk::Sample::Status::Unknown);
+        CHECK(ModelSupportRisk::sample(field, 0, pt_mm(2., 2.)).status == ModelSupportRisk::Sample::Status::Known);
+        // The blade still reaches that ground up through the arm and down the torso.
+        CHECK(ModelSupportRisk::sample(field, 3, pt_mm(8.5, 1.5)).status == ModelSupportRisk::Sample::Status::Known);
     }
 
     SECTION("a stopped build is canceled, which is not the same answer as unmeasured geometry")

@@ -258,16 +258,17 @@ Field build(const std::vector<Slice> &slices, double extrusion_width_mm, const s
         field.adjacency[b].push_back(index);
     };
 
-    // The bed is z = 0: an island whose slab starts there stands on it, and every medial sample of it
-    // is a place a path may end.
-    const double bed_tolerance = 1e-6;
+    // The ground is the object's first slab, on the plate or on the raft the plate carries: an island
+    // whose slab starts there stands on it, and every medial sample of it is a place a path may end.
+    const double ground_z_mm      = slices.empty() ? 0. : slices.front().bottom_z_mm;
+    const double ground_tolerance = 1e-6;
 
     for (size_t l = 0; l < slices.size(); ++ l) {
         if (stopped()) {
             field.status = Field::Status::Canceled;
             return field;
         }
-        const bool root = slices[l].bottom_z_mm <= bed_tolerance;
+        const bool root = slices[l].bottom_z_mm <= ground_z_mm + ground_tolerance;
         for (size_t i = 0; i < slices[l].solids.size(); ++ i) {
             const ExPolygon &solid = slices[l].solids[i];
             const size_t     flat  = field.island_base[l] + i;
