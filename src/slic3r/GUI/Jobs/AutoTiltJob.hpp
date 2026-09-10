@@ -39,11 +39,6 @@ public:
     void finalize(bool canceled, std::exception_ptr &eptr) override;
 
 private:
-    // Which search answered, so finalize() applies what that search settled on and never reads an
-    // estimate as a measurement. VerificationUnavailable is the mixed-generator case: the affected
-    // instances do not all run the same support generator, so there is nothing to apply.
-    enum class ResultKind { None, Estimated, Verified, VerificationUnavailable };
-
     // `text` with the pre-pass skipped clause appended when the pre-pass skipped at least one pose.
     std::string with_skipped_clause(const std::string &text) const;
     void        push_result(const std::string &text) const;
@@ -74,7 +69,6 @@ private:
     // The shortlist scorer the generator on this object calls for: the legacy branch ranks over
     // every affected instance of every captured plate, Organic over the one live object.
     std::unique_ptr<AutoTilt::Scorer>        m_scorer;
-    ResultKind                               m_kind = ResultKind::None;
     AutoTilt::SearchResult                   m_result;   // Organic: the estimate
     AutoTilt::VerifiedSearchResult           m_verified; // legacy: measured under the actual settings
     // Read at call time by the main-thread runner handed to the scorer; null until process() sets it,

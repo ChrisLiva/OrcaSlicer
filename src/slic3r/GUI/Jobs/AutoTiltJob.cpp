@@ -43,9 +43,6 @@ static std::vector<PartPlate *> resolve_plates(Plater &plater, int obj_idx, size
 // The cheap precondition gate, read straight off the live model so opening a menu costs no clone:
 // the object under its own live matrices, each auto-dropped instance dropped by its own transformed
 // hull, which is the same rule AutoTilt::posed_instances applies to a candidate.
-//
-// The per-volume hull box repeats the body of ModelObject::instance_convex_hull_bounding_box; that
-// helper takes an instance index and reads the live matrix, so it cannot serve a candidate transform.
 static bool root_pose_fits(const ModelObject &obj, const std::vector<PartPlate *> &plates)
 {
     if (obj.instances.size() != plates.size())
@@ -53,9 +50,7 @@ static bool root_pose_fits(const ModelObject &obj, const std::vector<PartPlate *
     std::vector<BoundingBoxf3> boxes(obj.instances.size());
     for (size_t i = 0; i < obj.instances.size(); ++i) {
         const Transform3d matrix = obj.instances[i]->get_transformation().get_matrix();
-        for (const ModelVolume *v : obj.volumes)
-            if (v->is_model_part())
-                boxes[i].merge(v->get_convex_hull().transformed_bounding_box(matrix * v->get_matrix()));
+        boxes[i]                 = obj.instance_convex_hull_bounding_box(i);
         // The transformed convex hull has the same extreme z as the transformed mesh, so this drop
         // is exact rather than conservative, and it is this instance's own.
         if (boxes[i].defined && obj.instances[i]->auto_drop)
@@ -498,17 +493,11 @@ void AutoTiltJob::process(Ctl &ctl)
         });
         CancellationRelay relay(ctl, evaluator);
         m_verified = AutoTilt::search_verified(m_legal, *m_scorer, evaluator, m_k, stop, progress);
-        m_kind     = ResultKind::Verified;
         return;
     }
-    if (m_generator == AutoTilt::SupportGenerator::Organic) {
+    if (m_generator == AutoTilt::SupportGenerator::Organic)
         // Organic keeps the search it has: the generated evaluation does not answer for it.
         m_result = AutoTilt::search(m_legal, *m_scorer, m_k, stop, progress);
-        m_kind   = ResultKind::Estimated;
-        return;
-    }
-    // Nothing measures a mixed or unresolved operation, so nothing is applied for one.
-    m_kind = ResultKind::VerificationUnavailable;
 }
 
 bool AutoTiltJob::apply_pose(const AutoTilt::Pose &pose)
@@ -563,8 +552,9 @@ void AutoTiltJob::finalize(bool canceled, std::exception_ptr &eptr)
     // from the cheap contact estimate rather than from support the slicer generated.
     const auto push_estimate = [this](const std::string &text) { push_result(with_skipped_clause(text) + " " + organic_note()); };
 
-    switch (m_kind) {
-    case ResultKind::Verified:
+    // prepare() refused a Mixed or Unknown generator before the job was queued, so only these two reach here.
+    switch (m_generator) {
+    case AutoTilt::SupportGenerator::Legacy:
         switch (m_verified.outcome) {
         case AutoTilt::VerifiedSearchResult::Outcome::Improved:
             if (!apply_pose(m_verified.selected.pose))
@@ -587,7 +577,7 @@ void AutoTiltJob::finalize(bool canceled, std::exception_ptr &eptr)
         }
         break;
 
-    case ResultKind::Estimated:
+    case AutoTilt::SupportGenerator::Organic:
         switch (m_result.outcome) {
         case AutoTilt::SearchResult::Outcome::Improved:
             if (!apply_pose(m_result.best))
@@ -609,11 +599,7 @@ void AutoTiltJob::finalize(bool canceled, std::exception_ptr &eptr)
         }
         break;
 
-    case ResultKind::VerificationUnavailable:
-        push_result(_u8L("Auto-tilt cannot verify this object: its copies do not all use the same support generator."));
-        break;
-
-    case ResultKind::None:
+    default:
         break;
     }
 }
