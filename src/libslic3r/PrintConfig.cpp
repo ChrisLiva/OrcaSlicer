@@ -6783,7 +6783,10 @@ void PrintConfigDef::init_fff_params()
     def = this->add("support_miniature_contacts", coBool);
     def->label    = L("Miniature contacts");
     def->category = L("Support");
-    def->tooltip  = L("Merge support contact points that sit close together, so cleanup is a few deliberate snaps instead of many slivers. Legacy tree styles only.");
+    def->tooltip  = L("Merge support contact points that sit close together, so cleanup is a few deliberate snaps instead of many slivers. "
+                      "Applies to the legacy tree styles only (Slim, Strong and Hybrid): each object is generated twice, the optimized "
+                      "support is compared against an unthinned reference, and the reference is kept whenever the coverage, stability or "
+                      "removal estimates regress. Expect additional slicing time.");
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 

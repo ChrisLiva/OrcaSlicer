@@ -2,6 +2,8 @@
 #define TREESUPPORT_H
 
 #include <forward_list>
+#include <functional>
+#include <memory>
 #include <unordered_set>
 #include "ExPolygon.hpp"
 #include "Point.hpp"
@@ -13,6 +15,9 @@
 #include "Fill/Lightning/Generator.hpp"
 #include "TreeModelVolumes.hpp"
 #include "TreeSupport3D.hpp"
+#include "MiniatureSupport.hpp"
+#include "ModelSupportRisk.hpp"
+#include "SupportAnalysis.hpp"
 
 #ifndef SQ
 #define SQ(x) ((x)*(x))
@@ -89,8 +94,10 @@ struct SupportNode
                 parents.push_back(neighbor);
             }
             is_sharp_tail = parent->is_sharp_tail;
-            island = parent->island;
             skin_direction = parent->skin_direction;
+            // A node dropped or split off a parent carries the parent's sources: the branch below a
+            // contact is still routing that contact's material.
+            source_ids = parent->source_ids;
         }
     }
 
@@ -124,10 +131,13 @@ struct SupportNode
     bool           is_processed    = false;
     bool           need_extra_wall = false;
     bool           is_sharp_tail   = false;
-    bool           is_pinned       = false; // user-asked contact (enforcer, Hybrid big overhang): decimation keeps it and it suppresses nobody
-    int            island          = -1; // 3-D overhang island from assign_contact_islands; -1 = no polygon (vertical enforcer): decimation treats it as one shared pool
+    bool           is_pinned       = false; // user-asked contact (enforcer, Hybrid big overhang): contact selection keeps it and it covers for nobody
     bool           valid = true;
     ExPolygon      overhang; // when type==ePolygon, set this value to get original overhang area
+    // Which required regions this node is routing material for, by MiniatureSupport::ContactSeed id.
+    // Sorted and unique. A split copies it, a merge unions it; empty when no analysis was asked for
+    // or when the node came from a vertical enforcer point, which has no overhang polygon of its own.
+    std::vector<uint64_t> source_ids;
 
     /*!
      * \brief The direction of the skin lines above the tip of the branch.
@@ -186,6 +196,23 @@ struct SupportNode
     }
 };
 
+// The read-only geometry a legacy support attempt collides against, taken off the object's slices
+// once: the per-layer outlines simplified to the collision resolution, their running union from the
+// plate upwards, and how far a branch may move per layer. Collecting these once and handing them to
+// each attempt's TreeSupportData keeps the object's slices read-only and keeps an attempt from
+// inheriting the node pool or the collision caches of another one. Nothing writes them after
+// collect_collision_inputs() returned them, so the attempts share one const copy instead of taking
+// one each.
+struct TreeSupportCollisionInputs
+{
+    coordf_t                xy_distance              = 0;
+    coordf_t                radius_sample_resolution = 0;
+    coordf_t                branch_scale_factor      = 1.;
+    std::vector<ExPolygons> layer_outlines;
+    std::vector<ExPolygons> layer_outlines_below;
+    std::vector<double>     max_move_distances;
+};
+
 /*!
  * \brief Lazily generates tree guidance volumes.
  *
@@ -194,7 +221,6 @@ struct SupportNode
 class TreeSupportData
 {
 public:
-    TreeSupportData() = default;
     /*!
      * \brief Construct the TreeSupportData object
      *
@@ -203,12 +229,17 @@ public:
      * \param radius_sample_resolution Sample size used to round requested node radii.
      */
     TreeSupportData(const PrintObject& object, coordf_t xy_distance, coordf_t radius_sample_resolution);
+    // Same data, from inputs collected earlier instead of from the object: an empty node pool and
+    // empty collision/avoidance caches over outlines that were measured once. The inputs are held,
+    // not copied, so every attempt made from one prepared problem reads the same outlines.
+    explicit TreeSupportData(std::shared_ptr<const TreeSupportCollisionInputs> inputs);
+    // The collision geometry of `object` at this clearance and resolution.
+    static TreeSupportCollisionInputs collect_collision_inputs(const PrintObject &object, coordf_t xy_distance, coordf_t radius_sample_resolution);
     ~TreeSupportData() {
         clear_nodes();
     }
 
     TreeSupportData(TreeSupportData&&) = default;
-    TreeSupportData& operator=(TreeSupportData&&) = default;
 
     TreeSupportData(const TreeSupportData&) = delete;
     TreeSupportData& operator=(const TreeSupportData&) = delete;
@@ -316,15 +347,20 @@ public:
      */
     coordf_t m_radius_sample_resolution;
 
+    // The collision geometry the three views below are bound to, kept alive for as long as this data
+    // lives. Shared with every other attempt made from the same prepared problem, which is safe
+    // because nothing writes these outlines after collect_collision_inputs() returned them.
+    std::shared_ptr<const TreeSupportCollisionInputs> m_collision;
+
     /*!
      * \brief Storage for layer outlines of the meshes.
      */
-    std::vector<ExPolygons> m_layer_outlines;
+    const std::vector<ExPolygons> &m_layer_outlines;
 
     // union contours of all layers below
-    std::vector<ExPolygons> m_layer_outlines_below;
+    const std::vector<ExPolygons> &m_layer_outlines_below;
 
-    std::vector<double> m_max_move_distances;
+    const std::vector<double> &m_max_move_distances;
 
     /*!
      * \brief Caches for the collision, avoidance and internal model polygons
@@ -375,9 +411,17 @@ public:
      * \param storage The data storage where the mesh data is gotten from and
      * where the resulting support areas are stored.
      */
+    // Generates this object's support: one preparation, and one legacy attempt over it. Detection, the
+    // printable tip floors, interfaces, enforcers, blockers, gaps and branch limits all come from that
+    // one preparation, and the attempt's output lands on the object.
     void generate();
 
     void detect_overhangs(bool check_support_necessity = false);
+
+    // Asks this generation to measure itself: build the frozen problem, carry contact provenance
+    // through routing, record what it emitted and report on it. Read-only with respect to the
+    // geometry, and off unless a caller asks for it or the miniature contact mode is on.
+    void request_analysis(bool on) { m_analysis_requested = on; }
 
     SupportNode* create_node(const Point  position,
         const int    distance_to_top,
@@ -418,6 +462,53 @@ public:
     std::map<const ExPolygon*, OverhangType> overhang_types;
     std::vector<std::pair<Vec3f, Vec3f>>      m_vertical_enforcer_points;
 
+    // One legacy support problem, frozen after overhang detection: what detection produced and what
+    // the problem froze, by value. No setting lives here — every attempt runs under the settings its
+    // own constructor computes from the object and slicing parameters this generator was built with.
+    // Nothing here points into a node pool, a support layer or an attempt that has been discarded, so
+    // an attempt can be replayed from it on a freshly constructed generator. The object's slices and
+    // perimeters stay outside it: they are read-only for every attempt.
+    struct PreparedLegacy
+    {
+        PreparedLegacy()                                  = default;
+        PreparedLegacy(PreparedLegacy &&)                 = default;
+        PreparedLegacy &operator=(PreparedLegacy &&)      = default;
+        PreparedLegacy(const PreparedLegacy &)            = delete;
+        PreparedLegacy &operator=(const PreparedLegacy &) = delete;
+
+        // What detection left on one object layer, keyed by nothing but its index: the overhangs to
+        // support with the type each of them was detected as, and the annotations the layer carries.
+        struct LayerOverhangs
+        {
+            ExPolygons                overhangs;    // Layer::loverhangs
+            std::vector<OverhangType> types;        // one per overhang, same order
+            ExPolygons                sharp_tails;
+            std::vector<float>        sharp_tails_height;
+            ExPolygons                cantilevers;
+        };
+        std::vector<LayerOverhangs>          layers;               // indexed by object layer
+        std::vector<std::pair<Vec3f, Vec3f>> vertical_enforcer_points;
+        std::vector<LayerHeightData>         object_layer_plan;    // print_z/height of every object layer
+        std::shared_ptr<const TreeSupportCollisionInputs> collision;
+        bool                                 miniature_contacts       = false;
+        bool                                 analysis_requested       = false;
+        // support_contact_min_distance, frozen with the rest: the space the user asked for between
+        // contacts, and the only thing the contact layout spaces its seeds by.
+        double                               contact_min_distance_mm  = 0.;
+
+        // Whether the pass runs the contact layout - decimate, add back, relocate: the mode is on and
+        // a distance was asked for. With nothing to thin, the seeds stay as they were sampled.
+        bool optimizes_contacts() const { return miniature_contacts && contact_min_distance_mm > 0.; }
+        // The required regions this problem defines, by value. The seeds are filled by the pass,
+        // from contacts that are a deterministic function of what is frozen here, so a problem
+        // prepared from one object always hands out the same ids.
+        MiniatureSupport::Problem            problem;
+        // The model's own geometry, measured off the object's slices once and frozen here with the
+        // problem: the pass places its contacts on that one reading. Left Invalid where the pass
+        // would not consult it.
+        ModelSupportRisk::Field              risk;
+    };
+
 private:
     /*!
      * \brief Generator for model collision, avoidance and internal guide volumes
@@ -437,12 +528,11 @@ private:
     size_t          m_highest_overhang_layer = 0;
     std::vector<std::vector<MinimumSpanningTree>> m_spanning_trees;
     std::vector< std::unordered_map<Line, bool, LineHash>> m_mst_line_x_layer_contour_caches;
-    float    DO_NOT_MOVER_UNDER_MM = 0.0;
     coordf_t base_radius                        = 0.0;
     const coordf_t MAX_BRANCH_RADIUS = 10.0;
     const coordf_t MIN_BRANCH_RADIUS = 0.4;
     coordf_t contact_radius_floor = MIN_BRANCH_RADIUS; // lower bound of a contact's radius at placement; the branch floor above stays the branch floor
-    double m_threshold_rad = 0.; // support_threshold_angle + 1 deg, capped at 89, in radians: the detector's overhang threshold, also the island band-gap angle
+    double m_threshold_rad = 0.; // support_threshold_angle + 1 deg, capped at 89, in radians: the detector's overhang threshold, also the required-region band-gap angle
     const coordf_t MAX_BRANCH_RADIUS_FIRST_LAYER = 12.0;
     const coordf_t MIN_BRANCH_RADIUS_FIRST_LAYER = 2.0;
     double diameter_angle_scale_factor = tan(5.0*M_PI/180.0);
@@ -457,8 +547,32 @@ private:
     bool  is_slim                            = false;
     bool  miniature_contacts                 = false; // support_miniature_contacts, legacy tree styles only
     bool  with_infill                        = false;
+    bool  m_analysis_requested               = false; // asked for by the caller, consumed by one generation
+    bool  m_analyze                          = false; // this attempt carries provenance and measures itself
+    // The frozen problem this attempt ran against, and what it emitted for it.
+    MiniatureSupport::Problem       m_problem;
+    SupportAnalysis::EmittedSupport m_emitted;
 
 
+
+    // Detects the overhangs and freezes the legacy support problem they define. Leaves the object
+    // holding the detected overhangs and annotations, as detect_overhangs() always has.
+    PreparedLegacy prepare_legacy();
+
+    // Builds the frozen problem's required regions off the detected overhangs: one region per
+    // connected overhang polygon per object layer, in (layer, polygon order), with the ids they keep.
+    void build_required_regions(PreparedLegacy &prepared);
+
+    // Turns this attempt's contacts into the problem's seeds: sorts them by (object layer, region,
+    // position, pin category), hands out dense ids in that order and stamps each contact node with
+    // the one it got. Marks the seeds a thinning pass may not drop.
+    void build_contact_seeds(const PreparedLegacy &prepared);
+
+    // Runs the legacy generation attempt over a frozen problem: fresh contact nodes, a fresh
+    // TreeSupportData with empty collision caches built from the frozen outlines, then contact
+    // generation, layer planning, routing and toolpath emission. The attempt's output lands on the
+    // object, which owns it from there on.
+    void generate_legacy(const PreparedLegacy &prepared);
 
     /*!
      * \brief Draws circles around each node of the tree into the final support.
@@ -493,7 +607,9 @@ private:
      *
     */
 
-    std::vector<LayerHeightData> plan_layer_heights();
+    // Plans the support layers over the object layer plan frozen with the problem, then adds them to
+    // the object and redistributes the contact nodes onto them.
+    std::vector<LayerHeightData> plan_layer_heights(const std::vector<LayerHeightData> &object_layer_plan);
     /*!
      * \brief Creates points where support contacts the model.
      *
@@ -517,6 +633,9 @@ private:
     void insert_dropped_node(std::vector<SupportNode*>& nodes_layer, SupportNode* node);
     void create_tree_support_layers();
     void generate_toolpaths();
+    // Removes the extrusions that would print in mid-air, by the measurement's own connectivity rule,
+    // and returns what each support layer still covers.
+    std::vector<ExPolygons> remove_floating_toolpaths();
     // get unscaled radius of node
     coordf_t calc_branch_radius(coordf_t base_radius, size_t layers_to_top, size_t tip_layers, double diameter_angle_scale_factor);
     // get unscaled radius(mm) of node based on the distance mm to top
@@ -538,27 +657,6 @@ private:
         const coordf_t       gap_xy);
 };
 
-// Groups contact nodes into 3-D overhang islands and writes SupportNode::island. Two nodes share an
-// island when their overhang polygons lie at most layer_gap outer-vector indices apart and one polygon,
-// dilated by dilation[i] of the higher index i (scaled units), overlaps the other; membership is
-// transitive. Nodes whose overhang is empty keep island -1. Ids are dense, 0..n-1, in first-seen order
-// over (layer asc, index asc), so the result depends only on the input; a pointer listed twice is one
-// node. Serial and idempotent. dilation.size() must equal contact_nodes.size().
-void assign_contact_islands(std::vector<std::vector<SupportNode*>> &contact_nodes,
-                            const std::vector<coord_t> &dilation, size_t layer_gap);
-
-// Collapses contact nodes lying within min_distance_mm of a stronger neighbour of the same island
-// in 3D, where the distance is hypot(unscale(dx), unscale(dy), dz) and dz is the print_z difference
-// in mm. The survivor order is print_z ascending, then radius descending, then layer, then position;
-// a kept node suppresses a candidate only when their `island` values are equal (-1 equals -1).
-// Serial and thread-count independent: the surviving set depends only on the input.
-// Nodes with is_pinned set are always kept and never suppress a neighbour.
-// Suppressed pointers are erased from the per-layer vectors and nothing is deleted: the nodes
-// stay owned by TreeSupportData::contact_nodes, its vector of unique_ptr. The outer vector keeps
-// its size and its layer_nr - 1 indexing; a layer may be left empty.
-// A non-positive min_distance_mm is a no-op.
-void decimate_contact_nodes(std::vector<std::vector<SupportNode*>> &contact_nodes,
-                            coordf_t min_distance_mm);
 
 }
 

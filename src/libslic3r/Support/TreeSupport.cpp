@@ -28,6 +28,9 @@
 
 #include <boost/log/trivial.hpp>
 #include <algorithm>
+#include <functional>
+#include <limits>
+#include <numeric>
 
 #ifndef M_PI
 #define M_PI 3.1415926535897932384626433832795
@@ -114,6 +117,10 @@ enum TreeSupportStage {
     STAGE_projection_onto_ex,
     STAGE_get_collision,
     STAGE_intersection_ln,
+    STAGE_RISK_FIELD,
+    STAGE_SELECT_CONTACTS,
+    STAGE_MEASURE,
+    STAGE_BUILD_REGIONS,
     STAGE_total,
     NUM_STAGES
 };
@@ -175,7 +182,11 @@ public:
             << "; STAGE_GET_AVOIDANCE: " << stage_durations[STAGE_GET_AVOIDANCE]
             << "; STAGE_projection_onto_ex: " << stage_durations[STAGE_projection_onto_ex]
             << "; STAGE_get_collision: " << stage_durations[STAGE_get_collision]
-            << "; STAGE_intersection_ln: " << stage_durations[STAGE_intersection_ln];
+            << "; STAGE_intersection_ln: " << stage_durations[STAGE_intersection_ln]
+            << "; STAGE_RISK_FIELD: " << stage_durations[STAGE_RISK_FIELD]
+            << "; STAGE_SELECT_CONTACTS: " << stage_durations[STAGE_SELECT_CONTACTS]
+            << "; STAGE_MEASURE: " << stage_durations[STAGE_MEASURE]
+            << "; STAGE_BUILD_REGIONS: " << stage_durations[STAGE_BUILD_REGIONS];
 
         return ss.str();
     }
@@ -629,6 +640,113 @@ static bool move_out_expolys(const ExPolygons& polygons, Point& from, double dis
     }
 }
 
+// The ground one layer's support extrusions actually cover, at the width they were emitted with.
+// Only the three support roles: the object's own fills, its brim and the print's skirt are not
+// support material and never stand in for it.
+static void collect_support_footprints(const ExtrusionEntityCollection &collection, Polygons &out)
+{
+    for (const ExtrusionEntity *entity : collection.entities) {
+        if (entity->is_collection())
+            collect_support_footprints(*static_cast<const ExtrusionEntityCollection *>(entity), out);
+        else if (is_support(entity->role()))
+            entity->polygons_covered_by_width(out, 0.f);
+    }
+}
+
+// Takes out of every support layer the extrusions the print would lay in mid-air. A branch drawn
+// along the model inside the xy distance loses its whole section to the collision clip in
+// draw_circles on some layers and keeps a sliver on others, and an area too narrow for one line makes
+// no toolpath at all, so what was made above either stands on nothing: the shards a claw's underside
+// collects on a miniature. Read off the footprints the extrusions cover, the way the measurement reads
+// them (SupportAnalysis::floating_pieces), so what goes is what the measurement would have counted as
+// unsupported paths and nothing the toolpaths did not print. The drawn areas stay as they are: the
+// brim and the skirt read them, and neither is laid where a floating piece was. Returns what each
+// support layer still covers, in support layer order, for the measurement to read without unioning
+// the footprints a second time.
+std::vector<ExPolygons> TreeSupport::remove_floating_toolpaths()
+{
+    const SupportLayerPtrs &layers = m_object->support_layers();
+    std::vector<ExPolygons> printed(layers.size());
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, layers.size()), [&](const tbb::blocked_range<size_t> &range) {
+        for (size_t i = range.begin(); i < range.end(); ++ i) {
+            Polygons footprints;
+            collect_support_footprints(layers[i]->support_fills, footprints);
+            printed[i] = union_ex(footprints);
+        }
+    });
+
+    std::vector<SupportAnalysis::Slab> slabs;
+    std::vector<size_t>                slab_layer;
+    for (size_t i = 0; i < layers.size(); ++ i) {
+        if (printed[i].empty())
+            continue;
+        SupportAnalysis::Slab slab;
+        slab.print_z  = layers[i]->print_z;
+        slab.bottom_z = layers[i]->print_z - layers[i]->height;
+        slab.polygons = printed[i];
+        slabs.emplace_back(std::move(slab));
+        slab_layer.push_back(i);
+    }
+    const std::vector<std::vector<bool>> floating = SupportAnalysis::floating_pieces(
+        slabs, SupportAnalysis::model_slabs_of(*m_object), m_object_config->support_on_build_plate_only.value,
+        std::max(0., m_object_config->support_bottom_z_distance.value));
+
+    for (size_t s = 0; s < slabs.size(); ++ s) {
+        ExPolygons               pieces, kept_pieces;
+        std::vector<BoundingBox> boxes;
+        for (size_t i = 0; i < slabs[s].polygons.size(); ++ i)
+            if (floating[s][i]) {
+                pieces.push_back(slabs[s].polygons[i]);
+                boxes.push_back(get_extents(pieces.back()));
+            } else
+                kept_pieces.push_back(slabs[s].polygons[i]);
+        if (pieces.empty())
+            continue;
+        // The pieces are disjoint parts of the union of every footprint on the layer, so an extrusion's
+        // footprint has area in exactly one of them: the one it is part of.
+        const auto in_floating = [&pieces, &boxes](const ExtrusionEntity &entity) {
+            Polygons footprint;
+            entity.polygons_covered_by_width(footprint, 0.f);
+            const BoundingBox box = get_extents(footprint);
+            for (size_t i = 0; i < pieces.size(); ++ i)
+                if (boxes[i].overlap(box) && ! intersection_ex(footprint, ExPolygons{ pieces[i] }).empty())
+                    return true;
+            return false;
+        };
+        std::function<void(ExtrusionEntityCollection &)> prune = [&](ExtrusionEntityCollection &collection) {
+            ExtrusionEntitiesPtr kept;
+            for (ExtrusionEntity *entity : collection.entities) {
+                bool drop;
+                if (entity->is_collection()) {
+                    auto *nested = static_cast<ExtrusionEntityCollection *>(entity);
+                    prune(*nested);
+                    drop = nested->entities.empty();
+                } else
+                    drop = is_support(entity->role()) && in_floating(*entity);
+                if (drop)
+                    delete entity;
+                else
+                    kept.push_back(entity);
+            }
+            collection.entities = std::move(kept);
+        };
+        prune(layers[slab_layer[s]]->support_fills);
+        printed[slab_layer[s]] = std::move(kept_pieces);
+    }
+    return printed;
+}
+
+// Unions one node's sources into another's, keeping the result sorted and carrying no id twice. Both
+// lists are empty unless this attempt was asked to measure itself, so an ordinary pass pays nothing.
+static void merge_source_ids(std::vector<uint64_t> &dst, const std::vector<uint64_t> &src)
+{
+    if (src.empty())
+        return;
+    dst.insert(dst.end(), src.begin(), src.end());
+    std::sort(dst.begin(), dst.end());
+    dst.erase(std::unique(dst.begin(), dst.end()), dst.end());
+}
+
 static Point bounding_box_middle(const BoundingBox &bbox)
 {
     return (bbox.max + bbox.min) / 2;
@@ -654,8 +772,8 @@ TreeSupport::TreeSupport(PrintObject& object, const SlicingParameters &slicing_p
     // Legacy tree styles only: the organic generator reaches detect_overhangs() too, and the mode
     // must not shift organic geometry.
     miniature_contacts                       = m_object_config->support_miniature_contacts.value && m_support_params.support_style != smsTreeOrganic;
-    // The detector's overhang threshold, hoisted out of detect_overhangs so the island pass can reuse
-    // it as the band-gap angle. Assigned unconditionally: detect_overhangs runs with the mode off too,
+    // The detector's overhang threshold, hoisted out of detect_overhangs so the required regions can
+    // reuse it as the band-gap angle. Assigned unconditionally: detect_overhangs runs with the mode off too,
     // and a 0 here would divide lower_layer_offset by tan(0.).
     // +1 makes the threshold inclusive; it must stay below 90.
     {
@@ -664,7 +782,7 @@ TreeSupport::TreeSupport(PrintObject& object, const SlicingParameters &slicing_p
         m_threshold_rad     = Geometry::deg2rad(thresh_angle);
     }
     if (miniature_contacts) {
-        // All three scale with the support line width SupportParameters resolved (SupportParameters.hpp:183-185),
+        // All three scale with the support line width SupportParameters resolved (its support_extrusion_width),
         // never the raw support_line_width option, whose default is an absolute 0.
         const coordf_t w         = m_support_params.support_extrusion_width;
         contact_radius_floor     = w;
@@ -1039,7 +1157,7 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
                 if (miniature_contacts) {
                     // Cull only what cannot be extruded at all: half a line width is the room one extrusion needs, so
                     // a cape hem 25 mm long and 1 mm wide survives where the bounding-box test below fails it on one axis.
-                    cluster.is_small_overhang = offset_ex(cluster.merged_poly, -0.5f * float(extrusion_width_scaled)).empty();
+                    cluster.is_small_overhang = ! MiniatureSupport::holds_an_extrusion(cluster.merged_poly, extrusion_width);
                 } else {
                     // 2. check overhang cluster size is smaller than 3.0 * fw_scaled
                     auto erode1 = offset_ex(cluster.merged_poly, -1 * extrusion_width_scaled);
@@ -1740,180 +1858,6 @@ void TreeSupport::move_bounds_to_contact_nodes(std::vector<TreeSupport3D::Suppor
     }
 }
 
-void assign_contact_islands(std::vector<std::vector<SupportNode*>> &contact_nodes,
-                            const std::vector<coord_t> &dilation, size_t layer_gap)
-{
-    assert(dilation.size() == contact_nodes.size());
-
-    // One entry per distinct overhang polygon on a layer: every node placed on that polygon shares its
-    // island. Entries are created in (layer asc, index asc) order, which is the order the dense ids
-    // follow below.
-    struct Entry {
-        ExPolygon                 poly;
-        BoundingBox               bbox;
-        std::vector<SupportNode*> nodes;
-    };
-    std::vector<Entry>               entries;
-    std::vector<std::vector<size_t>> by_layer(contact_nodes.size());
-
-    for (size_t layer = 0; layer < contact_nodes.size(); ++ layer)
-        for (SupportNode *node : contact_nodes[layer]) {
-            if (node->overhang.empty()) {
-                node->island = -1; // no polygon to group by: the shared pool
-                continue;
-            }
-            size_t entry = size_t(-1);
-            for (size_t idx : by_layer[layer])
-                if (entries[idx].poly == node->overhang) {
-                    entry = idx;
-                    break;
-                }
-            if (entry == size_t(-1)) {
-                entry = entries.size();
-                entries.push_back({ node->overhang, get_extents(node->overhang), {} });
-                by_layer[layer].push_back(entry);
-            }
-            std::vector<SupportNode*> &members = entries[entry].nodes;
-            if (std::find(members.begin(), members.end(), node) == members.end())
-                members.push_back(node); // a pointer listed twice in the layer is still one node
-        }
-
-    // Union-find over the entries, linking each entry to the entries at most layer_gap indices above it.
-    std::vector<size_t> parent(entries.size());
-    for (size_t i = 0; i < parent.size(); ++ i)
-        parent[i] = i;
-    auto find = [&parent](size_t x) {
-        while (parent[x] != x) {
-            parent[x] = parent[parent[x]];
-            x         = parent[x];
-        }
-        return x;
-    };
-
-    for (size_t layer = 0; layer < contact_nodes.size(); ++ layer)
-        for (size_t e : by_layer[layer])
-            for (size_t k = 0; k <= layer_gap && layer + k < contact_nodes.size(); ++ k) {
-                // The band the detector leaves between two layers of one overhang grows with the higher
-                // layer's height, so the gap is measured with that layer's dilation.
-                const coord_t d      = dilation[layer + k];
-                ExPolygons    grown;
-                bool          has_grown = false;
-                for (size_t f : by_layer[layer + k]) {
-                    if (f == e || find(e) == find(f))
-                        continue;
-                    if (! entries[e].bbox.inflated(d).overlap(entries[f].bbox))
-                        continue;
-                    if (! has_grown) {
-                        grown     = offset_ex(entries[e].poly, float(d));
-                        has_grown = true;
-                    }
-                    if (overlaps(grown, entries[f].poly)) {
-                        const size_t ra = find(e), rb = find(f);
-                        parent[std::max(ra, rb)] = std::min(ra, rb);
-                    }
-                }
-            }
-
-    // Dense ids, 0..n-1, handed out in entry creation order.
-    std::vector<int> island_of(entries.size(), -1);
-    int              next_id = 0;
-    for (size_t e = 0; e < entries.size(); ++ e) {
-        const size_t root = find(e);
-        if (island_of[root] < 0)
-            island_of[root] = next_id ++;
-        for (SupportNode *node : entries[e].nodes)
-            node->island = island_of[root];
-    }
-}
-
-void decimate_contact_nodes(std::vector<std::vector<SupportNode*>> &contact_nodes, coordf_t min_distance_mm)
-{
-    if (min_distance_mm <= 0.)
-        return;
-
-    const double d2 = sqr(double(min_distance_mm));
-
-    struct NodeRef { size_t layer; size_t index; SupportNode *node; };
-    size_t total = 0;
-    for (const std::vector<SupportNode*> &inner : contact_nodes)
-        total += inner.size();
-    std::vector<NodeRef> refs;
-    refs.reserve(total);
-    for (size_t layer = 0; layer < contact_nodes.size(); ++ layer)
-        for (size_t index = 0; index < contact_nodes[layer].size(); ++ index)
-            refs.push_back({ layer, index, contact_nodes[layer][index] });
-
-    // A total order over the input: the lowest node of an island wins, then the thickest, and every
-    // tie falls through to layer and position, so the surviving set depends only on the input, never
-    // on which thread or in which order the nodes were produced.
-    std::stable_sort(refs.begin(), refs.end(), [](const NodeRef &a, const NodeRef &b) {
-        if (a.node->print_z != b.node->print_z)
-            return a.node->print_z < b.node->print_z;
-        if (a.node->radius != b.node->radius)
-            return a.node->radius > b.node->radius;
-        if (a.layer != b.layer)
-            return a.layer < b.layer;
-        return a.node->position < b.node->position;
-    });
-
-    // Survivors indexed by a cell of min_distance_mm side, so a conflict can only sit in the 9 cells
-    // around a node's own. PointHash is the cell hash already_inserted already uses in
-    // generate_contact_points' insert_point.
-    auto cell_of = [min_distance_mm](const Point &p) {
-        return Point(coord_t(std::floor(unscale<double>(p.x()) / min_distance_mm)),
-                     coord_t(std::floor(unscale<double>(p.y()) / min_distance_mm)));
-    };
-    std::unordered_map<Point, std::vector<SupportNode*>, PointHash> kept;
-
-    std::vector<std::vector<bool>> suppressed(contact_nodes.size());
-    for (size_t layer = 0; layer < contact_nodes.size(); ++ layer)
-        suppressed[layer].assign(contact_nodes[layer].size(), false);
-
-    for (const NodeRef &ref : refs) {
-        if (ref.node->is_pinned)
-            continue; // a user-asked contact is kept and stays out of the grid: it suppresses nobody
-        const Point cell     = cell_of(ref.node->position);
-        bool        conflict = false;
-        for (coord_t dx = -1; dx <= 1 && ! conflict; ++ dx)
-            for (coord_t dy = -1; dy <= 1 && ! conflict; ++ dy) {
-                auto it = kept.find(Point(cell.x() + dx, cell.y() + dy));
-                if (it == kept.end())
-                    continue;
-                for (const SupportNode *k : it->second) {
-                    if (k == ref.node)
-                        continue; // identity is pointer equality: a node listed twice never suppresses itself
-                    if (k->island != ref.node->island)
-                        continue; // a neighbouring overhang island keeps its own contacts
-                    const double ddx = unscale<double>(k->position.x() - ref.node->position.x());
-                    const double ddy = unscale<double>(k->position.y() - ref.node->position.y());
-                    const double ddz = k->print_z - ref.node->print_z;
-                    if (sqr(ddx) + sqr(ddy) + sqr(ddz) < d2) {
-                        conflict = true;
-                        break;
-                    }
-                }
-            }
-        if (conflict) {
-            suppressed[ref.layer][ref.index] = true;
-        } else {
-            std::vector<SupportNode*> &column = kept[cell];
-            if (std::find(column.begin(), column.end(), ref.node) == column.end())
-                column.push_back(ref.node);
-        }
-    }
-
-    // Erase the suppressed pointers in place: the outer vector keeps its size and the survivors keep
-    // their input order.
-    for (size_t layer = 0; layer < contact_nodes.size(); ++ layer) {
-        std::vector<SupportNode*> &inner = contact_nodes[layer];
-        size_t                     out   = 0;
-        for (size_t index = 0; index < inner.size(); ++ index)
-            if (! suppressed[layer][index])
-                inner[out ++] = inner[index];
-        inner.resize(out);
-    }
-}
-
 void TreeSupport::generate()
 {
     if (!is_tree(m_object_config->support_type.value)) return;
@@ -1925,41 +1869,405 @@ void TreeSupport::generate()
 
     profiler.stage_start(STAGE_total);
 
+    const PreparedLegacy prepared = prepare_legacy();
+    generate_legacy(prepared);
+
+    profiler.stage_finish(STAGE_total);
+    BOOST_LOG_TRIVIAL(info) << "tree support time " << profiler.report();
+}
+
+TreeSupport::PreparedLegacy TreeSupport::prepare_legacy()
+{
     // Generate overhang areas
     profiler.stage_start(STAGE_DETECT_OVERHANGS);
     m_object->print()->set_status(55, _u8L("Generating support"));
     detect_overhangs();
     profiler.stage_finish(STAGE_DETECT_OVERHANGS);
 
+    PreparedLegacy prepared;
+    prepared.layers.resize(m_object->layer_count());
+    prepared.object_layer_plan.resize(m_object->layer_count());
+    for (size_t layer_nr = 0; layer_nr < prepared.layers.size(); ++ layer_nr) {
+        const Layer                     *layer = m_object->get_layer(int(layer_nr));
+        PreparedLegacy::LayerOverhangs  &frozen = prepared.layers[layer_nr];
+        frozen.overhangs = layer->loverhangs;
+        frozen.types.reserve(layer->loverhangs.size());
+        // overhang_types is keyed by the address of the polygon inside Layer::loverhangs, so the type
+        // has to be read out here, while those addresses are still the ones detection filed.
+        for (const ExPolygon &overhang : layer->loverhangs) {
+            const auto it = overhang_types.find(&overhang);
+            frozen.types.push_back(it == overhang_types.end() ? OverhangType::Detected : it->second);
+        }
+        frozen.sharp_tails        = layer->sharp_tails;
+        frozen.sharp_tails_height = layer->sharp_tails_height;
+        frozen.cantilevers        = layer->cantilevers;
+        prepared.object_layer_plan[layer_nr] = { layer->print_z, layer->height, layer_nr };
+    }
+    prepared.vertical_enforcer_points = m_vertical_enforcer_points;
+    prepared.collision                = std::make_shared<const TreeSupportCollisionInputs>(
+        TreeSupportData::collect_collision_inputs(*m_object, m_object_config->support_object_xy_distance.value,
+                                                  g_config_tree_support_collision_resolution));
+    prepared.miniature_contacts          = miniature_contacts;
+    prepared.contact_min_distance_mm     = m_object_config->support_contact_min_distance.value;
+    prepared.analysis_requested          = m_analysis_requested;
+    // The problem's regions are read off the frozen overhangs, so every attempt made from this
+    // problem sees the same regions under the same ids. Only a pass that was asked to measure itself
+    // (or the miniature contact mode, which thins contacts against these regions) pays for them.
+    if (m_analysis_requested || miniature_contacts)
+        build_required_regions(prepared);
+    // The thinning distance the contact pass runs under, and the distance the measurement carries a
+    // cell over: nothing at all unless the miniature contact mode asked for it.
+    prepared.problem.contact_min_distance_mm = prepared.miniature_contacts ? prepared.contact_min_distance_mm : 0.;
+    // The model's own weakness under a contact, taken off the object's sliced layers once and frozen with the
+    // problem: the measurement and, where the mode thins them, the contact placement both read it.
+    profiler.stage_start(STAGE_RISK_FIELD);
+    if ((prepared.analysis_requested || prepared.miniature_contacts) && prepared.problem.extrusion_width_mm > 0.)
+        prepared.risk = SupportAnalysis::measure_model_risk(*m_object, prepared.problem.extrusion_width_mm);
+    profiler.stage_finish(STAGE_RISK_FIELD);
+    return prepared;
+}
+
+void TreeSupport::build_required_regions(PreparedLegacy &prepared)
+{
+    profiler.stage_start(STAGE_BUILD_REGIONS);
+    MiniatureSupport::Problem &problem = prepared.problem;
+    problem.regions.clear();
+    problem.seeds.clear();
+    problem.extrusion_width_mm = m_support_params.support_extrusion_width;
+    // How far from a required region a contact may sit and still anchor it: half the smaller of the
+    // two limits generate_contact_points already samples under, its branch spacing and its bridge
+    // length. A conservative geometric policy read off the settings in force, not a calibrated
+    // unsupported-span guarantee.
+    const double reach = MiniatureSupport::legal_reach(m_object->config().tree_support_branch_distance.value,
+                                                       m_object->config().max_bridge_length.value);
+    // Object layer 0 owns no contact: generate_contact_points() places contacts for the overhangs of
+    // layer 1 upwards, so a region filed on layer 0 could never carry a seed.
+    for (size_t layer_nr = 1; layer_nr < prepared.layers.size() && layer_nr < size_t(m_object->layer_count()); ++ layer_nr) {
+        const Layer *layer = m_object->get_layer(int(layer_nr));
+        for (const ExPolygon &overhang : prepared.layers[layer_nr].overhangs) {
+            MiniatureSupport::RequiredRegion region;
+            region.id             = uint64_t(problem.regions.size());
+            region.object_layer   = layer_nr;
+            region.polygon        = overhang;
+            // The underside of the layer the overhang was detected on: what a tip has to reach, and
+            // what keeps two overhangs on different layers two separate places to anchor.
+            region.contact_z_mm   = layer->bottom_z();
+            region.legal_reach_mm = reach;
+            // Whether one support extrusion fits in the overhang at all. A band narrower than that is a
+            // sliver the overhang detector filed - what a shallow slope adds per layer, a speck - not a
+            // place a line can be laid, so nothing may be counted for or against it.
+            region.printable      = MiniatureSupport::holds_an_extrusion(ExPolygons{ region.polygon },
+                                                                         problem.extrusion_width_mm);
+            // The lattice every later pass counts witnesses on, laid here once and carried by value
+            // with the region: thinning, placement and the analysis all read this one lattice instead
+            // of each laying its own copy of it. A sliver carries an empty one, matching what
+            // `region_witnesses` hands back for a region that is not printable.
+            region.witnesses      = region.printable ?
+                std::make_shared<const MiniatureSupport::Witnesses>(
+                    MiniatureSupport::witness_cells(region.polygon, problem.extrusion_width_mm)) :
+                std::make_shared<const MiniatureSupport::Witnesses>();
+            problem.regions.emplace_back(std::move(region));
+        }
+    }
+    profiler.stage_finish(STAGE_BUILD_REGIONS);
+}
+
+void TreeSupport::build_contact_seeds(const PreparedLegacy &prepared)
+{
+    m_problem.regions                 = prepared.problem.regions;
+    m_problem.extrusion_width_mm      = prepared.problem.extrusion_width_mm;
+    m_problem.contact_min_distance_mm = prepared.problem.contact_min_distance_mm;
+    m_problem.seeds.clear();
+    const size_t region_count = m_problem.regions.size();
+    if (region_count == 0)
+        return;
+
+    std::vector<std::vector<size_t>> regions_by_layer(size_t(m_object->layer_count()));
+    for (const MiniatureSupport::RequiredRegion &region : m_problem.regions)
+        if (region.object_layer < regions_by_layer.size())
+            regions_by_layer[region.object_layer].push_back(size_t(region.id));
+
+    // One candidate per contact node, matched to the region it was placed for. The Hybrid big-overhang
+    // path lists one node twice in its layer, so a node is taken once.
+    struct SeedCandidate
+    {
+        size_t       region = 0;
+        Point        position;
+        double       radius = 0.;
+        bool         pinned = false;
+        SupportNode *node   = nullptr;
+    };
+    std::vector<SeedCandidate>         candidates;
+    std::unordered_set<SupportNode *>  seen;
+    for (size_t layer = 0; layer < contact_nodes.size(); ++ layer) {
+        // contact_nodes[layer] holds the contacts placed under the overhangs of object layer layer+1.
+        const size_t obj_layer = layer + 1;
+        if (obj_layer >= regions_by_layer.size() || regions_by_layer[obj_layer].empty())
+            continue;
+        const std::vector<size_t> &layer_regions = regions_by_layer[obj_layer];
+        for (SupportNode *node : contact_nodes[layer]) {
+            if (node == nullptr || ! seen.insert(node).second)
+                continue;
+            // A vertical enforcer point is placed for no overhang polygon at all: generate_contact_points
+            // inserts it with an empty overhang, off a painted facet the detector never filed as a
+            // region. It anchors nothing, so it seeds nothing; handing it the nearest region would
+            // mark that region critical and credit it with material routed for the paint.
+            if (node->overhang.empty())
+                continue;
+            // The region this contact anchors. The contact pass hands each node the overhang polygon
+            // it was placed for, so the match is that polygon by value: two overlapping polygons on
+            // one layer (a detected overhang and the sharp tail under it) stay two regions and keep
+            // their own contacts. Hybrid's big-overhang path splits the polygon before placing the
+            // node, so a node whose polygon is nobody's falls back to the region containing it, then
+            // to the nearest one. Ties keep the lower region id: never iteration order, never an address.
+            size_t            best      = layer_regions.front();
+            bool              matched   = false;
+            const BoundingBox node_bbox = get_extents(node->overhang);
+            for (size_t region_id : layer_regions)
+                if (get_extents(m_problem.regions[region_id].polygon) == node_bbox &&
+                    m_problem.regions[region_id].polygon == node->overhang) {
+                    best    = region_id;
+                    matched = true;
+                    break;
+                }
+            if (! matched) {
+                double best_dist = std::numeric_limits<double>::max();
+                for (size_t region_id : layer_regions) {
+                    const ExPolygon &polygon = m_problem.regions[region_id].polygon;
+                    double           dist    = 0.;
+                    if (! is_inside_ex(polygon, node->position)) {
+                        const Point *closest = polygon.contour.closest_point(node->position);
+                        if (closest == nullptr)
+                            continue;
+                        dist = vsize2_with_unscale(node->position - *closest);
+                    }
+                    if (dist < best_dist) {
+                        best_dist = dist;
+                        best      = region_id;
+                    }
+                    if (best_dist == 0.)
+                        break;
+                }
+            }
+            candidates.push_back({ best, node->position, node->radius, node->is_pinned, node });
+        }
+    }
+
+    // The deterministic order: object layer, then polygon order within it (region ids are handed out
+    // in exactly that order), then position, then pin category. Never the order the parallel contact
+    // pass inserted the nodes in, and never a node address.
+    std::sort(candidates.begin(), candidates.end(), [](const SeedCandidate &a, const SeedCandidate &b) {
+        if (a.region != b.region)
+            return a.region < b.region;
+        if (a.position != b.position)
+            return a.position < b.position;
+        return a.pinned && ! b.pinned;
+    });
+
+    m_problem.seeds.reserve(candidates.size());
+    for (size_t i = 0; i < candidates.size(); ++ i) {
+        MiniatureSupport::ContactSeed seed;
+        seed.id        = uint64_t(i);
+        seed.region_id = uint64_t(candidates[i].region);
+        seed.position  = candidates[i].position;
+        seed.radius_mm = candidates[i].radius;
+        seed.pinned    = candidates[i].pinned;
+        m_problem.seeds.emplace_back(seed);
+        candidates[i].node->source_ids.assign(1, seed.id);
+    }
+
+    // The directed overhang components: a region links downwards to one no more than two layers under
+    // it whose polygon its own dilation reaches. Every region is filed under its component, whether a
+    // contact was placed for it or not, and the first seed of each component is critical, so thinning
+    // can never leave a component unanchored.
+    std::vector<size_t> component(region_count);
+    std::iota(component.begin(), component.end(), size_t(0));
+    std::function<size_t(size_t)> root = [&](size_t i) {
+        while (component[i] != i) {
+            component[i] = component[component[i]];
+            i            = component[i];
+        }
+        return i;
+    };
+    {
+        std::vector<ExPolygons>  dilated(region_count);
+        std::vector<BoundingBox> dilated_bbox(region_count), bbox(region_count);
+        for (size_t i = 0; i < region_count; ++ i) {
+            const size_t   layer_nr = m_problem.regions[i].object_layer;
+            // The band a near-vertical wall spans on the layer below, floored at one extrusion width,
+            // read off the layer under the overhang.
+            const coordf_t height   = layer_nr > 0 ? m_object->get_layer(int(layer_nr - 1))->height : m_object->get_layer(0)->height;
+            const coord_t  dilation = scaled<double>(std::max(m_support_params.support_extrusion_width,
+                                                              2.5 * height / tan(m_threshold_rad)));
+            dilated[i]      = offset_ex(m_problem.regions[i].polygon, dilation);
+            dilated_bbox[i] = get_extents(dilated[i]);
+            bbox[i]         = get_extents(m_problem.regions[i].polygon);
+        }
+        constexpr size_t layer_window = 2;
+        for (size_t i = 0; i < region_count; ++ i)
+            for (size_t j = i + 1; j < region_count &&
+                                   m_problem.regions[j].object_layer <= m_problem.regions[i].object_layer + layer_window; ++ j) {
+                const size_t ri = root(i), rj = root(j);
+                if (ri == rj)
+                    continue;
+                // j sits on the same layer as i or above it, so j's own dilation is the one that counts.
+                if (! dilated_bbox[j].overlap(bbox[i]))
+                    continue;
+                if (intersection_ex(dilated[j], ExPolygons{ m_problem.regions[i].polygon }).empty())
+                    continue;
+                component[ri] = rj;
+            }
+    }
+
+    // Every region's component, seeded or not: the measurement carries cells into regions no
+    // contact was placed for.
+    for (size_t r = 0; r < region_count; ++ r)
+        m_problem.regions[r].component = root(r);
+
+    // One reading per seed, and each is a search over the whole field from a point no other reading
+    // depends on. The field is const here and the sampler keeps no state across calls, so the necks are
+    // measured together, one output slot each, and the serial pass below reads the slots in seed order.
+    std::vector<char> critical_by_neck(m_problem.seeds.size(), 0);
+    if (prepared.risk.status == ModelSupportRisk::Field::Status::Complete)
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, m_problem.seeds.size()),
+            [&](const tbb::blocked_range<size_t> &range) {
+                for (size_t i = range.begin(); i < range.end(); ++ i) {
+                    const MiniatureSupport::ContactSeed &seed = m_problem.seeds[i];
+                    const ModelSupportRisk::Sample sample = ModelSupportRisk::sample(
+                        prepared.risk, m_problem.regions[size_t(seed.region_id)].object_layer, seed.position);
+                    critical_by_neck[i] = sample.status == ModelSupportRisk::Sample::Status::BelowPrintableWidth &&
+                                          sample.neck_width_mm < prepared.risk.extrusion_width_mm;
+                }
+            });
+
+    std::vector<char> component_seeded(region_count, 0);
+    for (size_t i = 0; i < m_problem.seeds.size(); ++ i) {
+        MiniatureSupport::ContactSeed &seed = m_problem.seeds[i];
+        const size_t owner = root(size_t(seed.region_id));
+        const bool   first = ! component_seeded[owner];
+        component_seeded[owner] = 1;
+        // Three clauses, and a seed is critical when any of them holds. A painted enforcer's overhang and
+        // a Hybrid big overhang both reach the contact pass as a pinned contact, which selection refuses
+        // to drop. The first seed of a component is its lowest, so thinning can never leave a component
+        // unanchored. And a seed whose model neck is narrower than one support extrusion stands on a
+        // feature the print cannot rebuild if the contact under it is thinned away, which is the whole
+        // reason a miniature is being measured; the neck is the constriction on the run to the root, which
+        // `measure_contact_risk` reads with this same `ModelSupportRisk::sample` call at this same layer
+        // index. Everything else thins like any other seed, as main's decimate_contact_nodes thinned
+        // them, which skipped pinned nodes and nothing else.
+        // The sample's `local_width_mm` is deliberately not read: a contact stands on an overhang band at
+        // the model's own edge, where the local width reads zero however thick the feature behind it is,
+        // so that clause would mark every seed critical and thin nothing.
+        seed.critical = seed.pinned || first || critical_by_neck[i];
+    }
+    // A region is critical exactly when it carries a critical seed: a region no contact was placed for
+    // is not something a thinning pass can be asked to keep.
+    for (MiniatureSupport::RequiredRegion &region : m_problem.regions)
+        region.critical = false;
+    for (const MiniatureSupport::ContactSeed &seed : m_problem.seeds)
+        if (seed.critical)
+            m_problem.regions[size_t(seed.region_id)].critical = true;
+}
+
+void TreeSupport::generate_legacy(const PreparedLegacy &prepared)
+{
+    // The generator that prepared the problem is the one that runs it, and nothing has routed yet.
+    // detect_overhangs(), called from prepare_legacy(), filed overhang_types against the polygons the
+    // preparation then froze by value, so those keys go here and are refiled below against the
+    // addresses this attempt will read.
+    assert(contact_nodes.empty() && ! m_ts_data && m_problem.seeds.empty());
+    overhang_types.clear();
+    m_analyze = prepared.analysis_requested || prepared.miniature_contacts;
+    m_object->set_support_analysis(nullptr);
+    m_object->set_emitted_support(nullptr);
+    for (size_t layer_nr = 0; layer_nr < prepared.layers.size() && layer_nr < size_t(m_object->layer_count()); ++ layer_nr) {
+        Layer *layer = m_object->get_layer(int(layer_nr));
+        // Restored by value, then keyed by the addresses this attempt will read: no key of
+        // overhang_types survives a restore whose polygons have been replaced.
+        layer->loverhangs        = prepared.layers[layer_nr].overhangs;
+        layer->sharp_tails       = prepared.layers[layer_nr].sharp_tails;
+        layer->sharp_tails_height= prepared.layers[layer_nr].sharp_tails_height;
+        layer->cantilevers       = prepared.layers[layer_nr].cantilevers;
+        for (size_t i = 0; i < layer->loverhangs.size() && i < prepared.layers[layer_nr].types.size(); ++ i)
+            overhang_types.emplace(&layer->loverhangs[i], prepared.layers[layer_nr].types[i]);
+    }
+    m_vertical_enforcer_points  = prepared.vertical_enforcer_points;
+
     create_tree_support_layers();
-    m_ts_data = m_object->alloc_tree_support_preview_cache();
+    // This attempt's own node pool and collision caches, built from the outlines frozen with the
+    // problem: TreeSupportData::clear_nodes() empties the pool alone, so an attempt handed the cache
+    // of an earlier one would route against that one's collisions and share its nodes.
+    m_ts_data = std::make_shared<TreeSupportData>(prepared.collision);
     m_ts_data->is_slim = is_slim;
+    m_object->set_tree_support_preview_cache(m_ts_data);
     // // get the ring of outside plate
     // auto tmp= diff_ex(offset_ex(m_machine_border, scale_(100)), m_machine_border);
     // if (!tmp.empty()) m_ts_data->m_machine_border = tmp[0];
 
-    std::vector<TreeSupport3D::SupportElements> move_bounds(m_highest_overhang_layer + 1);
     profiler.stage_start(STAGE_GENERATE_CONTACT_NODES);
     m_object->print()->set_status(56, _u8L("Support: generate contact points"));
     generate_contact_points();
     profiler.stage_finish(STAGE_GENERATE_CONTACT_NODES);
 
-    // Serial 3-D decimation: already_inserted in generate_contact_points is scoped to one layer inside a
-    // tbb::parallel_for, so the cross-layer exclusion has to run here, after every worker has written.
-    // The island pass runs here for the same reason and because overhang_types and loverhangs are
-    // complete by now: every node carries the overhang polygon the grouping reads.
-    if (miniature_contacts && m_object_config->support_contact_min_distance.value > 0) {
-        // Index i of contact_nodes holds the contacts of object layer i + 1, whose band gap the detector
-        // derives from layer i's height; a whole extrusion width is the floor for a near-vertical wall.
-        std::vector<coord_t> dilation(contact_nodes.size());
-        for (size_t i = 0; i < dilation.size(); ++ i)
-            dilation[i] = scaled<double>(std::max(m_support_params.support_extrusion_width,
-                                                  2.5 * m_object->get_layer(i)->height / tan(m_threshold_rad)));
-        assign_contact_islands(contact_nodes, dilation, 2);
-        decimate_contact_nodes(contact_nodes, m_object_config->support_contact_min_distance.value);
-    }
+    // Before anything thins or routes the contacts: the seeds are what this attempt placed, and the
+    // ids they get are what every node below them carries from here on.
+    if (m_analyze)
+        build_contact_seeds(prepared);
 
-    m_ts_data->layer_heights = plan_layer_heights();
+    // Serial 3-D contact selection: already_inserted in generate_contact_points is scoped to one layer
+    // inside a tbb::parallel_for, so the cross-layer decision has to run here, after every worker has
+    // written.
+    profiler.stage_start(STAGE_SELECT_CONTACTS);
+    // What the selection did with the prepared problem's seeds, for the measurement below. An attempt
+    // that runs no selection generates support for every seed the problem carried and put none back.
+    size_t seeds_kept = m_problem.seeds.size(), seeds_restored = 0, seeds_retained = m_problem.seeds.size();
+    if (prepared.optimizes_contacts()) {
+        // Which contacts this attempt keeps. Selection runs against the frozen problem's required
+        // regions rather than against distance alone, so a contact goes only when another retained
+        // contact of its overhang component, on its own region or a lower one within the distance,
+        // already stands behind every witness cell it holds.
+        const MiniatureSupport::Selection selection = MiniatureSupport::select_contacts(m_problem, prepared.risk);
+        seeds_retained = selection.retained.size();
+        seeds_restored = selection.seeds_restored;
+        seeds_kept     = seeds_retained - seeds_restored;
+        std::vector<char>  retained(m_problem.seeds.size(), 0);
+        // Where the pass put each contact it kept: its own position unless a legal position over less
+        // fragile model material was found for it.
+        std::vector<Point> placed(m_problem.seeds.size());
+        for (size_t i = 0; i < m_problem.seeds.size(); ++ i)
+            placed[i] = m_problem.seeds[i].position;
+        for (const MiniatureSupport::ContactSeed &seed : selection.retained)
+            if (seed.id < retained.size()) {
+                retained[size_t(seed.id)] = 1;
+                placed[size_t(seed.id)]   = seed.position;
+            }
+        // Erase the dropped pointers in place and move the kept ones onto the positions the pass chose.
+        // Nothing is deleted: the nodes stay owned by TreeSupportData's pool, the outer vector keeps its
+        // size and its layer_nr - 1 indexing, and a node the seed pass never gave a source id (a painted
+        // vertical enforcer point) is left alone, position included.
+        for (std::vector<SupportNode*> &layer : contact_nodes) {
+            size_t out = 0;
+            for (size_t i = 0; i < layer.size(); ++ i) {
+                SupportNode *node   = layer[i];
+                const bool   seeded = node != nullptr && node->source_ids.size() == 1 &&
+                                      node->source_ids.front() < retained.size();
+                if (seeded && ! retained[size_t(node->source_ids.front())])
+                    continue;
+                if (seeded)
+                    node->position = placed[size_t(node->source_ids.front())];
+                layer[out ++] = layer[i];
+            }
+            layer.resize(out);
+        }
+        // The seeds the report is measured against move with the contacts they name: an estimate taken
+        // where no contact stands is an estimate of nothing this attempt prints.
+        for (const MiniatureSupport::ContactSeed &seed : selection.retained)
+            if (seed.id < m_problem.seeds.size())
+                m_problem.seeds[size_t(seed.id)].position = seed.position;
+    }
+    profiler.stage_finish(STAGE_SELECT_CONTACTS);
+
+    m_ts_data->layer_heights = plan_layer_heights(prepared.object_layer_plan);
 
     //Drop nodes to lower layers.
     profiler.stage_start(STAGE_DROP_DOWN_NODES);
@@ -1980,10 +2288,38 @@ void TreeSupport::generate()
     profiler.stage_start(STAGE_GENERATE_TOOLPATHS);
     m_object->print()->set_status(70, _u8L("Generating support"));
     generate_toolpaths();
+    const std::vector<ExPolygons> printed = remove_floating_toolpaths();
     profiler.stage_finish(STAGE_GENERATE_TOOLPATHS);
 
-    profiler.stage_finish(STAGE_total);
-    BOOST_LOG_TRIVIAL(info) << "tree support time " << profiler.report();
+    // How many of the support layers this attempt laid are the raft under the object.
+    m_object->set_support_raft_layers(m_raft_layers);
+
+    // Read-only from here: the measurement looks at what was generated and changes none of it.
+    profiler.stage_start(STAGE_MEASURE);
+    if (m_analyze) {
+        // What the toolpaths cover on each layer the router filed an attributed mask for. Layers are
+        // matched by print_z because draw_circles drops the zero-height ones from the object's list
+        // after the masks were filed, which moves every index behind them.
+        const SupportLayerPtrs &layers = m_object->support_layers();
+        for (size_t i = 0; i < layers.size(); ++ i) {
+            for (SupportAnalysis::EmittedLayer &emitted_layer : m_emitted.layers) {
+                if (std::abs(emitted_layer.print_z - layers[i]->print_z) > EPSILON)
+                    continue;
+                emitted_layer.emitted           = printed[i];
+                emitted_layer.emitted_available = true;
+                break;
+            }
+        }
+        auto emitted = std::make_shared<const SupportAnalysis::EmittedSupport>(std::move(m_emitted));
+        m_object->set_emitted_support(emitted);
+        SupportAnalysis::Report report = SupportAnalysis::measure(*m_object, m_problem, *emitted, prepared.risk);
+        report.seeds_candidate = m_problem.seeds.size();
+        report.seeds_kept      = seeds_kept;
+        report.seeds_restored  = seeds_restored;
+        report.seeds_retained  = seeds_retained;
+        m_object->set_support_analysis(std::make_shared<const SupportAnalysis::Report>(std::move(report)));
+    }
+    profiler.stage_finish(STAGE_MEASURE);
 }
 
 coordf_t TreeSupport::calc_branch_radius(coordf_t base_radius, size_t layers_to_top, size_t tip_layers, double diameter_angle_scale_factor)
@@ -2237,6 +2573,10 @@ void TreeSupport::draw_circles()
         return;
     BOOST_LOG_TRIVIAL(info) << "draw_circles for object: " << m_object->model_object()->name;
 
+    // One attributed mask per routed node area, filed under the layer that routed it. Each task owns
+    // one entry of this vector, so nothing here needs a lock. Empty unless this attempt measures itself.
+    std::vector<std::vector<SupportAnalysis::AttributedArea>> attributed(m_analyze ? m_ts_data->layer_heights.size() : 0);
+
     tbb::parallel_for(tbb::blocked_range<size_t>(0, m_ts_data->layer_heights.size()),
         [&](const tbb::blocked_range<size_t>& range)
         {
@@ -2368,19 +2708,24 @@ void TreeSupport::draw_circles()
                         }
                     }
 
-                    if (obj_layer_nr>0 && node.distance_to_top < 0)
+                    SupportAnalysis::Termination termination = SupportAnalysis::Termination::Base;
+                    if (obj_layer_nr>0 && node.distance_to_top < 0) {
                         append(roof_gap_areas, area);
+                        termination = SupportAnalysis::Termination::GapAbove;
+                    }
                     else if (obj_layer_nr > 0 && node.support_roof_layers_below == 1 &&
                              node.is_sharp_tail == false)
                     {
                         append(roof_1st_layer, area);
                         max_layers_above_roof1 = std::max(max_layers_above_roof1, node.dist_mm_to_top);
+                        termination = SupportAnalysis::Termination::RoofFirstLayer;
                     }
                     else if (obj_layer_nr > 0 && node.support_roof_layers_below > 1 &&
                              node.is_sharp_tail == false)
                     {
                         append(node.support_roof_layers_below <= top_base_interface_layers ? roof_base_areas : roof_areas, area);
                         max_layers_above_roof = std::max(max_layers_above_roof, node.dist_mm_to_top);
+                        termination = SupportAnalysis::Termination::Roof;
                     }
                     else
                     {
@@ -2388,6 +2733,26 @@ void TreeSupport::draw_circles()
                         max_layers_above_base = std::max(max_layers_above_base, node.dist_mm_to_top);
                     }
 
+                    // The mask this node routed, as it stands before the layer's areas are unioned:
+                    // after the union below there is nothing left to say whose material this is.
+                    if (m_analyze && ! node.source_ids.empty())
+                        for (const ExPolygon &piece : area) {
+                            if (piece.empty())
+                                continue;
+                            SupportAnalysis::AttributedArea record;
+                            record.source_ids      = node.source_ids;
+                            record.area            = piece;
+                            record.termination     = termination;
+                            // A negative distance_to_top is the planned gap between the tip and the
+                            // model: drawn, never extruded, and never counted as printed contact.
+                            record.virtual_gap     = node.distance_to_top < 0;
+                            record.to_buildplate   = node.to_buildplate;
+                            // The section that was drawn, not the radius the router planned for the
+                            // node: collision clipping, the xy distance and a merged overhang all
+                            // move the one away from the other.
+                            record.min_diameter_mm = SupportAnalysis::cross_section_width_mm(piece);
+                            attributed[layer_nr].emplace_back(std::move(record));
+                        }
                 }
 
                 //m_object->print()->set_status(65, (boost::format( _u8L("Support: generate polygons at layer %d")) % layer_nr).str());
@@ -2855,6 +3220,24 @@ void TreeSupport::draw_circles()
     }
 #endif  // SUPPORT_TREE_DEBUG_TO_SVG
 
+    if (m_analyze) {
+        m_emitted.layers.clear();
+        m_emitted.top_gap_mm          = top_z_distance;
+        m_emitted.max_layer_height_mm = 0.;
+        for (const LayerHeightData &plan : m_ts_data->layer_heights)
+            m_emitted.max_layer_height_mm = std::max(m_emitted.max_layer_height_mm, double(plan.height));
+        for (size_t layer_nr = 0; layer_nr < attributed.size(); ++ layer_nr) {
+            if (attributed[layer_nr].empty())
+                continue;
+            SupportAnalysis::EmittedLayer emitted_layer;
+            emitted_layer.support_layer_index = layer_nr + m_raft_layers;
+            emitted_layer.print_z             = m_ts_data->layer_heights[layer_nr].print_z;
+            emitted_layer.bottom_z            = emitted_layer.print_z - m_ts_data->layer_heights[layer_nr].height;
+            emitted_layer.areas               = std::move(attributed[layer_nr]);
+            m_emitted.layers.emplace_back(std::move(emitted_layer));
+        }
+    }
+
     SupportLayerPtrs& ts_layers = m_object->support_layers();
     auto iter = std::remove_if(ts_layers.begin(), ts_layers.end(), [](SupportLayer* ts_layer) { return ts_layer->height < EPSILON; });
     ts_layers.erase(iter, ts_layers.end());
@@ -3085,6 +3468,12 @@ void TreeSupport::drop_nodes()
                             node.distance_to_top           = std::max(node.distance_to_top, neighbour_node->distance_to_top);
                             node.support_roof_layers_below = std::max(node.support_roof_layers_below, neighbour_node->support_roof_layers_below);
                             node.dist_mm_to_top            = std::max(node.dist_mm_to_top, neighbour_node->dist_mm_to_top);
+                            {
+                                // The polygon node absorbs the circle: it now routes the neighbour's
+                                // sources too, and the neighbour will not be dropped to the next layer.
+                                std::scoped_lock lock(m_ts_data->m_mutex);
+                                merge_source_ids(node.source_ids, neighbour_node->source_ids);
+                            }
                             node.merged_neighbours.push_front(neighbour_node);
                             node.merged_neighbours.insert(node.merged_neighbours.end(), neighbour_node->merged_neighbours.begin(), neighbour_node->merged_neighbours.end());
                             neighbour_node->valid = false;
@@ -3119,6 +3508,9 @@ void TreeSupport::drop_nodes()
                         to_buildplate, node_parent, print_z_next, height_next);
                     get_max_move_dist(next_node);
                     m_ts_data->m_mutex.lock();
+                    // Both nodes fade into this one: it carries the parent's sources through the
+                    // constructor and the other side's from here.
+                    merge_source_ids(next_node->source_ids, (node_parent == p_node ? neighbour : p_node)->source_ids);
                     contact_nodes[layer_nr_next].push_back(next_node);
                     neighbour->valid = false;
                     p_node->valid = false;
@@ -3139,6 +3531,7 @@ void TreeSupport::drop_nodes()
                             m_ts_data->m_mutex.lock();
                             if (p_node->valid)
                             {  // since we are processing all nodes in parallel, p_node may have been deleted by another thread. In this case, we should not delete neighbour_node.
+                                merge_source_ids(node.source_ids, neighbour_node->source_ids);
                                 node.merged_neighbours.push_front(neighbour_node);
                                 node.merged_neighbours.insert(node.merged_neighbours.end(), neighbour_node->merged_neighbours.begin(), neighbour_node->merged_neighbours.end());
                                 neighbour_node->valid = false;
@@ -3469,27 +3862,28 @@ void TreeSupport::smooth_nodes()
     }
 }
 
-std::vector<LayerHeightData> TreeSupport::plan_layer_heights()
+std::vector<LayerHeightData> TreeSupport::plan_layer_heights(const std::vector<LayerHeightData> &object_layer_plan)
 {
     std::vector<LayerHeightData> layer_heights;
     std::map<coordf_t, coordf_t> z_heights; // print_z:height
+    if (object_layer_plan.empty())
+        return layer_heights; // no object layers to plan support layers against
     if (!m_support_params.independent_layer_height) {
-        layer_heights.resize(m_object->layer_count());
-        for (int layer_nr = 0; layer_nr < m_object->layer_count(); layer_nr++) {
-            z_heights[m_object->get_layer(layer_nr)->print_z] = m_object->get_layer(layer_nr)->height;
-            layer_heights[layer_nr] = {m_object->get_layer(layer_nr)->print_z, m_object->get_layer(layer_nr)->height, size_t(layer_nr)};
-        }
+        // One support layer per object layer, at the object's own print_z and height.
+        layer_heights = object_layer_plan;
+        for (const LayerHeightData &object_layer : object_layer_plan)
+            z_heights[object_layer.print_z] = object_layer.height;
     } else {
         const coordf_t               max_layer_height = m_slicing_params.max_suport_layer_height;
         const coordf_t               min_layer_height = m_slicing_params.min_layer_height;
         std::map<coordf_t, coordf_t> bounds; // print_z: height
         // Keep first layer still
-        bounds[m_object->get_layer(0)->print_z] = {m_object->get_layer(0)->height};
+        bounds[object_layer_plan.front().print_z] = {object_layer_plan.front().height};
         std::vector<float> obj_layer_zs;
-        obj_layer_zs.reserve(m_object->layer_count());
-        for (const Layer *l : m_object->layers()) obj_layer_zs.emplace_back((float) l->print_z);
-        z_heights[m_object->get_layer(0)->print_z] = m_object->get_layer(0)->height;
-        const coordf_t min_print_z = m_object->get_layer(0)->print_z;
+        obj_layer_zs.reserve(object_layer_plan.size());
+        for (const LayerHeightData &object_layer : object_layer_plan) obj_layer_zs.emplace_back((float) object_layer.print_z);
+        z_heights[object_layer_plan.front().print_z] = object_layer_plan.front().height;
+        const coordf_t min_print_z = object_layer_plan.front().print_z;
         // Collect top contact layers
         for (int layer_nr = 1; layer_nr < contact_nodes.size(); layer_nr++) {
             if (!contact_nodes[layer_nr].empty()) {
@@ -3856,29 +4250,47 @@ void TreeSupport::insert_dropped_node(std::vector<SupportNode*>& nodes_layer, Su
     SupportNode* conflicting_node = *conflicting_node_it;
     conflicting_node->distance_to_top = std::max(conflicting_node->distance_to_top, p_node->distance_to_top);
     conflicting_node->support_roof_layers_below = std::max(conflicting_node->support_roof_layers_below, p_node->support_roof_layers_below);
+    // The dropped node lands on one already at that position: the survivor routes both sets of sources.
+    merge_source_ids(conflicting_node->source_ids, p_node->source_ids);
 }
 
-TreeSupportData::TreeSupportData(const PrintObject &object, coordf_t xy_distance, coordf_t radius_sample_resolution)
-    : m_xy_distance(xy_distance), m_radius_sample_resolution(radius_sample_resolution)
+TreeSupportCollisionInputs TreeSupportData::collect_collision_inputs(const PrintObject &object, coordf_t xy_distance, coordf_t radius_sample_resolution)
 {
-    branch_scale_factor = tan(object.config().tree_support_branch_angle.value * M_PI / 180.);
-    clear_nodes();
-    m_max_move_distances.resize(object.layers().size(), 0);
+    TreeSupportCollisionInputs inputs;
+    inputs.xy_distance              = xy_distance;
+    inputs.radius_sample_resolution = radius_sample_resolution;
+    inputs.branch_scale_factor      = tan(object.config().tree_support_branch_angle.value * M_PI / 180.);
+    inputs.max_move_distances.resize(object.layers().size(), 0);
     for (std::size_t layer_nr  = 0; layer_nr < object.layers().size(); ++layer_nr)
     {
         const Layer* layer = object.get_layer(layer_nr);
-        m_max_move_distances[layer_nr] = layer->height * branch_scale_factor;
-        m_layer_outlines.push_back(ExPolygons());
-        ExPolygons& outline = m_layer_outlines.back();
+        inputs.max_move_distances[layer_nr] = layer->height * inputs.branch_scale_factor;
+        inputs.layer_outlines.push_back(ExPolygons());
+        ExPolygons& outline = inputs.layer_outlines.back();
         for (const ExPolygon& poly : layer->lslices) {
-            poly.simplify(scale_(m_radius_sample_resolution), &outline);
+            poly.simplify(scale_(radius_sample_resolution), &outline);
         }
 
         if (layer_nr == 0)
-            m_layer_outlines_below.push_back(outline);
+            inputs.layer_outlines_below.push_back(outline);
         else
-            m_layer_outlines_below.push_back(union_ex(m_layer_outlines_below.end()[-1], outline));
+            inputs.layer_outlines_below.push_back(union_ex(inputs.layer_outlines_below.end()[-1], outline));
     }
+    return inputs;
+}
+
+TreeSupportData::TreeSupportData(const PrintObject &object, coordf_t xy_distance, coordf_t radius_sample_resolution)
+    : TreeSupportData(std::make_shared<const TreeSupportCollisionInputs>(
+          collect_collision_inputs(object, xy_distance, radius_sample_resolution)))
+{}
+
+TreeSupportData::TreeSupportData(std::shared_ptr<const TreeSupportCollisionInputs> inputs)
+    : m_xy_distance(inputs->xy_distance), m_radius_sample_resolution(inputs->radius_sample_resolution),
+      m_collision(std::move(inputs)), m_layer_outlines(m_collision->layer_outlines),
+      m_layer_outlines_below(m_collision->layer_outlines_below), m_max_move_distances(m_collision->max_move_distances)
+{
+    branch_scale_factor = m_collision->branch_scale_factor;
+    clear_nodes();
 }
 
 const ExPolygons& TreeSupportData::get_collision(coordf_t radius, size_t layer_nr) const

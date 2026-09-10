@@ -2165,6 +2165,14 @@ void Print::auto_assign_extruders(ModelObject* model_object) const
     }
 }
 
+void Print::request_legacy_support_analysis()
+{
+    // Every object of this print, because a shared object reads the owner's pass and the owner is
+    // the one that generates it.
+    for (PrintObject *object : m_objects)
+        object->request_legacy_support_analysis();
+}
+
 void  PrintObject::set_shared_object(PrintObject *object)
 {
     m_shared_object = object;
@@ -2176,7 +2184,9 @@ void  PrintObject::clear_shared_object()
     if (m_shared_object) {
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": this=%1%, clear previous shared object data %2%")%this %m_shared_object;
         m_layers.clear();
-        m_support_layers.clear();
+        // While m_shared_object still stands, so this lets go of the owner's pass rather than
+        // deleting layers that belong to it.
+        this->clear_support_result_state();
 
         m_shared_object = nullptr;
 
@@ -2188,7 +2198,7 @@ void  PrintObject::copy_layers_from_shared_object()
 {
     if (m_shared_object) {
         m_layers.clear();
-        m_support_layers.clear();
+        this->clear_support_result_state();
 
         firstLayerObjSliceByVolume.clear();
         firstLayerObjSliceByGroups.clear();
@@ -2196,6 +2206,14 @@ void  PrintObject::copy_layers_from_shared_object()
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": this=%1%, copied layers from object %2%")%this%m_shared_object;
         m_layers = m_shared_object->layers();
         m_support_layers = m_shared_object->support_layers();
+        // The owner's pass, read only: the same layers, the generator cache they were routed against
+        // and the raft count that says how many of them sit under the object.
+        m_tree_support_preview_cache = m_shared_object->m_tree_support_preview_cache;
+        m_support_raft_layers        = m_shared_object->m_support_raft_layers;
+        // Immutable, so the two objects can hold the same measurement: it describes the owner's pass,
+        // which is the pass this object reads.
+        m_support_analysis           = m_shared_object->m_support_analysis;
+        m_emitted_support            = m_shared_object->m_emitted_support;
 
         firstLayerObjSliceByVolume = m_shared_object->firstLayerObjSlice();
         firstLayerObjSliceByGroups = m_shared_object->firstLayerObjGroups();

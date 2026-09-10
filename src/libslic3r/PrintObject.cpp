@@ -1118,16 +1118,30 @@ SupportLayer* PrintObject::get_support_layer_at_printz(coordf_t print_z, coordf_
 
 void PrintObject::clear_support_layers()
 {
-    if (!m_shared_object) {
-        for (SupportLayer* l : m_support_layers)
+    // The support layers and the annotations that came with them are one pass: the object lets go of
+    // all of it at once, through the one place that knows what it owns.
+    this->clear_support_result_state();
+}
+
+void PrintObject::clear_support_result_state()
+{
+    if (! m_shared_object) {
+        for (SupportLayer *l : m_support_layers)
             delete l;
-        m_support_layers.clear();
-        for (auto l : m_layers) {
+        for (Layer *l : m_layers) {
             l->sharp_tails.clear();
             l->sharp_tails_height.clear();
             l->cantilevers.clear();
         }
     }
+    // A shared object's support layers are the owner's: it lets go of them without deleting anything.
+    m_support_layers.clear();
+    m_tree_support_preview_cache.reset();
+    m_support_raft_layers = 0;
+    // The measurement describes the pass that is going: it goes with it, so no caller reads a report
+    // taken of support the object no longer has.
+    m_support_analysis.reset();
+    m_emitted_support.reset();
 }
 
 std::shared_ptr<TreeSupportData> PrintObject::alloc_tree_support_preview_cache()
@@ -1588,10 +1602,17 @@ bool PrintObject::invalidate_step(PrintObjectStep step)
 		invalidated |= this->invalidate_steps({ posPerimeters, posPrepareInfill, posInfill, posIroning, posContouring, posSupportMaterial, posSimplifyPath, posSimplifyInfill });
         invalidated |= m_print->invalidate_steps({ psSkirtBrim });
         m_slicing_params.valid = false;
+        // invalidate_steps() reaches PrintBase::invalidate_step(), never this override, so the
+        // posSupportMaterial branch below does not run for a slice invalidation. Drop the pass here
+        // too: the geometry it was generated for and measured against is gone.
+        this->clear_support_result_state();
     } else if (step == posSupportMaterial) {
         invalidated |= this->invalidate_steps({ posSimplifySupportPath });
         invalidated |= m_print->invalidate_steps({ psSkirtBrim });
         m_slicing_params.valid = false;
+        // The generated pass belongs to this step: it goes when the step does, so nothing reads a
+        // support layer, a generator cache or a raft count that the settings no longer produce.
+        this->clear_support_result_state();
     }
 
     // Wipe tower depends on the ordering of extruders, which in turn depends on everything.
@@ -1609,6 +1630,7 @@ bool PrintObject::invalidate_all_steps()
     bool result = Inherited::invalidate_all_steps() | m_print->invalidate_all_steps();
 	// Then reset some of the depending values.
 	m_slicing_params.valid = false;
+    this->clear_support_result_state();
 	return result;
 }
 
@@ -4464,15 +4486,61 @@ void PrintObject::combine_infill()
 
 void PrintObject::_generate_support_material()
 {
+    // One request buys one analysis: it is consumed here whether or not this pass can honour it, so
+    // an ordinary slice that follows measures nothing.
+    const bool analysis_requested = m_legacy_support_analysis_requested;
+    m_legacy_support_analysis_requested = false;
+
+    // A cancelled or failed pass leaves through here too. Until the result is installed, everything
+    // the attempt allocated on this object goes with the scope, and generate_support_material() never
+    // reaches set_done(posSupportMaterial) on that path.
+    struct AttemptScope
+    {
+        PrintObject *object;
+        bool         installed = false;
+        ~AttemptScope() { if (! installed) object->clear_support_result_state(); }
+    } attempt { this };
+
     if (is_tree(m_config.support_type.value)) {
         TreeSupport tree_support(*this, m_slicing_params);
         tree_support.throw_on_cancel = [this]() { this->throw_if_canceled(); };
+        tree_support.request_analysis(analysis_requested);
         tree_support.generate();
     }
     else {
         PrintObjectSupportMaterial support_material(this, m_slicing_params);
         support_material.generate(*this);
     }
+
+    // What this object's support did with the problem it was generated for, in the slice log and,
+    // where it left a requirement open, as a warning the user sees. Read off the measurement the
+    // object holds, so it names the pass that ships.
+    if (m_config.support_miniature_contacts.value)
+        if (const std::shared_ptr<const SupportAnalysis::Report> report = this->support_analysis()) {
+            size_t unreached = 0, printable_count = 0;
+            for (const SupportAnalysis::RegionCoverage &region : report->coverage)
+                if (region.printable) {
+                    ++ printable_count;
+                    if (region.critical && ! region.emitted_path)
+                        ++ unreached;
+                }
+            BOOST_LOG_TRIVIAL(info) << "Support contact layout for " << this->model_object()->name
+                                    << ": critical regions without material " << unreached << " of " << printable_count
+                                    << " printable, unsupported paths " << report->stability.unsupported_paths
+                                    << ", unrooted groups " << report->stability.unrooted_groups
+                                    << ", support " << report->support_volume_mm3 << " mm3, seeds candidates "
+                                    << report->seeds_candidate << " / kept " << report->seeds_kept << " / restored "
+                                    << report->seeds_restored << " / retained " << report->seeds_retained;
+            // posSupportMaterial is still the active step here, which is what active_step_add_warning
+            // needs, and the default notification id lets the message identify itself rather than
+            // borrowing an id that means something else to the notification manager.
+            if (SupportAnalysis::support_unresolved(*report))
+                this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                    Slic3r::format(L("Support for object %s does not reach every overhang that needs it; check the support "
+                                     "settings and the orientation."),
+                                   this->model_object()->name));
+        }
+    attempt.installed = true;
 }
 
 // BBS
