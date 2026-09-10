@@ -88,7 +88,7 @@ const PrintObject *print_object_of_instance(const Print &print, const ObjectID &
 Polygons instance_adhesion(const Print &print, const PrintObject &object, size_t instance_index)
 {
     const auto it = print.get_brimMapByInstance().find(ObjectInstanceID{ object.id(), instance_index });
-    if (it == print.get_brimMapByInstance().end() || instance_index >= object.instances().size())
+    if (it == print.get_brimMapByInstance().end())
         return {};
     Polygons    adhesion = it->second.polygons_covered_by_width(0.f);
     const Vec3d origin   = print.get_plate_origin();

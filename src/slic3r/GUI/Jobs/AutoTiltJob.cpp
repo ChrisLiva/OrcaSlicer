@@ -132,9 +132,7 @@ static AutoTilt::EvaluationInput capture_inputs(Plater &plater, int obj_idx)
 {
     AutoTilt::EvaluationInput input;
     const ModelObjectPtrs    &objects = plater.model().objects;
-    if (obj_idx < 0 || obj_idx >= int(objects.size()))
-        return input;
-    const ModelObject &obj = *objects[obj_idx];
+    const ModelObject        &obj     = *objects[obj_idx];
     input.object_id        = obj.id();
 
     PartPlateList &plates = plater.get_partplate_list();

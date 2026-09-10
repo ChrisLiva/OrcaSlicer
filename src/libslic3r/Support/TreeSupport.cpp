@@ -1984,8 +1984,7 @@ void TreeSupport::build_contact_seeds(const PreparedLegacy &prepared)
 
     std::vector<std::vector<size_t>> regions_by_layer(size_t(m_object->layer_count()));
     for (const MiniatureSupport::RequiredRegion &region : m_problem.regions)
-        if (region.object_layer < regions_by_layer.size())
-            regions_by_layer[region.object_layer].push_back(size_t(region.id));
+        regions_by_layer[region.object_layer].push_back(size_t(region.id));
 
     // One candidate per contact node, matched to the region it was placed for. The Hybrid big-overhang
     // path lists one node twice in its layer, so a node is taken once.
@@ -2006,7 +2005,7 @@ void TreeSupport::build_contact_seeds(const PreparedLegacy &prepared)
             continue;
         const std::vector<size_t> &layer_regions = regions_by_layer[obj_layer];
         for (SupportNode *node : contact_nodes[layer]) {
-            if (node == nullptr || ! seen.insert(node).second)
+            if (! seen.insert(node).second)
                 continue;
             // A vertical enforcer point is placed for no overhang polygon at all: generate_contact_points
             // inserts it with an empty overhang, off a painted facet the detector never filed as a
@@ -2188,7 +2187,7 @@ void TreeSupport::generate_legacy(const PreparedLegacy &prepared)
         layer->sharp_tails       = prepared.layers[layer_nr].sharp_tails;
         layer->sharp_tails_height= prepared.layers[layer_nr].sharp_tails_height;
         layer->cantilevers       = prepared.layers[layer_nr].cantilevers;
-        for (size_t i = 0; i < layer->loverhangs.size() && i < prepared.layers[layer_nr].types.size(); ++ i)
+        for (size_t i = 0; i < layer->loverhangs.size(); ++ i)
             overhang_types.emplace(&layer->loverhangs[i], prepared.layers[layer_nr].types[i]);
     }
     m_vertical_enforcer_points  = prepared.vertical_enforcer_points;
@@ -2236,11 +2235,10 @@ void TreeSupport::generate_legacy(const PreparedLegacy &prepared)
         std::vector<Point> placed(m_problem.seeds.size());
         for (size_t i = 0; i < m_problem.seeds.size(); ++ i)
             placed[i] = m_problem.seeds[i].position;
-        for (const MiniatureSupport::ContactSeed &seed : selection.retained)
-            if (seed.id < retained.size()) {
-                retained[size_t(seed.id)] = 1;
-                placed[size_t(seed.id)]   = seed.position;
-            }
+        for (const MiniatureSupport::ContactSeed &seed : selection.retained) {
+            retained[size_t(seed.id)] = 1;
+            placed[size_t(seed.id)]   = seed.position;
+        }
         // Erase the dropped pointers in place and move the kept ones onto the positions the pass chose.
         // Nothing is deleted: the nodes stay owned by TreeSupportData's pool, the outer vector keeps its
         // size and its layer_nr - 1 indexing, and a node the seed pass never gave a source id (a painted
@@ -2249,8 +2247,7 @@ void TreeSupport::generate_legacy(const PreparedLegacy &prepared)
             size_t out = 0;
             for (size_t i = 0; i < layer.size(); ++ i) {
                 SupportNode *node   = layer[i];
-                const bool   seeded = node != nullptr && node->source_ids.size() == 1 &&
-                                      node->source_ids.front() < retained.size();
+                const bool   seeded = node->source_ids.size() == 1;
                 if (seeded && ! retained[size_t(node->source_ids.front())])
                     continue;
                 if (seeded)
@@ -2262,8 +2259,7 @@ void TreeSupport::generate_legacy(const PreparedLegacy &prepared)
         // The seeds the report is measured against move with the contacts they name: an estimate taken
         // where no contact stands is an estimate of nothing this attempt prints.
         for (const MiniatureSupport::ContactSeed &seed : selection.retained)
-            if (seed.id < m_problem.seeds.size())
-                m_problem.seeds[size_t(seed.id)].position = seed.position;
+            m_problem.seeds[size_t(seed.id)].position = seed.position;
     }
     profiler.stage_finish(STAGE_SELECT_CONTACTS);
 

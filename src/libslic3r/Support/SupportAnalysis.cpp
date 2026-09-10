@@ -574,12 +574,7 @@ void measure_damage(Report &report, const PrintObject &object, const MiniatureSu
         double lever = 0.;
         for (uint64_t seed_id : group_contacts[g]) {
             const size_t piece = piece_of_seed[size_t(seed_id)];
-            if (piece >= run.size() || run[piece] == std::numeric_limits<double>::max())
-                continue;
-            const ModelSupportRisk::Sample *sample = sample_of_seed[size_t(seed_id)];
-            if (sample == nullptr)
-                continue;
-            lever = std::max(lever, run[piece] / std::max(sample->neck_width_mm, width));
+            lever = std::max(lever, run[piece] / std::max(sample_of_seed[size_t(seed_id)]->neck_width_mm, width));
         }
         const double risk = group_weight[g] * (1. + lever);
         damage.total_group_risk += risk;
@@ -596,8 +591,6 @@ void measure_damage(Report &report, const PrintObject &object, const MiniatureSu
         bool   reached = false;
         size_t unknown = 0;
         for (uint64_t seed_id : group_contacts[g]) {
-            if (seed_id >= problem.seeds.size())
-                continue;
             const MiniatureSupport::ContactSeed &seed = problem.seeds[size_t(seed_id)];
             if (seed.region_id >= problem.regions.size())
                 continue;
@@ -945,20 +938,12 @@ Report measure(const PrintObject &object, const MiniatureSupport::Problem &probl
     const MiniatureSupport::CoverageRule rule(problem);
     std::vector<char>                    carried(region_count, 0);
     for (size_t i = 0; i < region_count; ++ i)
-        for (uint64_t seed_id : region_reached[i]) {
-            if (seed_id >= seed_position.size())
-                continue;
+        for (uint64_t seed_id : region_reached[i])
             for (const MiniatureSupport::CoveredCell &cell : rule.cells(size_t(seed_id), seed_position[size_t(seed_id)])) {
-                if (cell.region >= region_count)
-                    continue;
-                RegionCoverage &covered_report = report.coverage[cell.region];
-                if (cell.cell >= covered_report.covered.size())
-                    continue;
-                covered_report.covered[cell.cell] = true;
+                report.coverage[cell.region].covered[cell.cell] = true;
                 if (cell.region != i)
                     carried[cell.region] = 1;
             }
-        }
 
     // Pass three. `measure_stability` has already recorded whether each region's own sources reached
     // printed material; a region whose cells a reached contact of its component carries has a path
@@ -980,8 +965,7 @@ Report measure(const PrintObject &object, const MiniatureSupport::Problem &probl
     // against the problem's regions, the emitted material's stability, and the removal damage - and
     // Unknown as soon as one of them did not: no caller may treat an unmeasured domain as a passed
     // one. Coverage that could not be resolved at all leaves earlier, as UnresolvedCoverage.
-    report.status = report.coverage_available && report.stability.available && report.damage.available ?
-                        Report::Status::Complete : Report::Status::Unknown;
+    report.status = report.stability.available && report.damage.available ? Report::Status::Complete : Report::Status::Unknown;
     return report;
 }
 

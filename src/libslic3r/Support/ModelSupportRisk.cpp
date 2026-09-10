@@ -105,8 +105,6 @@ ThickPolylines medial_axis_of(const ExPolygon &solid)
         return lines;
     const BoundingBox bbox = get_extents(solid);
     const double      diagonal = (bbox.max - bbox.min).cast<double>().norm();
-    if (! std::isfinite(diagonal) || diagonal <= 0.)
-        return lines;
     Geometry::MedialAxis(0., diagonal + SCALED_EPSILON, solid).build(&lines);
     return lines;
 }
@@ -134,8 +132,6 @@ bool measured_width(const ExPolygon &solid, const ThickPolylines &medial, const 
 
 bool local_width(const ExPolygon &solid, const Point &query, double *width_mm)
 {
-    if (width_mm == nullptr || degenerate(solid))
-        return false;
     return measured_width(solid, medial_axis_of(solid), query, width_mm);
 }
 
@@ -706,8 +702,6 @@ bool blocked_by_model(const AABBMesh &mesh, const indexed_triangle_set &its, con
 {
     const Vec3d  along  = end - start;
     const double length = along.norm();
-    if (length <= 0.)
-        return false;
     for (const AABBMesh::hit_result &hit : mesh.query_ray_hits(start, along / length))
         if (hit.is_hit() && hit.distance() > 1e-9 && hit.distance() <= length)
             return true;
