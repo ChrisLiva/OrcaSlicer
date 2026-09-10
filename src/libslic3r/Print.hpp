@@ -431,8 +431,6 @@ public:
     // The tree generator's node pool and collision caches for the support pass this object is holding,
     // or null when it holds none. An object reading a shared owner's layers reads the owner's.
     const std::shared_ptr<TreeSupportData>& tree_support_preview_cache() const { return m_tree_support_preview_cache; }
-    // Hands the object the cache one generation attempt built, in place of whatever it was holding.
-    void set_tree_support_preview_cache(std::shared_ptr<TreeSupportData> cache) { m_tree_support_preview_cache = std::move(cache); }
     // How many of the support layers the pass laid sit under the object as its raft.
     size_t          support_raft_layers() const { return m_support_raft_layers; }
     void            set_support_raft_layers(size_t raft_layers) { m_support_raft_layers = raft_layers; }

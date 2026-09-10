@@ -197,23 +197,6 @@ struct SupportNode
     }
 };
 
-// The read-only geometry a legacy support attempt collides against, taken off the object's slices
-// once: the per-layer outlines simplified to the collision resolution, their running union from the
-// plate upwards, and how far a branch may move per layer. Collecting these once and handing them to
-// each attempt's TreeSupportData keeps the object's slices read-only and keeps an attempt from
-// inheriting the node pool or the collision caches of another one. Nothing writes them after
-// collect_collision_inputs() returned them, so the attempts share one const copy instead of taking
-// one each.
-struct TreeSupportCollisionInputs
-{
-    coordf_t                xy_distance              = 0;
-    coordf_t                radius_sample_resolution = 0;
-    coordf_t                branch_scale_factor      = 1.;
-    std::vector<ExPolygons> layer_outlines;
-    std::vector<ExPolygons> layer_outlines_below;
-    std::vector<double>     max_move_distances;
-};
-
 /*!
  * \brief Lazily generates tree guidance volumes.
  *
@@ -230,12 +213,6 @@ public:
      * \param radius_sample_resolution Sample size used to round requested node radii.
      */
     TreeSupportData(const PrintObject& object, coordf_t xy_distance, coordf_t radius_sample_resolution);
-    // Same data, from inputs collected earlier instead of from the object: an empty node pool and
-    // empty collision/avoidance caches over outlines that were measured once. The inputs are held,
-    // not copied, so every attempt made from one prepared problem reads the same outlines.
-    explicit TreeSupportData(std::shared_ptr<const TreeSupportCollisionInputs> inputs);
-    // The collision geometry of `object` at this clearance and resolution.
-    static TreeSupportCollisionInputs collect_collision_inputs(const PrintObject &object, coordf_t xy_distance, coordf_t radius_sample_resolution);
     ~TreeSupportData() {
         clear_nodes();
     }
@@ -348,20 +325,15 @@ public:
      */
     coordf_t m_radius_sample_resolution;
 
-    // The collision geometry the three views below are bound to, kept alive for as long as this data
-    // lives. Shared with every other attempt made from the same prepared problem, which is safe
-    // because nothing writes these outlines after collect_collision_inputs() returned them.
-    std::shared_ptr<const TreeSupportCollisionInputs> m_collision;
-
     /*!
      * \brief Storage for layer outlines of the meshes.
      */
-    const std::vector<ExPolygons> &m_layer_outlines;
+    std::vector<ExPolygons> m_layer_outlines;
 
     // union contours of all layers below
-    const std::vector<ExPolygons> &m_layer_outlines_below;
+    std::vector<ExPolygons> m_layer_outlines_below;
 
-    const std::vector<double> &m_max_move_distances;
+    std::vector<double> m_max_move_distances;
 
     /*!
      * \brief Caches for the collision, avoidance and internal model polygons
@@ -412,9 +384,9 @@ public:
      * \param storage The data storage where the mesh data is gotten from and
      * where the resulting support areas are stored.
      */
-    // Generates this object's support: one preparation, and one legacy attempt over it. Detection, the
-    // printable tip floors, interfaces, enforcers, blockers, gaps and branch limits all come from that
-    // one preparation, and the attempt's output lands on the object.
+    // Generates this object's support in one pass: detection, then for a pass that measures itself
+    // the required regions and the risk field, then contact points, the contact layout, routing,
+    // toolpaths and the measurement. The output lands on the object.
     void generate();
 
     void detect_overhangs(bool check_support_necessity = false);
@@ -463,53 +435,6 @@ public:
     std::map<const ExPolygon*, OverhangType> overhang_types;
     std::vector<std::pair<Vec3f, Vec3f>>      m_vertical_enforcer_points;
 
-    // One legacy support problem, frozen after overhang detection: what detection produced and what
-    // the problem froze, by value. No setting lives here — every attempt runs under the settings its
-    // own constructor computes from the object and slicing parameters this generator was built with.
-    // Nothing here points into a node pool, a support layer or an attempt that has been discarded, so
-    // an attempt can be replayed from it on a freshly constructed generator. The object's slices and
-    // perimeters stay outside it: they are read-only for every attempt.
-    struct PreparedLegacy
-    {
-        PreparedLegacy()                                  = default;
-        PreparedLegacy(PreparedLegacy &&)                 = default;
-        PreparedLegacy &operator=(PreparedLegacy &&)      = default;
-        PreparedLegacy(const PreparedLegacy &)            = delete;
-        PreparedLegacy &operator=(const PreparedLegacy &) = delete;
-
-        // What detection left on one object layer, keyed by nothing but its index: the overhangs to
-        // support with the type each of them was detected as, and the annotations the layer carries.
-        struct LayerOverhangs
-        {
-            ExPolygons                overhangs;    // Layer::loverhangs
-            std::vector<OverhangType> types;        // one per overhang, same order
-            ExPolygons                sharp_tails;
-            std::vector<float>        sharp_tails_height;
-            ExPolygons                cantilevers;
-        };
-        std::vector<LayerOverhangs>          layers;               // indexed by object layer
-        std::vector<std::pair<Vec3f, Vec3f>> vertical_enforcer_points;
-        std::vector<LayerHeightData>         object_layer_plan;    // print_z/height of every object layer
-        std::shared_ptr<const TreeSupportCollisionInputs> collision;
-        bool                                 miniature_contacts       = false;
-        bool                                 analysis_requested       = false;
-        // support_contact_min_distance, frozen with the rest: the space the user asked for between
-        // contacts, and the only thing the contact layout spaces its seeds by.
-        double                               contact_min_distance_mm  = 0.;
-
-        // Whether the pass runs the contact layout - decimate, add back, relocate: the mode is on and
-        // a distance was asked for. With nothing to thin, the seeds stay as they were sampled.
-        bool optimizes_contacts() const { return miniature_contacts && contact_min_distance_mm > 0.; }
-        // The required regions this problem defines, by value. The seeds are filled by the pass,
-        // from contacts that are a deterministic function of what is frozen here, so a problem
-        // prepared from one object always hands out the same ids.
-        MiniatureSupport::Problem            problem;
-        // The model's own geometry, measured off the object's slices once and frozen here with the
-        // problem: the pass places its contacts on that one reading. Left Invalid where the pass
-        // would not consult it.
-        ModelSupportRisk::Field              risk;
-    };
-
 private:
     /*!
      * \brief Generator for model collision, avoidance and internal guide volumes
@@ -550,31 +475,23 @@ private:
     bool  with_infill                        = false;
     bool  m_analysis_requested               = false; // asked for by the caller, consumed by one generation
     bool  m_analyze                          = false; // this attempt carries provenance and measures itself
-    // The frozen problem this attempt ran against, and what it emitted for it.
+    // The problem this pass ran against, the model's own risk measured off the object's slices for it
+    // (left Invalid where the pass would not consult it), and what it emitted.
     MiniatureSupport::Problem       m_problem;
+    ModelSupportRisk::Field         m_risk;
     SupportAnalysis::EmittedSupport m_emitted;
 
 
 
-    // Detects the overhangs and freezes the legacy support problem they define. Leaves the object
-    // holding the detected overhangs and annotations, as detect_overhangs() always has.
-    PreparedLegacy prepare_legacy();
+    // Builds the problem's required regions off the detected overhangs: one region per connected
+    // overhang polygon per object layer, in (layer, polygon order), with the ids they keep.
+    void build_required_regions();
 
-    // Builds the frozen problem's required regions off the detected overhangs: one region per
-    // connected overhang polygon per object layer, in (layer, polygon order), with the ids they keep.
-    void build_required_regions(PreparedLegacy &prepared);
-
-    // Turns this attempt's contacts into the problem's seeds: sorts them by (object layer, region,
+    // Turns this pass's contacts into the problem's seeds: sorts them by (object layer, region,
     // position, pin category), hands out dense ids in that order and stamps each contact node with
     // the one it got. Marks the seeds `critical`, which only SupportAnalysis reads
     // (`critical_anchor_ids`, `support_unresolved`): selection never consults it.
-    void build_contact_seeds(const PreparedLegacy &prepared);
-
-    // Runs the legacy generation attempt over a frozen problem: fresh contact nodes, a fresh
-    // TreeSupportData with empty collision caches built from the frozen outlines, then contact
-    // generation, layer planning, routing and toolpath emission. The attempt's output lands on the
-    // object, which owns it from there on.
-    void generate_legacy(const PreparedLegacy &prepared);
+    void build_contact_seeds();
 
     /*!
      * \brief Draws circles around each node of the tree into the final support.
@@ -609,9 +526,7 @@ private:
      *
     */
 
-    // Plans the support layers over the object layer plan frozen with the problem, then adds them to
-    // the object and redistributes the contact nodes onto them.
-    std::vector<LayerHeightData> plan_layer_heights(const std::vector<LayerHeightData> &object_layer_plan);
+    std::vector<LayerHeightData> plan_layer_heights();
     /*!
      * \brief Creates points where support contacts the model.
      *
