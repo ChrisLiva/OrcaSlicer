@@ -449,6 +449,9 @@ public:
     void set_emitted_support(std::shared_ptr<const SupportAnalysis::EmittedSupport> emitted) { m_emitted_support = std::move(emitted); }
 
     size_t          support_layer_count() const { return m_support_layers.size(); }
+    // Drops the support pass this object is holding, layers, annotations, generator cache, raft count
+    // and measurement together: an object that owns its support layers deletes them, an object
+    // reading a shared owner's layers only lets go of them.
     void            clear_support_layers();
     SupportLayer*   get_support_layer(int idx) { return idx<m_support_layers.size()? m_support_layers[idx]:nullptr; }
     const SupportLayer* get_support_layer_at_printz(coordf_t print_z, coordf_t epsilon) const;
@@ -522,10 +525,6 @@ public:
 
 	PrintObject(Print* print, ModelObject* model_object, const Transform3d& trafo, PrintInstances&& instances);
 	~PrintObject();
-
-    // Drops the pass this object is holding: an object that owns its support layers deletes them, an
-    // object reading a shared owner's layers only lets go of them.
-    void                    clear_support_result_state();
 
     // Asks the next legacy tree generation on this object to measure itself. _generate_support_material
     // consumes and clears it, so one request buys one analysis and an ordinary slice measures nothing.

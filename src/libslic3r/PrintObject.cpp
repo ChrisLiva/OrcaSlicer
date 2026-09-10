@@ -1118,13 +1118,6 @@ SupportLayer* PrintObject::get_support_layer_at_printz(coordf_t print_z, coordf_
 
 void PrintObject::clear_support_layers()
 {
-    // The support layers and the annotations that came with them are one pass: the object lets go of
-    // all of it at once, through the one place that knows what it owns.
-    this->clear_support_result_state();
-}
-
-void PrintObject::clear_support_result_state()
-{
     if (! m_shared_object) {
         for (SupportLayer *l : m_support_layers)
             delete l;
@@ -1605,14 +1598,14 @@ bool PrintObject::invalidate_step(PrintObjectStep step)
         // invalidate_steps() reaches PrintBase::invalidate_step(), never this override, so the
         // posSupportMaterial branch below does not run for a slice invalidation. Drop the pass here
         // too: the geometry it was generated for and measured against is gone.
-        this->clear_support_result_state();
+        this->clear_support_layers();
     } else if (step == posSupportMaterial) {
         invalidated |= this->invalidate_steps({ posSimplifySupportPath });
         invalidated |= m_print->invalidate_steps({ psSkirtBrim });
         m_slicing_params.valid = false;
         // The generated pass belongs to this step: it goes when the step does, so nothing reads a
         // support layer, a generator cache or a raft count that the settings no longer produce.
-        this->clear_support_result_state();
+        this->clear_support_layers();
     }
 
     // Wipe tower depends on the ordering of extruders, which in turn depends on everything.
@@ -1630,7 +1623,7 @@ bool PrintObject::invalidate_all_steps()
     bool result = Inherited::invalidate_all_steps() | m_print->invalidate_all_steps();
 	// Then reset some of the depending values.
 	m_slicing_params.valid = false;
-    this->clear_support_result_state();
+    this->clear_support_layers();
 	return result;
 }
 
@@ -4498,7 +4491,7 @@ void PrintObject::_generate_support_material()
     {
         PrintObject *object;
         bool         installed = false;
-        ~AttemptScope() { if (! installed) object->clear_support_result_state(); }
+        ~AttemptScope() { if (! installed) object->clear_support_layers(); }
     } attempt { this };
 
     if (is_tree(m_config.support_type.value)) {

@@ -2186,7 +2186,7 @@ void  PrintObject::clear_shared_object()
         m_layers.clear();
         // While m_shared_object still stands, so this lets go of the owner's pass rather than
         // deleting layers that belong to it.
-        this->clear_support_result_state();
+        this->clear_support_layers();
 
         m_shared_object = nullptr;
 
@@ -2198,7 +2198,7 @@ void  PrintObject::copy_layers_from_shared_object()
 {
     if (m_shared_object) {
         m_layers.clear();
-        this->clear_support_result_state();
+        this->clear_support_layers();
 
         firstLayerObjSliceByVolume.clear();
         firstLayerObjSliceByGroups.clear();
