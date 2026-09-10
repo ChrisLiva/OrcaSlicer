@@ -111,7 +111,13 @@ while the layers holding a contact and `total_mm2` halve (18 vs 50, 18.92 vs 40.
 thinning counts distinct contact `print_z` values or area, never pieces (2026-09-09).
 `fff_print_tests "[AutoTilt]"` fails one of its 27 cases about 1 run in 12 with no stall (26 passed, 1 failed; 1 of 8
 runs on 2026-09-09 at b92c756060 and 1 of 15 at 03b5f3a7dc, never captured, every re-run green); re-run once before
-reading a lone `[AutoTilt]` failure as a regression.
+reading a lone `[AutoTilt]` failure as a regression. One such failure named its case: "A processed tree-support print
+measures its emitted contact through the support analysis" failed once in the `ctest -j5` gate on 2026-09-10, passing
+alone and on the re-run, assertion not captured. Capture the failing assertion before re-running.
+`[MiniatureContacts]` "Support components come from printed slabs that touch, and material with no root is counted"
+failed its `split.stability.unsupported_paths > 0` leg once under `ctest -j5` (read `0 > 0`), then passed 12 of 12
+runs alone, 30 of 30 runs five at a time and the full gate re-run (2026-09-10, no raft, analysis requested); re-run
+once before reading a lone failure there as a regression.
 `SupportAnalysis::Report::missing_anchor_ids` lists every seed whose region never reached printed material through
 that seed, so the seeds `MiniatureSupport::select_contacts` decimates by design are in it: plate 3 of `elf_test.3mf`
 reads 1638 `missing_critical_anchors` in the harness row while the slice log's `Support contact layout for` line
