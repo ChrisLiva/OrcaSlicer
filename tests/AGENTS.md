@@ -34,6 +34,7 @@ Check these before writing your own setup or output-parsing code.
 
 - `tests/test_utils.hpp` is shared by every suite. `load_model()` loads a mesh from `tests/data/`, and `ScopedTemporaryFile` gives a temp path that removes itself.
 - `fff_print/test_helpers.hpp` builds and slices a `Print` and parses the emitted G-code. Read it before writing an fff_print test rather than assembling a `Print` by hand.
+- `fixture_config()` alone fails `Print::validate` under the relative-extruder default: pass `{{"layer_change_gcode", "G92 E0"}}` (as `tests/fff_print/test_auto_tilt.cpp` does) before a full `Print::process`, or the evaluator refuses every pose with a validation error rather than a slicing one (2026-09-08).
 - The other suites have their own: `sla_print/sla_test_utils.hpp`, `libnest2d/libnest2d_test_utils.hpp`, `slic3rutils/plugin_test_utils.hpp`, `filament_group/fg_test_utils.hpp`. `libslic3r` has none and uses the shared header.
 - Test data lives in `tests/data/` and is reached through the `TEST_DATA_DIR` define. Wrap it in `std::string(...)` before joining a path onto it.
 
@@ -56,3 +57,4 @@ Check these before writing your own setup or output-parsing code.
 - Never combine conditions with `&&` or `||` inside one assertion. Split them so Catch2 can print both operands on failure.
 - Compare floats with `WithinAbs` or `WithinRel`, never `==`. Prefer these over `Approx` in new tests.
 - Keep tests self-contained: no shared state, green under `--order rand`.
+- A comma in a test-case name splits the name into two Catch2 test specs, so the binary run by full name matches nothing and exits nonzero with no failure printed. Select such a case with `ctest -R '<prefix regex>'`, or escape the comma as `\,` on the binary.
