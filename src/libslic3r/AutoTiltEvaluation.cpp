@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstring>
 #include <utility>
 
 #include "ClipperUtils.hpp"
@@ -356,30 +357,47 @@ BoundingBoxf3 posed_hull_box(const Model &model, const InstanceSnapshot &snapsho
     return box;
 }
 
+namespace {
+
+// Why one plate cannot print the pose, or nullptr where it can. Membership is the plate's own affected
+// list, never "whichever ids this plate's model happens to carry": two plates can be captured from
+// models that carry the same instance ids, and only one of them prints each of them. An affected id
+// with no snapshot, no object in the plate's model or no defined hull box is "instance_missing";
+// otherwise the first plate_refusal code. Where `posed` is given, the plate's snapshots are collected
+// into it in affected-id order, so the caller applies exactly what was judged.
+const char *plate_refusal_of(const PlateInput &plate, const std::vector<InstanceSnapshot> &all_posed,
+                             std::vector<InstanceSnapshot> *posed)
+{
+    for (const ObjectID &id : plate.affected_instance_ids) {
+        const InstanceSnapshot *snapshot = nullptr;
+        for (const InstanceSnapshot &candidate : all_posed)
+            if (candidate.id == id) {
+                snapshot = &candidate;
+                break;
+            }
+        if (snapshot == nullptr)
+            return "instance_missing";
+        const ModelObject   *object   = object_of_instance(plate.model, id);
+        const BoundingBoxf3  hull_box = posed_hull_box(plate.model, *snapshot);
+        if (object == nullptr || ! hull_box.defined)
+            return "instance_missing";
+        if (const char *refusal = plate_refusal(plate.printable_regions, plate.exclusions, plate.printable_height_mm,
+                                               posed_footprint(*object, snapshot->matrix), hull_box))
+            return refusal;
+        if (posed != nullptr)
+            posed->push_back(*snapshot);
+    }
+    return nullptr;
+}
+
+} // namespace
+
 bool pose_admissible(const EvaluationInput &input, const Pose &pose)
 {
     const std::vector<InstanceSnapshot> all_posed = posed_instances(input, pose);
-    for (const PlateInput &plate : input.plates) {
-        // Membership is the plate's own affected list, never "whichever ids this plate's model
-        // happens to carry": two plates can be captured from models that carry the same instance ids.
-        for (const ObjectID &id : plate.affected_instance_ids) {
-            const InstanceSnapshot *posed = nullptr;
-            for (const InstanceSnapshot &snapshot : all_posed)
-                if (snapshot.id == id) {
-                    posed = &snapshot;
-                    break;
-                }
-            if (posed == nullptr)
-                return false;
-            const ModelObject   *object   = object_of_instance(plate.model, id);
-            const BoundingBoxf3  hull_box = posed_hull_box(plate.model, *posed);
-            if (object == nullptr || ! hull_box.defined)
-                return false;
-            if (plate_refusal(plate.printable_regions, plate.exclusions, plate.printable_height_mm,
-                              posed_footprint(*object, posed->matrix), hull_box) != nullptr)
-                return false;
-        }
-    }
+    for (const PlateInput &plate : input.plates)
+        if (plate_refusal_of(plate, all_posed, nullptr) != nullptr)
+            return false;
     return true;
 }
 
@@ -466,52 +484,23 @@ PoseEvaluation GeneratedEvaluator::evaluate(const Pose &pose, const StopPredicat
 
     for (size_t p = 0; p < m_input.plates.size(); ++ p) {
         const PlateInput &plate = m_input.plates[p];
-
-        // This plate's own affected instances, in capture order. Membership is the plate's affected
-        // list, never "whichever ids this plate's model happens to carry": two plates can be captured
-        // from models that carry the same instance ids, and only one of them prints each of them.
-        std::vector<InstanceSnapshot> posed;
-        for (const ObjectID &id : plate.affected_instance_ids)
-            for (const InstanceSnapshot &snapshot : all_posed)
-                if (snapshot.id == id) {
-                    posed.push_back(snapshot);
-                    break;
-                }
-        if (posed.size() != plate.affected_instance_ids.size()) {
-            out.status = worse(out.status, PoseEvaluation::Status::Unknown);
-            add_reason(out, "instance_missing");
-            continue;
+        if (this->stopped(stop)) {
+            out.status = PoseEvaluation::Status::Canceled;
+            add_reason(out, "canceled");
+            return out;
         }
 
         // The plate has to be able to print what the pose asks for, before anything is sliced: a
         // candidate that leaves the printable ground, rises above the printable height or reaches
-        // into an exclusion is not a candidate. plate_refusal owns which of those it broke, so the
-        // pre-pass and the GUI application read the same rule through pose_admissible.
-        bool admissible = true;
-        for (const InstanceSnapshot &instance : posed) {
-            if (this->stopped(stop)) {
-                out.status = PoseEvaluation::Status::Canceled;
-                add_reason(out, "canceled");
-                return out;
-            }
-            const ModelObject   *object   = object_of_instance(plate.model, instance.id);
-            const BoundingBoxf3  hull_box = posed_hull_box(plate.model, instance);
-            if (object == nullptr || ! hull_box.defined) {
-                out.status = worse(out.status, PoseEvaluation::Status::Unknown);
-                add_reason(out, "instance_missing");
-                admissible = false;
-                break;
-            }
-            if (const char *refusal = plate_refusal(plate.printable_regions, plate.exclusions, plate.printable_height_mm,
-                                                   posed_footprint(*object, instance.matrix), hull_box)) {
-                out.status = worse(out.status, PoseEvaluation::Status::Invalid);
-                add_reason(out, refusal);
-                admissible = false;
-                break;
-            }
-        }
-        if (! admissible)
+        // into an exclusion is not a candidate. plate_refusal_of is the one rule, so the pre-pass and
+        // the GUI application read the same answer through pose_admissible.
+        std::vector<InstanceSnapshot> posed;
+        if (const char *code = plate_refusal_of(plate, all_posed, &posed)) {
+            out.status = worse(out.status, std::strcmp(code, "instance_missing") == 0 ? PoseEvaluation::Status::Unknown :
+                                                                                       PoseEvaluation::Status::Invalid);
+            add_reason(out, code);
             continue;
+        }
 
         // Fresh private state for this pose: the captured plate cloned whole, the affected instances
         // moved on the clone, and a Print that has never seen another pose. Cloning and apply rewrite
