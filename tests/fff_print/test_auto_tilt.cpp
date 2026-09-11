@@ -1226,7 +1226,7 @@ TEST_CASE("Generated evaluation checks the stop predicate before it applies a pr
     REQUIRE_FALSE(evaluator.print(0).objects().empty());
 }
 
-TEST_CASE("A fragile contact in the lower fifth changes the verified ranking and not the estimate", "[AutoTilt]")
+TEST_CASE("A fragile contact in the lower fifth reaches the verified evaluation and not the estimate", "[AutoTilt]")
 {
     const DynamicPrintConfig config = fixture_config({ { "support_style", "tree_slim" },
                                                        { "support_top_z_distance", "0.2" },
@@ -1307,17 +1307,18 @@ TEST_CASE("A fragile contact in the lower fifth changes the verified ranking and
     REQUIRE(verified.root.support_volume_mm3 > 0.);
     REQUIRE(AutoTilt::objectives(verified.root).damage.available); // the ranking had a full tuple to compare
 
-    // The two rankings then disagree, and it is the verified one the object is moved on. The estimate
-    // reads a 6 degree tilt as the pose that removes the most contact; the print, sliced, leaves
-    // required regions of that pose unsupported, so nothing is applied and the object stays as it is.
+    // The estimate reads a 6 degree tilt as the pose that removes the most contact. The print, sliced,
+    // leaves a required region of the pose it applies open, and the search applies it all the same:
+    // an open region ranks on what the pose measured and never keeps the object where it is.
     AutoTilt::LegacyShortlistScorer estimating(shelf, k, inline_runner());
     const AutoTilt::SearchResult    estimated =
         AutoTilt::search(legal, estimating, k, [] { return false; }, [](size_t, size_t) {});
     INFO("estimate outcome " << int(estimated.outcome) << ", best " << estimated.best.tilt_deg << "/" << estimated.best.lean_deg);
     REQUIRE(estimated.outcome == AutoTilt::SearchResult::Outcome::Improved);
     REQUIRE_FALSE(estimated.best.is_root());
-    REQUIRE(verified.outcome == AutoTilt::VerifiedSearchResult::Outcome::NoImprovement);
-    REQUIRE(verified.selected.pose.is_root());
+    REQUIRE(verified.outcome == AutoTilt::VerifiedSearchResult::Outcome::Improved);
+    REQUIRE_FALSE(verified.selected.pose.is_root());
+    REQUIRE(verified.selected.status == AutoTilt::PoseEvaluation::Status::UnresolvedCoverage);
 
     // The shortlist score is one answer over every instance the pose would move: a second copy of the
     // object on the plate is a second copy of the contact, and the estimate says so.

@@ -260,13 +260,12 @@ bool measured_in_full(const PoseEvaluation &evaluation)
     return evaluation.status == PoseEvaluation::Status::Complete || evaluation.status == PoseEvaluation::Status::UnresolvedCoverage;
 }
 
-// Whether one verified pose may stand against the root at all. Stability is a constraint, not a
-// score: measured in full, nothing standing on air, and the centroid over what it stands on. An open
-// required region is not, so the search answers with its best pose even where every pose leaves one:
-// only a report that is not Complete keeps a pose out, which is one nothing measured or one whose
-// support printed nothing against its required regions (SupportAnalysis::measure's
-// EmittedMaterialMissing), whose zero damage and volume would otherwise win every ranking.
-// Compared instance by instance, in capture order.
+// Whether one verified pose may stand against the root at all: measured in full, on the root's
+// instances. Neither an open required region nor the stability reading keeps a pose out, so the
+// search answers with its best pose whatever either says. Only a report that is not Complete does,
+// which is one nothing measured or one whose support printed nothing against its required regions
+// (SupportAnalysis::measure's EmittedMaterialMissing), whose zero damage and volume would otherwise
+// win every ranking.
 bool candidate_admissible(const PoseEvaluation &root, const PoseEvaluation &candidate)
 {
     if (! measured_in_full(candidate))
@@ -276,13 +275,6 @@ bool candidate_admissible(const PoseEvaluation &root, const PoseEvaluation &cand
     for (size_t i = 0; i < candidate.instances.size(); ++ i) {
         const SupportAnalysis::Report &report = candidate.instances[i];
         if (report.status != SupportAnalysis::Report::Status::Complete)
-            return false;
-        if (! SupportAnalysis::stability_admissible(report.stability))
-            return false;
-        // Ids are compared only inside one pose's source problem: stability_no_worse matches groups
-        // by id where the two CoverageKeys are equal and compares only counts and normalized metrics
-        // where they are not, which is what two different poses always are.
-        if (! SupportAnalysis::stability_no_worse(root.instances[i], report))
             return false;
     }
     return true;

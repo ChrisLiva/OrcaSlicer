@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <map>
 #include <stdexcept>
@@ -582,7 +583,7 @@ TEST_CASE("verified search shortlists five finalists by cheap score, deviation a
     }
 }
 
-TEST_CASE("a verified candidate is measured, standing and no less stable than the root", "[AutoTilt]")
+TEST_CASE("a verified candidate is measured in full, whatever its coverage or stability", "[AutoTilt]")
 {
     const Constants         k;
     const std::vector<Pose> legal{Pose{}, Pose{-4, 0}};
@@ -633,50 +634,22 @@ TEST_CASE("a verified candidate is measured, standing and no less stable than th
         REQUIRE(outcome_with(c) == VerifiedSearchResult::Outcome::NoImprovement);
     }
 
-    SECTION("material standing on air, a group that never printed, or a centroid off its footprint cannot win") {
-        PoseEvaluation paths = candidate;
-        paths.instances[0].stability.unsupported_paths = 1;
-        REQUIRE(outcome_with(paths) == VerifiedSearchResult::Outcome::NoImprovement);
-
-        PoseEvaluation unrooted = candidate;
-        unrooted.instances[0].stability.unrooted_groups = 1;
-        REQUIRE(outcome_with(unrooted) == VerifiedSearchResult::Outcome::NoImprovement);
-
-        PoseEvaluation tipping = candidate;
-        tipping.instances[0].stability.min_bed_margin = -0.01;
-        REQUIRE(outcome_with(tipping) == VerifiedSearchResult::Outcome::NoImprovement);
-
-        PoseEvaluation unmeasured = candidate;
-        unmeasured.instances[0].stability.available = false;
-        REQUIRE(outcome_with(unmeasured) == VerifiedSearchResult::Outcome::NoImprovement);
-    }
-
-    SECTION("stability that stands on its own but is worse than the root's cannot win") {
-        // Both readings are admissible on their own terms. The comparison is against the root, so a
-        // pose that is measurably less stable than the pose the object already holds does not win.
-        PoseEvaluation slimmer = candidate;
-        slimmer.instances[0].stability.min_bed_margin = 0.2; // the root holds 0.5
-        REQUIRE(outcome_with(slimmer) == VerifiedSearchResult::Outcome::NoImprovement);
-
-        PoseEvaluation slenderer = candidate;
-        slenderer.instances[0].stability.max_slenderness = 5.; // the root holds 4
-        REQUIRE(outcome_with(slenderer) == VerifiedSearchResult::Outcome::NoImprovement);
-    }
-
-    SECTION("a safer copy never stands in for one that got worse") {
-        PoseEvaluation two_root = root;
-        two_root.instances.push_back(measured_instance(damage_of(0, 0, 4., 10.)));
-        PoseEvaluation two = candidate;
-        two.instances.push_back(measured_instance(damage_of(0, 0, 2., 5.)));
-        two.instances[0].stability.min_bed_margin = 0.9; // one copy stands better
-        two.instances[1].stability.min_bed_margin = 0.1; // and the other stands worse
-
-        FakeScorer   scorer(legal, Contact{100, 100, 1000});
-        FakeVerifier verifier;
-        verifier.set(Pose{}, two_root);
-        verifier.set(Pose{-4, 0}, two);
-        REQUIRE(search_verified(legal, scorer, verifier, k, never_stop, no_progress).outcome ==
-                VerifiedSearchResult::Outcome::NoImprovement);
+    SECTION("stability decides nothing: a pose wins on its damage however it stands") {
+        // Material on air, a group that never printed, a centroid off its footprint, no stability
+        // reading at all, and readings worse than the root's own (a margin of 0.5, slenderness 4).
+        const std::vector<std::function<void(SupportAnalysis::Stability &)>> readings{
+            [](SupportAnalysis::Stability &st) { st.unsupported_paths = 1; },
+            [](SupportAnalysis::Stability &st) { st.unrooted_groups = 1; },
+            [](SupportAnalysis::Stability &st) { st.min_bed_margin = -0.01; },
+            [](SupportAnalysis::Stability &st) { st.available = false; },
+            [](SupportAnalysis::Stability &st) { st.min_bed_margin = 0.2; },
+            [](SupportAnalysis::Stability &st) { st.max_slenderness = 5.; },
+        };
+        for (const auto &reading : readings) {
+            PoseEvaluation c = candidate;
+            reading(c.instances[0].stability);
+            REQUIRE(outcome_with(c) == VerifiedSearchResult::Outcome::Improved);
+        }
     }
 
     SECTION("a pose that measured a different set of instances is not comparable") {
@@ -689,29 +662,6 @@ TEST_CASE("a verified candidate is measured, standing and no less stable than th
         verifier.set(Pose{-4, 0}, candidate); // one instance against the root's two
         REQUIRE(search_verified(legal, scorer, verifier, k, never_stop, no_progress).outcome ==
                 VerifiedSearchResult::Outcome::NoImprovement);
-    }
-
-    SECTION("region ids from another pose's problem are never matched against the root's") {
-        // Two poses prepare two problems, and a region id in one names nothing in the other. The
-        // candidate is compared on its per-instance counts and normalized metrics alone.
-        PoseEvaluation posed_root = root;
-        posed_root.instances[0].key.region_ids = {1, 2};
-        posed_root.instances[0].coverage.resize(2);
-        posed_root.instances[0].coverage[0].emitted_path = true;
-        posed_root.instances[0].coverage[1].emitted_path = true;
-
-        PoseEvaluation c        = candidate;
-        c.instances[0].key.region_ids = {7, 8};
-        c.instances[0].coverage.resize(2);
-        c.instances[0].coverage[0].emitted_path = false;
-        c.instances[0].coverage[1].emitted_path = false;
-
-        FakeScorer   scorer(legal, Contact{100, 100, 1000});
-        FakeVerifier verifier;
-        verifier.set(Pose{}, posed_root);
-        verifier.set(Pose{-4, 0}, c);
-        REQUIRE(search_verified(legal, scorer, verifier, k, never_stop, no_progress).outcome ==
-                VerifiedSearchResult::Outcome::Improved);
     }
 }
 

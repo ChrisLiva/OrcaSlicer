@@ -313,7 +313,7 @@ static std::string reason_phrase(const std::string &code)
     if (code == "cheap_score_not_finite")
         return _u8L("some angles could not be scored");
     if (code == "candidate_inadmissible")
-        return _u8L("every angle tested stood less stably than the current one");
+        return _u8L("no angle tested gave a complete support measurement");
     if (code == "no_candidate_measured")
         return _u8L("no candidate angle could be measured");
     if (code == "instance_missing")
