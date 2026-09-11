@@ -728,9 +728,11 @@ TEST_CASE("Generated evaluation reads an object with no overhang as complete", "
     CHECK(report.status == SupportAnalysis::Report::Status::Complete);
     CHECK(report.coverage_available);
     CHECK(report.stability.available);
+    CHECK(report.stability.unsupported_paths == 0);
+    CHECK(report.stability.unrooted_groups == 0);
+    CHECK(report.stability.min_bed_margin >= 0.);
     CHECK(report.missing_anchor_ids.empty());
     CHECK(report.has_reason(SupportAnalysis::Reason::NoProblem));
-    CHECK(SupportAnalysis::stability_admissible(report.stability));
     CHECK(std::find(evaluation.reason_codes.begin(), evaluation.reason_codes.end(),
                     std::string("required_region_unsupported")) == evaluation.reason_codes.end());
 }

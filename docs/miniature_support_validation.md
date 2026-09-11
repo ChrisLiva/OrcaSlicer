@@ -197,10 +197,13 @@ rows, because the evaluator refuses Organic before slicing; the contact harness 
   classification than the best pose, and regrets at most 0.10.
 - The suite demonstrated what it claims: at least one `redundant_support_reduction` case where some
   configuration's feature-on volume envelope clears its own feature-off envelope by the configured
-  gain while no configuration of that case gives up coverage, stability or damage; at least one
+  gain while no configuration of that case increases `missing_critical_anchors`, `invalid_paths`,
+  `unrooted_groups`, `unknown_contacts`, `inaccessible_groups`, `max_group_risk` or
+  `total_group_risk`; at least one
   `weaker_neck_risk` case whose estimated removal risk improved by the configured gain in some
   configuration; and every `thin_feature_damage` case with damage that did not rise in any
-  configuration.
+  configuration. The feature comparison records `min_bed_margin` and `max_slenderness` but does not
+  compare them between modes.
 
 ### Why seven repeats
 
@@ -355,7 +358,7 @@ The two gates answer different questions and neither substitutes for the other.
 
 | Gate | What a pass means |
 | --- | --- |
-| `automated` | the emitted geometry preserved coverage and stability and improved what the manifest claims, over the corpus, in the slicer |
+| `automated` | the emitted geometry kept the seven compared coverage, path and damage metrics from increasing and improved what the manifest claims, over the corpus, in the slicer |
 | `physical` | the recorded prints of that corpus are complete and the combined treatment measured no worse breakage and a lower removal time or support mass |
 
 A `physical` pass is bounded by what was printed: three repeats of the cases the manifest declares,
@@ -363,8 +366,10 @@ on one printer, with one filament batch and one operator. That is evidence about
 and not a proof that every miniature, material and machine is safe from breakage.
 
 Release claims about reduced physical breakage stay pending until this comparison passes on measured
-prints. Until then the feature's claim is the automated one: the geometry it emits preserves coverage
-and stability and reduces the support it leaves in the places the corpus measures.
+prints. Until then the feature's claim is the automated one: the geometry it emits does not increase
+the seven metrics the feature comparison enforces and reduces the support it leaves in the places
+the corpus measures. The comparison does not claim that `min_bed_margin` or `max_slenderness` stayed
+unchanged.
 
 ## Reading a failure
 

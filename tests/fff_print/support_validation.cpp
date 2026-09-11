@@ -310,7 +310,6 @@ const char *reason_name(SupportAnalysis::Reason reason)
     case SupportAnalysis::Reason::MissingAnchor:          return "MissingAnchor";
     case SupportAnalysis::Reason::StabilityUnavailable:   return "StabilityUnavailable";
     case SupportAnalysis::Reason::DamageUnavailable:      return "DamageUnavailable";
-    case SupportAnalysis::Reason::DifferentProblem:       return "DifferentProblem";
     }
     return "UnknownReason";
 }

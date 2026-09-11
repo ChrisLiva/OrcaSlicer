@@ -485,32 +485,6 @@ size_t critical_anchors_of(const SupportAnalysis::Report &report, const SupportA
     return n;
 }
 
-// A report written out by hand for the stability-predicate case: one prepared problem naming
-// one region whose provenance reached printed material, its contact at `contact_z`, and the four
-// stability measures at a comfortable middle. Each leg changes the one thing it is about.
-SupportAnalysis::Report stability_report(double contact_z)
-{
-    SupportAnalysis::Report report;
-    ExPolygon               witness;
-    witness.contour.points = { Point(scale_(0.), scale_(0.)), Point(scale_(1.), scale_(0.)),
-                               Point(scale_(1.), scale_(1.)), Point(scale_(0.), scale_(1.)) };
-    report.key.region_ids         = { 0 };
-    report.key.region_layers      = { 4 };
-    report.key.region_contact_z   = { contact_z };
-    report.key.witnesses          = { witness };
-    report.key.extrusion_width_mm = 0.42;
-    SupportAnalysis::RegionCoverage region;
-    region.region_id    = 0;
-    region.emitted_path = true;
-    report.coverage     = { region };
-    report.stability.unsupported_paths = 1;
-    report.stability.unrooted_groups   = 2;
-    report.stability.min_bed_margin    = 0.5;
-    report.stability.max_slenderness   = 12.;
-    report.stability.available         = true;
-    return report;
-}
-
 // An axis-aligned rectangle in mm, as an ExPolygon in scaled object coordinates.
 ExPolygon rect_mm(double x0, double y0, double x1, double y1)
 {
@@ -2166,10 +2140,6 @@ TEST_CASE("Support components come from printed slabs that touch, and material w
     const SupportAnalysis::Report lifted = SupportAnalysis::measure(run.object(), MiniatureSupport::Problem(), cut);
     REQUIRE(lifted.stability.available);
     REQUIRE(lifted.stability.unsupported_paths > 0);
-    // A branch a lost bed root disconnected is not admissible, and it is not a candidate the pass it
-    // came from would accept in exchange for itself.
-    REQUIRE_FALSE(SupportAnalysis::stability_admissible(lifted.stability));
-    REQUIRE_FALSE(SupportAnalysis::stability_no_worse(*report, lifted));
 
     // A band of printed material removed in the middle: the drawn masks still span the gap and the
     // routed provenance still runs through it, and neither joins what printed material no longer
@@ -2221,7 +2191,6 @@ TEST_CASE("Support components come from printed slabs that touch, and material w
     REQUIRE(floating.stability.available);
     // The support that is left hangs a first layer above the plate, so it holds nothing up ...
     REQUIRE(floating.stability.unsupported_paths > 0);
-    REQUIRE_FALSE(SupportAnalysis::stability_admissible(floating.stability));
     // ... and none of it is ground: what the object stands on is its own first layer alone.
     const double model_ground_mm2 =
         area(union_ex(thin.object().layers().front()->lslices)) * SCALING_FACTOR * SCALING_FACTOR;
@@ -2369,8 +2338,6 @@ TEST_CASE("Branch slenderness divides the longest unbraced run by the thinnest p
     REQUIRE_THAT(thin.report()->stability.object_height_mm,
                  WithinRel(thick.report()->stability.object_height_mm, 1e-9));
     REQUIRE(thin.report()->stability.max_slenderness > thick.report()->stability.max_slenderness);
-    // So the thinner pass is not one the thicker pass would accept in exchange for itself.
-    REQUIRE_FALSE(SupportAnalysis::stability_no_worse(*thick.report(), *thin.report()));
 
     // The diameter a routed area carries is the width of the section that was drawn for it, not the
     // radius the router planned for its node.
@@ -2412,107 +2379,6 @@ TEST_CASE("Branch slenderness divides the longest unbraced run by the thinnest p
     // resolution at zero, simplification still moves these paths by about a millionth of themselves.
     REQUIRE_THAT(rafted.report()->stability.bed_footprint_mm2,
                  WithinRel(area(union_ex(raft_ground)) * SCALING_FACTOR * SCALING_FACTOR, 1e-5));
-}
-
-TEST_CASE("stability_no_worse fails any measure that got worse and matches no source id across poses", "[MiniatureContacts]")
-{
-    const SupportAnalysis::Report reference = stability_report(0.8);
-
-    // The same numbers again: nothing got worse.
-    REQUIRE(SupportAnalysis::stability_no_worse(reference, stability_report(0.8)));
-
-    // An unmeasured domain on either side establishes nothing, so it answers no rather than yes.
-    {
-        SupportAnalysis::Report unknown = stability_report(0.8);
-        unknown.stability.available     = false;
-        REQUIRE_FALSE(SupportAnalysis::stability_no_worse(reference, unknown));
-        REQUIRE_FALSE(SupportAnalysis::stability_no_worse(unknown, reference));
-    }
-
-    // Counts compare exactly and in both directions: one more floating path or one more routed group
-    // that never printed fails, one fewer passes.
-    {
-        SupportAnalysis::Report worse = stability_report(0.8);
-        worse.stability.unsupported_paths = 2;
-        REQUIRE_FALSE(SupportAnalysis::stability_no_worse(reference, worse));
-        SupportAnalysis::Report better = stability_report(0.8);
-        better.stability.unsupported_paths = 0;
-        REQUIRE(SupportAnalysis::stability_no_worse(reference, better));
-    }
-    {
-        SupportAnalysis::Report worse = stability_report(0.8);
-        worse.stability.unrooted_groups = 3;
-        REQUIRE_FALSE(SupportAnalysis::stability_no_worse(reference, worse));
-    }
-
-    // The floating measures carry the numeric tolerance: a difference inside it is not a difference,
-    // and a difference outside it is.
-    {
-        SupportAnalysis::Report same = stability_report(0.8);
-        same.stability.min_bed_margin = 0.5 - 4e-7;
-        REQUIRE(SupportAnalysis::stability_no_worse(reference, same));
-        SupportAnalysis::Report worse = stability_report(0.8);
-        worse.stability.min_bed_margin = 0.5 - 1e-4;
-        REQUIRE_FALSE(SupportAnalysis::stability_no_worse(reference, worse));
-        SupportAnalysis::Report wider = stability_report(0.8);
-        wider.stability.min_bed_margin = 0.6;
-        REQUIRE(SupportAnalysis::stability_no_worse(reference, wider));
-    }
-    {
-        SupportAnalysis::Report same = stability_report(0.8);
-        same.stability.max_slenderness = 12. + 1e-5;
-        REQUIRE(SupportAnalysis::stability_no_worse(reference, same));
-        SupportAnalysis::Report worse = stability_report(0.8);
-        worse.stability.max_slenderness = 12.001;
-        REQUIRE_FALSE(SupportAnalysis::stability_no_worse(reference, worse));
-        SupportAnalysis::Report stouter = stability_report(0.8);
-        stouter.stability.max_slenderness = 8.;
-        REQUIRE(SupportAnalysis::stability_no_worse(reference, stouter));
-    }
-
-    // Same prepared problem, so the groups answer one for one: a group cannot leave the comparison
-    // by losing the provenance that put it in, however good the four measures look.
-    {
-        SupportAnalysis::Report dropped = stability_report(0.8);
-        dropped.coverage.front().emitted_path = false;
-        dropped.stability.unsupported_paths   = 0;
-        dropped.stability.unrooted_groups     = 0;
-        REQUIRE_FALSE(SupportAnalysis::stability_no_worse(reference, dropped));
-    }
-
-    // A different prepared problem is a different pose. Its source ids name different regions, so
-    // nothing is matched by id across the pair and only the measures are compared.
-    {
-        SupportAnalysis::Report elsewhere = stability_report(1.0);
-        elsewhere.coverage.front().emitted_path = false;
-        REQUIRE(SupportAnalysis::stability_no_worse(reference, elsewhere));
-        SupportAnalysis::Report elsewhere_worse = stability_report(1.0);
-        elsewhere_worse.stability.max_slenderness = 20.;
-        REQUIRE_FALSE(SupportAnalysis::stability_no_worse(reference, elsewhere_worse));
-    }
-
-    // Absolute admissibility is zero floating paths, zero routed groups that never printed and a
-    // margin that is not negative. No slenderness threshold is invented to sit beside them.
-    {
-        SupportAnalysis::Report admissible = stability_report(0.8);
-        admissible.stability.unsupported_paths = 0;
-        admissible.stability.unrooted_groups   = 0;
-        admissible.stability.min_bed_margin    = 0.;
-        admissible.stability.max_slenderness   = 1e6;
-        REQUIRE(SupportAnalysis::stability_admissible(admissible.stability));
-        SupportAnalysis::Stability outside = admissible.stability;
-        outside.min_bed_margin = -1e-6;
-        REQUIRE_FALSE(SupportAnalysis::stability_admissible(outside));
-        SupportAnalysis::Stability floating = admissible.stability;
-        floating.unsupported_paths = 1;
-        REQUIRE_FALSE(SupportAnalysis::stability_admissible(floating));
-        SupportAnalysis::Stability unrouted = admissible.stability;
-        unrouted.unrooted_groups = 1;
-        REQUIRE_FALSE(SupportAnalysis::stability_admissible(unrouted));
-        SupportAnalysis::Stability unknown = admissible.stability;
-        unknown.available = false;
-        REQUIRE_FALSE(SupportAnalysis::stability_admissible(unknown));
-    }
 }
 
 TEST_CASE("The support warning names a printable critical region without material or a group with no root", "[MiniatureContacts]")
@@ -2586,8 +2452,6 @@ TEST_CASE("A branch roots on the model only where the settings allow it", "[Mini
         SupportAnalysis::measure(plate_only.object(), MiniatureSupport::Problem(), *emitted);
     REQUIRE(forbidden.stability.available);
     REQUIRE(forbidden.stability.unsupported_paths > anywhere.report()->stability.unsupported_paths);
-    REQUIRE_FALSE(SupportAnalysis::stability_admissible(forbidden.stability));
-    REQUIRE_FALSE(SupportAnalysis::stability_no_worse(*anywhere.report(), forbidden));
 
     // The support material a print laid from `z` up, read off the extrusions the measurement reads.
     const auto volume_above = [](const PrintObject &object, double z) {
@@ -2761,12 +2625,13 @@ TEST_CASE("An overhang no branch can reach warns the user, and one every branch 
     REQUIRE(reachable.report()->coverage.front().covered_count() > 0);
     REQUIRE(reachable.report()->coverage.front().anchored);
     REQUIRE(reachable.report()->missing_anchor_ids.empty());
-    // And that condition holds: the generator takes the extrusions resting on nothing out of its
-    // toolpaths after generate_toolpaths (remove_floating_toolpaths), so the paths this pass laid are
-    // admissible run after run of a generator that is otherwise not reproducible (AGENTS.md
-    // "Testing"), the requirement is met, and nothing reaches the user.
+    // The generator takes the extrusions resting on nothing out of its toolpaths after
+    // generate_toolpaths (remove_floating_toolpaths), so the paths this pass laid stay rooted run
+    // after run of a generator that is otherwise not reproducible (AGENTS.md "Testing").
+    REQUIRE(reachable.report()->stability.available);
     REQUIRE(reachable.report()->stability.unsupported_paths == 0);
-    REQUIRE(SupportAnalysis::stability_admissible(reachable.report()->stability));
+    REQUIRE(reachable.report()->stability.unrooted_groups == 0);
+    REQUIRE(reachable.report()->stability.min_bed_margin >= 0.);
     REQUIRE_FALSE(SupportAnalysis::support_unresolved(*reachable.report()));
     REQUIRE(reachable.object().step_state_with_warnings(posSupportMaterial).warnings.empty());
 }

@@ -1003,37 +1003,6 @@ DamageComparison compare_damage(const Damage &was, const Damage &is)
     return { 0, DamageField::None };
 }
 
-bool stability_no_worse(const Report &reference, const Report &candidate)
-{
-    const Stability &was = reference.stability, &is = candidate.stability;
-    // An unmeasured domain establishes nothing. Non-regression has to be shown, not assumed from a
-    // field that was never filled in.
-    if (! was.available || ! is.available)
-        return false;
-    // Counts are counts: they compare exactly, with no tolerance to hide one behind.
-    if (is.unsupported_paths > was.unsupported_paths || is.unrooted_groups > was.unrooted_groups)
-        return false;
-    if (is.min_bed_margin < was.min_bed_margin - comparison_epsilon(was.min_bed_margin, is.min_bed_margin))
-        return false;
-    if (is.max_slenderness > was.max_slenderness + comparison_epsilon(was.max_slenderness, is.max_slenderness))
-        return false;
-    // Equal keys mean one prepared problem, whose groups answer one for one: a group may not leave
-    // the comparison by losing the provenance that put it in. Different keys are different poses,
-    // whose source ids name different regions, so nothing is matched by id across them and only the
-    // aggregate measures above are compared.
-    if (reference.key == candidate.key)
-        for (size_t i = 0; i < reference.coverage.size() && i < candidate.coverage.size(); ++ i)
-            if (reference.coverage[i].emitted_path && ! candidate.coverage[i].emitted_path)
-                return false;
-    return true;
-}
-
-bool stability_admissible(const Stability &stability)
-{
-    return stability.available && stability.unsupported_paths == 0 && stability.unrooted_groups == 0 &&
-           stability.min_bed_margin >= 0.;
-}
-
 bool support_unresolved(const Report &report)
 {
     for (const RegionCoverage &region : report.coverage)

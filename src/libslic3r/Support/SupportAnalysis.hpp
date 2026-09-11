@@ -24,7 +24,6 @@ enum class Reason : uint8_t {
     MissingAnchor,          // some required region reached no emitted material
     StabilityUnavailable,
     DamageUnavailable,
-    DifferentProblem,       // the two reports were measured from different prepared problems
 };
 
 // One printed slab: the closed Z interval [bottom_z, print_z] one layer occupies and the ground its
@@ -281,23 +280,6 @@ Report refresh_bed_footprint(const Report &report, const PrintObject &object, co
 // the thickness of a strip. An empty or degenerate section measures zero, which the stability
 // measurement reports as unknown rather than as infinitely slender.
 double cross_section_width_mm(const ExPolygon &section);
-
-// No measure of the candidate worse than the reference's: no more floating material, no more routed
-// groups that never printed, no smaller bed margin and no larger slenderness beyond the numeric
-// tolerance. Reports whose CoverageKeys match came from one prepared problem, so their groups are
-// compared one for one and none may drop out by losing its provenance; reports from different
-// problems are different poses, whose source ids name different things and are never matched.
-// An unmeasured stability domain on either side establishes nothing and answers false.
-// This is the comparison where nothing was removed between the two readings - two poses of one
-// object, each carrying the support its own pose asked for, which is what
-// `AutoTilt::candidate_admissible` asks.
-bool stability_no_worse(const Report &reference, const Report &candidate);
-
-// Admissible on its own terms, with nothing to compare against: measured, standing on nothing that
-// floats, carrying no routed group that never printed, and holding its centroid over what it stands
-// on. No slenderness limit is set here: nothing in the tree measures where a printed branch buckles,
-// so a threshold on what this generator may produce would be an invented number.
-bool stability_admissible(const Stability &stability);
 
 // Whether one measured pass left a requirement of its own prepared problem open, read on its own
 // terms with nothing to compare it against. Not "every witness cell covered" and not "every contact
