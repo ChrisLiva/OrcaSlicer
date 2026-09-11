@@ -151,12 +151,11 @@ constexpr size_t verified_finalist_count = 5;
 // best cheap score first, and the two counts say how much was actually measured, so no caller can
 // read a `verified_finalist_count`-finalist answer as a swept grid. Canceled says the search stopped
 // before it settled;
-// VerificationUnavailable says the root itself was never measured; UnresolvedCoverage says the root
-// pose leaves a required region of the object open, which is a finding about the object rather than
-// about any candidate.
+// VerificationUnavailable says the root itself was never measured. Coverage decides no outcome: a
+// root or candidate that leaves a required region open is ranked on what it measured.
 struct VerifiedSearchResult
 {
-    enum class Outcome { Canceled, NoImprovement, Improved, VerificationUnavailable, UnresolvedCoverage };
+    enum class Outcome { Canceled, NoImprovement, Improved, VerificationUnavailable };
 
     Outcome                  outcome = Outcome::Canceled;
     PoseEvaluation           root;

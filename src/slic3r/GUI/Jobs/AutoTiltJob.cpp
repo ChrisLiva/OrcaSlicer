@@ -304,7 +304,7 @@ static std::string reason_phrase(const std::string &code)
 {
     if (code == "no_root_pose")
         return _u8L("the current orientation was not among the angles tested");
-    if (code == "root_coverage_unresolved" || code == "required_region_unsupported")
+    if (code == "required_region_unsupported")
         return _u8L("a required support region stayed unreachable");
     if (code == "root_analysis_unavailable" || code == "analysis_missing" || code == "analysis_incomplete")
         return _u8L("the support analysis did not finish");
@@ -313,7 +313,7 @@ static std::string reason_phrase(const std::string &code)
     if (code == "cheap_score_not_finite")
         return _u8L("some angles could not be scored");
     if (code == "candidate_inadmissible")
-        return _u8L("every angle tested gave up coverage, stability or removal access");
+        return _u8L("every angle tested stood less stably than the current one");
     if (code == "no_candidate_measured")
         return _u8L("no candidate angle could be measured");
     if (code == "instance_missing")
@@ -341,11 +341,15 @@ static std::string reason_phrase(const std::string &code)
     return code;
 }
 
-// The root's own code first: search_verified files every root it cannot use under
-// "root_analysis_unavailable", which names none of the reasons the root carries.
+// search_verified files every root it cannot use under "root_analysis_unavailable", which names none
+// of the reasons the root carries, so there the root's own code comes first. On any other outcome the
+// root was used, and a code it carries (an open required region) is not why the orientation was kept.
 std::string AutoTiltJob::reason_detail() const
 {
-    for (const std::vector<std::string> *codes : {&m_verified.root.reason_codes, &m_verified.reason_codes})
+    const bool root_first = m_verified.outcome == AutoTilt::VerifiedSearchResult::Outcome::VerificationUnavailable;
+    const std::vector<std::string> &first  = root_first ? m_verified.root.reason_codes : m_verified.reason_codes;
+    const std::vector<std::string> &second = root_first ? m_verified.reason_codes : m_verified.root.reason_codes;
+    for (const std::vector<std::string> *codes : {&first, &second})
         for (const std::string &code : *codes)
             // Cancellation is already silent, so it is never the reason a result is shown for.
             if (code != "canceled")
@@ -553,10 +557,6 @@ void AutoTiltJob::finalize(bool canceled, std::exception_ptr &eptr)
             break;
         case AutoTilt::VerifiedSearchResult::Outcome::NoImprovement:
             push_result(with_skipped_clause(_u8L("No verified improvement found. Model orientation was kept.") + reason_detail()));
-            break;
-        case AutoTilt::VerifiedSearchResult::Outcome::UnresolvedCoverage:
-            push_result(
-                with_skipped_clause(_u8L("Some required support regions remain unreachable. Model orientation was kept.") + reason_detail()));
             break;
         case AutoTilt::VerifiedSearchResult::Outcome::VerificationUnavailable:
             push_result(with_skipped_clause(_u8L("Support verification was unavailable. Model orientation was kept.") + reason_detail()));

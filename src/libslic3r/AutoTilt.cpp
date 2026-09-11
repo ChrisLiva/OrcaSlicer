@@ -253,18 +253,29 @@ Gain gain_over_root(const Objectives &root, const Objectives &candidate, const P
     return out;
 }
 
-// Whether one verified pose may stand against the root at all. Coverage and stability are
-// constraints, not scores: measured in full, no required region left open, nothing standing on air,
-// and the centroid over what it stands on. Compared instance by instance, in capture order.
+// Whether every affected instance of a pose was measured. A pose whose support leaves a required
+// region open was measured all the same, and is ranked on what it measured.
+bool measured_in_full(const PoseEvaluation &evaluation)
+{
+    return evaluation.status == PoseEvaluation::Status::Complete || evaluation.status == PoseEvaluation::Status::UnresolvedCoverage;
+}
+
+// Whether one verified pose may stand against the root at all. Stability is a constraint, not a
+// score: measured in full, nothing standing on air, and the centroid over what it stands on. An open
+// required region is not, so the search answers with its best pose even where every pose leaves one:
+// only a report that is not Complete keeps a pose out, which is one nothing measured or one whose
+// support printed nothing against its required regions (SupportAnalysis::measure's
+// EmittedMaterialMissing), whose zero damage and volume would otherwise win every ranking.
+// Compared instance by instance, in capture order.
 bool candidate_admissible(const PoseEvaluation &root, const PoseEvaluation &candidate)
 {
-    if (candidate.status != PoseEvaluation::Status::Complete)
+    if (! measured_in_full(candidate))
         return false;
     if (candidate.instances.empty() || candidate.instances.size() != root.instances.size())
         return false;
     for (size_t i = 0; i < candidate.instances.size(); ++ i) {
         const SupportAnalysis::Report &report = candidate.instances[i];
-        if (report.status != SupportAnalysis::Report::Status::Complete || ! report.missing_anchor_ids.empty())
+        if (report.status != SupportAnalysis::Report::Status::Complete)
             return false;
         if (! SupportAnalysis::stability_admissible(report.stability))
             return false;
@@ -322,7 +333,7 @@ Objectives objectives(const PoseEvaluation &evaluation)
     Objectives out;
     // A pose that was not measured in full is not a pose with zero damage: nothing about it is
     // comparable, and `available` says so rather than a field standing in for the answer.
-    if (evaluation.status != PoseEvaluation::Status::Complete || evaluation.instances.empty())
+    if (! measured_in_full(evaluation) || evaluation.instances.empty())
         return out;
     for (const SupportAnalysis::Report &report : evaluation.instances) {
         // A reading that is not a number is not a low one: an available field has to be finite, so a
@@ -408,15 +419,10 @@ VerifiedSearchResult search_verified(const std::vector<Pose> &legal,
     tick();
     switch (result.root.status) {
     case PoseEvaluation::Status::Complete:
-        break;
+    case PoseEvaluation::Status::UnresolvedCoverage:
+        break; // a root that leaves a required region open is measured, and candidates rank against it
     case PoseEvaluation::Status::Canceled:
         canceled();
-        return result;
-    case PoseEvaluation::Status::UnresolvedCoverage:
-        // The object's own finding, not a candidate's: what the root pose leaves open is what the
-        // user is told about, and no pose is applied to cover it up.
-        result.outcome = VerifiedSearchResult::Outcome::UnresolvedCoverage;
-        add_reason(result, "root_coverage_unresolved");
         return result;
     default:
         result.outcome = VerifiedSearchResult::Outcome::VerificationUnavailable;

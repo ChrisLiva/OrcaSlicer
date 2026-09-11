@@ -477,7 +477,7 @@ TEST_CASE("verified search evaluates the root in full before it considers any po
         REQUIRE(scorer.calls().empty()); // no cheap sweep is worth running for a root nothing measured
     }
 
-    SECTION("unresolved root coverage leaves the object where it stands") {
+    SECTION("unresolved root coverage does not stop the search") {
         FakeScorer     scorer(legal, Contact{100, 100, 1000});
         PoseEvaluation root = measured_pose(damage_of(0, 0, 4., 10.), 100.);
         root.status         = PoseEvaluation::Status::UnresolvedCoverage;
@@ -487,9 +487,9 @@ TEST_CASE("verified search evaluates the root in full before it considers any po
 
         const VerifiedSearchResult r = search_verified(legal, scorer, verifier, k, never_stop, no_progress);
 
-        REQUIRE(r.outcome == VerifiedSearchResult::Outcome::UnresolvedCoverage);
-        REQUIRE(r.selected.pose.is_root());
-        REQUIRE(r.verified == 1);
+        REQUIRE(r.outcome == VerifiedSearchResult::Outcome::Improved);
+        REQUIRE(r.selected.pose == Pose{-4, 0});
+        REQUIRE(r.verified > 1);
     }
 }
 
@@ -582,7 +582,7 @@ TEST_CASE("verified search shortlists five finalists by cheap score, deviation a
     }
 }
 
-TEST_CASE("a verified candidate is complete, resolved, standing and no less stable than the root", "[AutoTilt]")
+TEST_CASE("a verified candidate is measured, standing and no less stable than the root", "[AutoTilt]")
 {
     const Constants         k;
     const std::vector<Pose> legal{Pose{}, Pose{-4, 0}};
@@ -604,18 +604,26 @@ TEST_CASE("a verified candidate is complete, resolved, standing and no less stab
     }
 
     SECTION("an incomplete pose measurement cannot win") {
-        for (const PoseEvaluation::Status status : {PoseEvaluation::Status::UnresolvedCoverage,
-                                                    PoseEvaluation::Status::Unknown,
-                                                    PoseEvaluation::Status::Invalid}) {
+        for (const PoseEvaluation::Status status : {PoseEvaluation::Status::Unknown, PoseEvaluation::Status::Invalid}) {
             PoseEvaluation c = candidate;
             c.status         = status;
             REQUIRE(outcome_with(c) == VerifiedSearchResult::Outcome::NoImprovement);
         }
     }
 
-    SECTION("an unreached anchor cannot win, whatever the pose saved") {
-        PoseEvaluation c = candidate;
+    SECTION("a pose that leaves a required region open still wins on what it measured") {
+        PoseEvaluation c                  = candidate;
+        c.status                          = PoseEvaluation::Status::UnresolvedCoverage;
         c.instances[0].missing_anchor_ids = {17};
+        REQUIRE(outcome_with(c) == VerifiedSearchResult::Outcome::Improved);
+    }
+
+    SECTION("a pose whose support printed nothing against its required regions cannot win") {
+        // What SupportAnalysis::measure reports when nothing was emitted: no material, so no damage
+        // and no volume, which would otherwise rank above every pose that printed anything.
+        PoseEvaluation c        = candidate;
+        c.status                = PoseEvaluation::Status::UnresolvedCoverage;
+        c.instances[0].status   = SupportAnalysis::Report::Status::UnresolvedCoverage;
         REQUIRE(outcome_with(c) == VerifiedSearchResult::Outcome::NoImprovement);
     }
 
@@ -855,8 +863,9 @@ TEST_CASE("the verified oracle answers to the full evaluation and never to the c
         // Nothing printed at all, and a required region left open for it: material saved buys back
         // no coverage.
         scorer.set(Pose{-4, 0}, Contact{20, 20, 1000});
-        PoseEvaluation uncovered = measured_pose(damage_of(0, 0, 0., 0.), 0.);
-        uncovered.status         = PoseEvaluation::Status::UnresolvedCoverage;
+        PoseEvaluation uncovered       = measured_pose(damage_of(0, 0, 0., 0.), 0.);
+        uncovered.status               = PoseEvaluation::Status::UnresolvedCoverage;
+        uncovered.instances[0].status  = SupportAnalysis::Report::Status::UnresolvedCoverage;
         verifier.set(Pose{-4, 0}, uncovered);
         // Half the removal risk on the same material.
         scorer.set(Pose{-6, 0}, Contact{30, 30, 1000});
