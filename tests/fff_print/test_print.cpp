@@ -300,6 +300,43 @@ TEST_CASE("Print::validate tolerates a null warnings pointer", "[Print][validate
     CHECK(err.string.empty());
 }
 
+TEST_CASE("Print::apply reads a Bambu Lab printer_model as a BBL printer for validate", "[Print][validate]")
+{
+    // Relative extrusion on a Marlin flavour with no "G92 E0" in either layer-change G-code, the
+    // settings every Bambu Lab profile carries. validate() accepts them only on a BBL printer, and a
+    // Print no caller told the vendor takes it off printer_model.
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({ { "gcode_flavor", "marlin" }, { "use_relative_e_distances", "1" },
+                                    { "layer_change_gcode", "" }, { "before_layer_change_gcode", "" } });
+    Slic3r::Model model;
+    ModelObject  *object = model.add_object();
+    object->add_volume(cube(20));
+    object->add_instance();
+    object->ensure_on_bed();
+
+    SECTION("a Bambu Lab printer validates") {
+        config.set_deserialize_strict({ { "printer_model", "Bambu Lab A1 mini" } });
+        Slic3r::Print print;
+        print.auto_assign_extruders(object);
+        print.apply(model, config);
+        CHECK(print.validate().string.empty());
+    }
+    SECTION("any other printer is told to reset the extruder at each layer") {
+        config.set_deserialize_strict({ { "printer_model", "Generic Marlin Printer" } });
+        Slic3r::Print print;
+        print.auto_assign_extruders(object);
+        print.apply(model, config);
+        CHECK(print.validate().opt_key == "before_layer_change_gcode");
+    }
+    SECTION("a config naming no printer model keeps the vendor its caller assigned") {
+        Slic3r::Print print;
+        print.is_BBL_printer() = true;
+        print.auto_assign_extruders(object);
+        print.apply(model, config);
+        CHECK(print.validate().string.empty());
+    }
+}
+
 TEST_CASE("A default slice emits perimeter, infill, and skirt", "[Print]")
 {
     const std::string gcode = slice({ cube(20) }, {

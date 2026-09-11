@@ -43,9 +43,6 @@ struct PlateInput
     Vec3d                           plate_origin = Vec3d::Zero();
     Model                           model;
     DynamicPrintConfig              full_config;
-    // PresetBundle::is_bbl_vendor() for the printer the plate slices on. Print::validate reads it through
-    // Print::is_BBL_printer(), which a bare Print leaves false.
-    bool                            bbl_printer = false;
     std::vector<ObjectID>           affected_instance_ids;
     ExPolygons                      printable_regions;
     std::vector<BoundingBoxf3>      exclusions;
@@ -65,8 +62,7 @@ struct EvaluationInput
 
 // Whether the scene a result was measured on is still the scene it would be applied to. Every value
 // the measurement rests on is compared: the plate a candidate has to fit, the config it would slice
-// under - whole, so a key that only one side carries is a difference - and the printer vendor flag
-// that validates it, the mesh behind each volume,
+// under - whole, so a key that only one side carries is a difference - the mesh behind each volume,
 // every object, volume and instance transform, override, paint timestamp, layer profile and range,
 // and which plate each instance sits on. Instances and affected ids are matched by id and sorted
 // before comparison, so reordering those is not a change, while volumes compare in list order; a

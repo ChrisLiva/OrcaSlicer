@@ -1093,25 +1093,25 @@ TEST_CASE("Generated evaluation validates a BBL printer's plate the way the slic
 {
     // The settings a Bambu Lab A1 mini profile slices under: relative extrusion on a Marlin flavour
     // with no "G92 E0" in either layer-change G-code, which Print::validate refuses on any printer
-    // that is not a BBL one.
+    // that is not a BBL one. The evaluator's own Print knows the vendor only from printer_model.
     Slic3r::Model model = Slic3r::Test::model("fin", fin_fixture());
     ModelObject  *obj   = model.objects.front();
     obj->instances.front()->set_offset(Vec3d(100., 100., 0.));
     obj->ensure_on_bed();
-    const DynamicPrintConfig config = fixture_config({ { "support_style", "tree_slim" }, { "gcode_flavor", "marlin" },
-                                                       { "use_relative_e_distances", "1" }, { "layer_change_gcode", "" },
-                                                       { "before_layer_change_gcode", "" }, { "brim_type", "no_brim" } });
-    AutoTilt::EvaluationInput input = plate_input(model, config, { obj->instances.front()->id() });
+    DynamicPrintConfig config = fixture_config({ { "support_style", "tree_slim" }, { "gcode_flavor", "marlin" },
+                                                 { "use_relative_e_distances", "1" }, { "layer_change_gcode", "" },
+                                                 { "before_layer_change_gcode", "" }, { "brim_type", "no_brim" } });
 
     SECTION("a BBL printer's plate is sliced and measured") {
-        input.plates.front().bbl_printer = true;
-        AutoTilt::GeneratedEvaluator   evaluator(input, inline_runner());
+        config.set_deserialize_strict({ { "printer_model", "Bambu Lab A1 mini" } });
+        AutoTilt::GeneratedEvaluator   evaluator(plate_input(model, config, { obj->instances.front()->id() }), inline_runner());
         const AutoTilt::PoseEvaluation evaluation = evaluator.evaluate(AutoTilt::Pose{}, {});
         INFO("reasons: " << reasons_of(evaluation));
         REQUIRE(evaluation.instances.size() == 1);
     }
     SECTION("any other printer's plate is refused before slicing") {
-        AutoTilt::GeneratedEvaluator   evaluator(input, inline_runner());
+        config.set_deserialize_strict({ { "printer_model", "Generic Marlin Printer" } });
+        AutoTilt::GeneratedEvaluator   evaluator(plate_input(model, config, { obj->instances.front()->id() }), inline_runner());
         const AutoTilt::PoseEvaluation evaluation = evaluator.evaluate(AutoTilt::Pose{}, {});
         REQUIRE(evaluation.status == AutoTilt::PoseEvaluation::Status::Invalid);
         REQUIRE(evaluation.reason_codes == std::vector<std::string>{ "validate_rejected" });
@@ -1446,9 +1446,7 @@ private:
 };
 
 // One captured plate whose printable ground is the bed the config declares, so a pose the plate
-// cannot hold is refused by the same exact containment test the production evaluation applies. The
-// printer counts as a BBL one by the CLI's rule, a printer_model starting "Bambu Lab", so a Bambu
-// project validates here as it does under --slice.
+// cannot hold is refused by the same exact containment test the production evaluation applies.
 AutoTilt::EvaluationInput corpus_input(const Slic3r::Model &model, const DynamicPrintConfig &config)
 {
     std::vector<ObjectID> affected;
@@ -1457,7 +1455,6 @@ AutoTilt::EvaluationInput corpus_input(const Slic3r::Model &model, const Dynamic
             affected.push_back(instance->id());
     AutoTilt::EvaluationInput input = plate_input(model, config, affected);
     input.plates.front().printable_regions = ExPolygons{ ExPolygon(Polygon(get_bed_shape(config))) };
-    input.plates.front().bbl_printer = config.has("printer_model") && config.opt_string("printer_model").rfind("Bambu Lab", 0) == 0;
     return input;
 }
 

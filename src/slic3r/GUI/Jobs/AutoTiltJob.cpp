@@ -179,7 +179,6 @@ static AutoTilt::EvaluationInput capture_inputs(Plater &plater, int obj_idx)
         // then that plate's own overrides on top of it.
         captured.full_config = wxGetApp().preset_bundle->full_config(false);
         captured.full_config.apply(*plate->config());
-        captured.bbl_printer = wxGetApp().preset_bundle->is_bbl_vendor();
 
         // The plate's printable ground, which need not be a rectangle, in plate coordinates. On a
         // printer carrying extruder_printable_area this is the area every extruder shares, not the
