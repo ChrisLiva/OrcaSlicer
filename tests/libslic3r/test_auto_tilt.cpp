@@ -1043,6 +1043,11 @@ TEST_CASE("evaluation_inputs_unchanged rejects a changed plate config or members
         REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
         REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(live, captured));
     }
+    SECTION("a printer of another vendor is a change") {
+        AutoTilt::EvaluationInput live = captured;
+        live.plates.front().bbl_printer = ! captured.plates.front().bbl_printer;
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
     SECTION("the selected object leaving the plate is a change") {
         AutoTilt::EvaluationInput live = captured;
         live.plates.front().affected_instance_ids.pop_back();

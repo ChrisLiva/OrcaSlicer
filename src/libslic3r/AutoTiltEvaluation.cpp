@@ -176,7 +176,7 @@ bool plate_shell_unchanged(const PlateInput &a, const PlateInput &b)
         return false;
     // Complete equality. `equals()` and `diff()` ignore keys the other side does not carry, so an
     // override that appeared or vanished while the search ran would read as no change at all.
-    if (! (a.full_config == b.full_config))
+    if (! (a.full_config == b.full_config) || a.bbl_printer != b.bbl_printer)
         return false;
     if (a.printable_regions != b.printable_regions || a.printable_height_mm != b.printable_height_mm ||
         a.exclusions.size() != b.exclusions.size())
@@ -514,6 +514,9 @@ PoseEvaluation GeneratedEvaluator::evaluate(const Pose &pose, const StopPredicat
                         }
             m_prints[p] = std::make_unique<Print>();
             m_prints[p]->set_status_silent();
+            // Set before validate() reads it, as BackgroundSlicingProcess does: a BBL printer's relative-E
+            // Marlin config carries no "G92 E0", which validate() refuses on any other printer.
+            m_prints[p]->is_BBL_printer() = plate.bbl_printer;
             // TreeSupport places the machine border it clips every support area to by this origin.
             m_prints[p]->set_plate_origin(plate.plate_origin);
             m_prints[p]->apply(*m_models[p], plate.full_config);

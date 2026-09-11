@@ -179,6 +179,7 @@ static AutoTilt::EvaluationInput capture_inputs(Plater &plater, int obj_idx)
         // then that plate's own overrides on top of it.
         captured.full_config = wxGetApp().preset_bundle->full_config(false);
         captured.full_config.apply(*plate->config());
+        captured.bbl_printer = wxGetApp().preset_bundle->is_bbl_vendor();
 
         // The plate's printable ground, which need not be a rectangle, in plate coordinates. On a
         // printer carrying extruder_printable_area this is the area every extruder shares, not the
@@ -341,9 +342,11 @@ static std::string reason_phrase(const std::string &code)
     return code;
 }
 
+// The root's own code first: search_verified files every root it cannot use under
+// "root_analysis_unavailable", which names none of the reasons the root carries.
 std::string AutoTiltJob::reason_detail() const
 {
-    for (const std::vector<std::string> *codes : {&m_verified.reason_codes, &m_verified.root.reason_codes})
+    for (const std::vector<std::string> *codes : {&m_verified.root.reason_codes, &m_verified.reason_codes})
         for (const std::string &code : *codes)
             // Cancellation is already silent, so it is never the reason a result is shown for.
             if (code != "canceled")
