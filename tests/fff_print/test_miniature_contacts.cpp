@@ -20,6 +20,7 @@
 #include <fstream>
 #include <functional>
 #include <iomanip>
+#include <iterator>
 #include <iostream>
 #include <limits>
 #include <map>
@@ -434,16 +435,11 @@ void run_analysis(AnalysisRun &run, TriangleMesh &&shape, const DynamicPrintConf
     run.print.process();
 }
 
-// Paints every vertical facet of `mv` as a support enforcer, through the encoding 3MF loading uses:
-// one hex nibble per original triangle, "4" being an unsplit leaf whose state is
+// Paints every facet of `mv` that `pick` selects as a support enforcer, through the encoding 3MF
+// loading uses: one hex nibble per original triangle, "4" being an unsplit leaf whose state is
 // EnforcerBlockerType::ENFORCER (TriangleSelector::serialize writes a leaf as xxyy, xx the state and
-// yy the number of split sides). Verticality is the test slice_mesh_slabs applies, a triangle whose
-// projection onto the bed has no signed area, so this paint produces vertical enforcer points and
-// nothing else: a vertical facet projects to nothing downwards, and detect_overhangs' enforced
-// overhang branch intersects that downward projection with the layer's new material. The volume's
-// transform is a translation, which moves the three vertices of a facet alike and so cannot turn a
-// vertical facet into a sloped one. Returns how many facets were painted.
-size_t paint_vertical_enforcers(ModelVolume &mv)
+// yy the number of split sides). Degenerate facets are skipped. Returns how many facets were painted.
+size_t paint_enforcers(ModelVolume &mv, const std::function<bool(const Vec3f &, const Vec3f &, const Vec3f &)> &pick)
 {
     const indexed_triangle_set &its     = mv.mesh().its;
     size_t                      painted = 0;
@@ -452,17 +448,28 @@ size_t paint_vertical_enforcers(ModelVolume &mv)
         const Vec3f &a = its.vertices[its.indices[i](0)];
         const Vec3f &b = its.vertices[its.indices[i](1)];
         const Vec3f &c = its.vertices[its.indices[i](2)];
-        if (a == b || a == c || b == c)
-            continue; // degenerate, which slice_mesh_slabs files as Degenerate rather than Vertical
-        const double abx = double(b.x()) - double(a.x()), aby = double(b.y()) - double(a.y());
-        const double bcx = double(c.x()) - double(b.x()), bcy = double(c.y()) - double(b.y());
-        if (abx * bcy - aby * bcx != 0.)
+        if (a == b || a == c || b == c || ! pick(a, b, c))
             continue;
         mv.supported_facets.set_triangle_from_string(i, "4");
         ++ painted;
     }
     mv.supported_facets.shrink_to_fit();
     return painted;
+}
+
+// Paints every vertical facet of `mv` as a support enforcer. Verticality is the test slice_mesh_slabs
+// applies, a triangle whose projection onto the bed has no signed area, so this paint produces
+// vertical enforcer points and nothing else: a vertical facet projects to nothing downwards, and
+// detect_overhangs' enforced overhang branch intersects that downward projection with the layer's new
+// material. The volume's transform is a translation, which moves the three vertices of a facet alike
+// and so cannot turn a vertical facet into a sloped one.
+size_t paint_vertical_enforcers(ModelVolume &mv)
+{
+    return paint_enforcers(mv, [](const Vec3f &a, const Vec3f &b, const Vec3f &c) {
+        const double abx = double(b.x()) - double(a.x()), aby = double(b.y()) - double(a.y());
+        const double bcx = double(c.x()) - double(b.x()), bcy = double(c.y()) - double(b.y());
+        return abx * bcy - aby * bcx == 0.;
+    });
 }
 
 // Every anchor id the report's regions carry, sorted; the problem's whole seed set.
@@ -1815,7 +1822,7 @@ TEST_CASE("A requested support analysis names required regions and contact seeds
     REQUIRE(steeper.report()->key != report->key);
 }
 
-TEST_CASE("A painted vertical enforcer seeds no contact and anchors no detected region", "[MiniatureContacts]")
+TEST_CASE("A painted vertical enforcer seeds no contact and keeps the contact holding its slot", "[MiniatureContacts]")
 {
     const DynamicPrintConfig config = fixture_config({ { "support_style", "tree_slim" }, { "support_top_z_distance", "0.2" } });
 
@@ -1855,22 +1862,63 @@ TEST_CASE("A painted vertical enforcer seeds no contact and anchors no detected 
     REQUIRE(points_on_region_layers > 0);
 
     // The behavior: a vertical enforcer point is a contact placed for no overhang polygon of its own,
-    // so it is a source of nothing. Nothing in this print is pinned, and the regions, the contact
-    // seeds and the critical set are the ones the same model produces with nothing painted at all.
-    REQUIRE(report->pinned_anchor_ids.empty());
-
+    // so it is a source of nothing, and the regions and the contact seeds are the ones the same model
+    // produces with nothing painted at all. Where a detected contact already holds the slot a point
+    // asked for, that contact stands at the paint and is pinned; a pinned seed is critical, so the
+    // critical set is the unpainted one plus the pinned seeds.
     AnalysisRun plain;
     run_analysis(plain, fin_fixture(), config);
     REQUIRE(plain.report() != nullptr);
     REQUIRE(plain.report()->key == report->key);
     REQUIRE(all_anchor_ids(*plain.report()) == all_anchor_ids(*report));
-    REQUIRE(plain.report()->critical_anchor_ids == report->critical_anchor_ids);
+    REQUIRE(plain.report()->pinned_anchor_ids.empty());
+    REQUIRE(! report->pinned_anchor_ids.empty());
+    std::vector<uint64_t> expected_critical;
+    std::set_union(plain.report()->critical_anchor_ids.begin(), plain.report()->critical_anchor_ids.end(),
+                   report->pinned_anchor_ids.begin(), report->pinned_anchor_ids.end(), std::back_inserter(expected_critical));
+    REQUIRE(report->critical_anchor_ids == expected_critical);
     REQUIRE(plain.report()->coverage.size() == report->coverage.size());
     for (size_t i = 0; i < report->coverage.size(); ++ i) {
         INFO("region " << i);
         REQUIRE(report->coverage[i].anchor_ids == plain.report()->coverage[i].anchor_ids);
-        REQUIRE(report->coverage[i].critical == plain.report()->coverage[i].critical);
+        const bool holds_pinned = std::any_of(report->coverage[i].anchor_ids.begin(), report->coverage[i].anchor_ids.end(),
+            [report](uint64_t id) { return std::binary_search(report->pinned_anchor_ids.begin(), report->pinned_anchor_ids.end(), id); });
+        REQUIRE(report->coverage[i].critical == (plain.report()->coverage[i].critical || holds_pinned));
     }
+}
+
+TEST_CASE("A painted overhang keeps every contact placed under the paint", "[MiniatureContacts]")
+{
+    // lip_fixture's underside is an overhang the detector finds on its own, so the detected band places
+    // its contacts on that layer before the enforced band does, and the two claim the same slots.
+    const DynamicPrintConfig config = fixture_config({ { "support_style", "tree_slim" }, { "support_top_z_distance", "0.2" },
+                                                       { "support_miniature_contacts", "1" }, { "support_contact_min_distance", "5" } });
+    // The lip's underside: the horizontal facets facing down, above the base's bottom on the bed.
+    const auto paint_lip_underside = [](ModelVolume &mv) {
+        float bed_z = std::numeric_limits<float>::max();
+        for (const Vec3f &v : mv.mesh().its.vertices)
+            bed_z = std::min(bed_z, v.z());
+        REQUIRE(paint_enforcers(mv, [bed_z](const Vec3f &a, const Vec3f &b, const Vec3f &c) {
+                    return a.z() == b.z() && a.z() == c.z() && a.z() > bed_z + 1.f && (b - a).cross(c - a).z() < 0.f;
+                }) > 0);
+    };
+
+    AnalysisRun plain, painted;
+    run_analysis(plain, lip_fixture(), config, false);
+    run_analysis(painted, lip_fixture(), config, false, paint_lip_underside);
+    REQUIRE(plain.report() != nullptr);
+    REQUIRE(painted.report() != nullptr);
+
+    // Unpainted, the 5 mm distance thins the lip's contacts, so keeping all of them is the paint's doing.
+    INFO("plain retained " << plain.report()->seeds_retained << " of " << plain.report()->seeds_candidate);
+    REQUIRE(plain.report()->seeds_retained < plain.report()->seeds_candidate);
+
+    // Every contact on the lip's layer stands on the paint, whichever band placed it, so every one is
+    // pinned and the thinning keeps them all.
+    INFO("painted retained " << painted.report()->seeds_retained << " of " << painted.report()->seeds_candidate
+                             << ", pinned " << painted.report()->pinned_anchor_ids.size());
+    REQUIRE(painted.report()->pinned_anchor_ids.size() == painted.report()->seeds_candidate);
+    REQUIRE(painted.report()->seeds_retained == painted.report()->seeds_candidate);
 }
 
 TEST_CASE("Merged support branches carry every contact source that reached them", "[MiniatureContacts]")

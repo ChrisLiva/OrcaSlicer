@@ -4009,7 +4009,7 @@ void TreeSupport::generate_contact_points()
             Layer* layer = m_object->get_layer(layer_nr);
             auto& curr_nodes = contact_nodes[layer_nr-1];
 
-            std::unordered_set<Point, PointHash> already_inserted;
+            std::unordered_map<Point, SupportNode*, PointHash> already_inserted;
             auto                                 bottom_z = m_object->get_layer(layer_nr)->bottom_z();
             bool                                 added = false; // Did we add a point this way?
             bool                                 is_sharp_tail = false;
@@ -4024,8 +4024,11 @@ void TreeSupport::generate_contact_points()
             auto insert_point = [&](Point pt, const ExPolygon& overhang, double radius, bool force_add = false, bool add_interface=true) {
                 Point        hash_pos = pt / ((radius_scaled + 1) / 1);
                 SupportNode* contact_node = nullptr;
-                if (force_add || !already_inserted.count(hash_pos)) {
-                    already_inserted.emplace(hash_pos);
+                auto         occupant     = already_inserted.find(hash_pos);
+                // A painted contact whose slot an earlier contact already holds keeps that contact instead.
+                if (!force_add && is_pinned && occupant != already_inserted.end())
+                    occupant->second->is_pinned = true;
+                if (force_add || occupant == already_inserted.end()) {
                     bool to_buildplate = true;
                     size_t roof_layers = add_interface ? support_roof_layers : 0;
                     // add a new node as a virtual node which acts as the invisible gap between support and object
@@ -4039,15 +4042,19 @@ void TreeSupport::generate_contact_points()
                     contact_node->is_sharp_tail = is_sharp_tail;
                     contact_node->is_pinned = is_pinned;
                     curr_nodes.emplace_back(contact_node);
+                    already_inserted.emplace(hash_pos, contact_node);
                     added = true;
                 };
                 return contact_node;
                 };
 
+            std::vector<const ExPolygon*> painted;
             for (const auto& overhang_part : layer->loverhangs)  {
                 const auto& overhang_type = this->overhang_types[&overhang_part];
                 is_sharp_tail = overhang_type == OverhangType::SharpTail;
                 is_pinned = overhang_type == OverhangType::Enforced; // a painted area enforcer: keep every contact placed for it
+                if (is_pinned)
+                    painted.push_back(&overhang_part);
                 ExPolygons overhangs_regular;
                 if (m_support_params.support_style == smsTreeHybrid && overhang_part.area() > m_support_params.thresh_big_overhang && !is_sharp_tail) {
                     overhangs_regular           = offset_ex(intersection_ex({overhang_part}, m_ts_data->m_layer_outlines_below[layer_nr - 1]), radius_scaled);
@@ -4124,6 +4131,10 @@ void TreeSupport::generate_contact_points()
                     }
                 }
             }
+            // A contact standing on a painted overhang is one the paint asked for, whichever overhang placed it first.
+            for (SupportNode* node : curr_nodes)
+                if (!node->is_pinned)
+                    node->is_pinned = std::any_of(painted.begin(), painted.end(), [node](const ExPolygon* p) { return p->contains(node->position); });
             for (auto& pt_and_normal : vertical_enforcer_points_by_layers[layer_nr]) {
                 is_sharp_tail = true;// fake it as sharp tail point so the contact distance will be 0
                 is_pinned = true;
