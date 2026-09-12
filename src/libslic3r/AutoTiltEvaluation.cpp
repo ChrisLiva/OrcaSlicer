@@ -58,12 +58,14 @@ const ModelObject *object_of_instance(const Model &model, const ObjectID &id)
     return nullptr;
 }
 
-// Whether the generator this object would run is the legacy tree one this evaluator answers for.
-bool legacy_tree_support(const PrintObject &object)
+// The tree generator this object would run, or Unknown where it runs none. SupportParameters divides
+// the bridge flow by the object's printing region count, so an object with no region never reaches it.
+SupportGenerator support_generator_of(const PrintObject &object)
 {
-    if (! object.config().enable_support.value || ! is_tree(object.config().support_type.value))
-        return false;
-    return SupportParameters(object).support_style != smsTreeOrganic;
+    if (! object.config().enable_support.value || ! is_tree(object.config().support_type.value) ||
+        object.num_printing_regions() == 0)
+        return SupportGenerator::Unknown;
+    return SupportParameters(object).support_style == smsTreeOrganic ? SupportGenerator::Organic : SupportGenerator::Legacy;
 }
 
 // The print object one posed instance ended up in, and which of that object's copies it is. Matched
@@ -416,9 +418,7 @@ SupportGenerator affected_support_generator(const EvaluationInput &input)
         for (const ObjectID &id : plate.affected_instance_ids) {
             size_t             index  = 0;
             const PrintObject *object = print_object_of_instance(print, id, index);
-            SupportGenerator   here   = SupportGenerator::Unknown;
-            if (object != nullptr && object->config().enable_support.value && is_tree(object->config().support_type.value))
-                here = SupportParameters(*object).support_style == smsTreeOrganic ? SupportGenerator::Organic : SupportGenerator::Legacy;
+            const SupportGenerator here = object != nullptr ? support_generator_of(*object) : SupportGenerator::Unknown;
             if (first) {
                 resolved = here;
                 first    = false;
@@ -549,7 +549,7 @@ PoseEvaluation GeneratedEvaluator::evaluate(const Pose &pose, const StopPredicat
                 unsupported = true;
                 break;
             }
-            if (! legacy_tree_support(*object)) {
+            if (support_generator_of(*object) != SupportGenerator::Legacy) {
                 out.status = worse(out.status, PoseEvaluation::Status::Unknown);
                 add_reason(out, "organic_or_non_tree_support");
                 unsupported = true;
