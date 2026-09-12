@@ -3,6 +3,7 @@
 #include "Print.hpp"
 #include "FilamentMixer.hpp"
 
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/log/trivial.hpp>
 #include <cfloat>
 
@@ -1207,6 +1208,14 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
 	new_full_config.option("print_settings_id",            true);
 	new_full_config.option("filament_settings_id",         true);
 	new_full_config.option("printer_settings_id",          true);
+
+    // Print::validate reads this. A config that names a printer model decides it, by the rule
+    // GCodeProcessor applies to a loaded G-code file, so a Print no caller told the vendor still
+    // validates a Bambu Lab profile; one that names none leaves whatever the caller assigned.
+    // BackgroundSlicingProcess, the CLI and CalibUtils assign it again after apply().
+    const ConfigOptionString *printer_model = new_full_config.option<ConfigOptionString>("printer_model");
+    if (printer_model != nullptr && ! printer_model->value.empty())
+        m_isBBLPrinter = boost::starts_with(printer_model->value, "Bambu Lab");
 
     // BBS
     std::vector <unsigned int> used_filaments = this->extruders(true);

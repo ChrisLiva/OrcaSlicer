@@ -120,6 +120,9 @@ public:
     // Casts a ray on the mesh and returns all hits
     std::vector<hit_result> query_ray_hits(const Vec3d &s, const Vec3d &dir) const;
 
+    // Ids of every face whose bounding box meets the box [lo, hi], in tree order.
+    std::vector<size_t> faces_in_box(const Vec3d &lo, const Vec3d &hi) const;
+
     double squared_distance(const Vec3d& p, int& i, Vec3d& c) const;
     inline double squared_distance(const Vec3d &p) const
     {

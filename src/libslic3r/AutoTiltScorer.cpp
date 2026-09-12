@@ -64,8 +64,7 @@ Contact ContactScorer::score(const Pose &pose)
 
     // Serial, ascending, fixed order: two candidates must sum the same floats in the same order,
     // whatever the worker pool looks like.
-    Contact         c;
-    ExPolygons      shadow; // union of every lower layer's slices; only filled under shadow_correction
+    Contact          c;
     const LayerPtrs &layers = po->layers();
     for (size_t i = 0; i < layers.size(); ++i) {
         const Layer *layer = layers[i];
@@ -73,8 +72,6 @@ Contact ContactScorer::score(const Pose &pose)
         // Layer 0 sits on the plate: whatever the detector calls an overhang there needs no support.
         if (i == 0)
             continue;
-        if (this->shadow_correction)
-            shadow = union_ex(shadow, layers[i - 1]->lslices);
         for (size_t j = 0; j < layer->loverhangs.size(); ++j) {
             // A reference, not a copy: overhang_types is keyed on the address of this very element.
             const ExPolygon &p = layer->loverhangs[j];
@@ -107,29 +104,54 @@ Contact ContactScorer::score(const Pose &pose)
             if (excluded)
                 continue;
 
-            // One piece's contribution. The arithmetic and its order are the same whether `p` is
-            // charged whole or in shadow-corrected pieces, so the plain path's sums are unchanged.
-            const auto charge = [&](const ExPolygon &piece) {
-                const double a = piece.area() * SCALING_FACTOR * SCALING_FACTOR;
-                double       perimeter_scaled = piece.contour.length();
-                for (const Polygon &hole : piece.holes)
-                    perimeter_scaled += hole.length();
-                const double perimeter = unscale<double>(perimeter_scaled);
+            const double a = p.area() * SCALING_FACTOR * SCALING_FACTOR;
+            double       perimeter_scaled = p.contour.length();
+            for (const Polygon &hole : p.holes)
+                perimeter_scaled += hole.length();
+            const double perimeter = unscale<double>(perimeter_scaled);
 
-                const double w = fragility_weight(a, perimeter, type_floor, m_k);
-                c.volume_mm3 += a * m_k.h_ref_mm;
-                c.score_mm3 += w * a * m_k.h_ref_mm;
-            };
-
-            if (this->shadow_correction)
-                // The part of the overhang standing over solid object needs no support under it.
-                for (const ExPolygon &piece : diff_ex(p, shadow))
-                    charge(piece);
-            else
-                charge(p);
+            const double w = fragility_weight(a, perimeter, type_floor, m_k);
+            c.volume_mm3 += a * m_k.h_ref_mm;
+            c.score_mm3 += w * a * m_k.h_ref_mm;
         }
     }
     return c;
+}
+
+LegacyShortlistScorer::LegacyShortlistScorer(const EvaluationInput &input, const Constants &k, MainThreadRunner run_on_main)
+{
+    run_on_main([&]() {
+        for (const PlateInput &plate : input.plates)
+            for (const ObjectID &id : plate.affected_instance_ids)
+                for (const ModelObject *object : plate.model.objects) {
+                    const auto it = std::find_if(object->instances.begin(), object->instances.end(),
+                                                 [&id](const ModelInstance *instance) { return instance->id() == id; });
+                    if (it == object->instances.end())
+                        continue;
+                    Model        scratch;
+                    ModelObject *copy = scratch.add_object(*object);
+                    // ContactScorer keeps instance 0 and poses about that instance's own root and
+                    // pivot, so the instance this entry is for is moved into that place: one copy of
+                    // an object is never scored as though it stood where the first copy stands.
+                    std::swap(copy->instances[0], copy->instances[size_t(std::distance(object->instances.begin(), it))]);
+                    m_scorers.push_back(std::make_unique<ContactScorer>(*copy, plate.full_config, k, run_on_main));
+                    break;
+                }
+    });
+}
+
+Contact LegacyShortlistScorer::score(const Pose &pose)
+{
+    // Serial, in capture order: two candidates have to add the same floats in the same order for
+    // their scores to be comparable at all.
+    Contact out;
+    for (const std::unique_ptr<ContactScorer> &scorer : m_scorers) {
+        const Contact c = scorer->score(pose);
+        out.score_mm3         += c.score_mm3;
+        out.volume_mm3        += c.volume_mm3;
+        out.object_volume_mm3 += c.object_volume_mm3;
+    }
+    return out;
 }
 
 }} // namespace Slic3r::AutoTilt

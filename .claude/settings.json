@@ -1,0 +1,38 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ ! -f \"$CLAUDE_PROJECT_DIR\"/.crank/hooks/session-start.ts ] || bun \"$CLAUDE_PROJECT_DIR\"/.crank/hooks/session-start.ts",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ ! -f \"$CLAUDE_PROJECT_DIR\"/.crank/hooks/post-write.ts ] || bun \"$CLAUDE_PROJECT_DIR\"/.crank/hooks/post-write.ts",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ ! -f \"$CLAUDE_PROJECT_DIR\"/.crank/hooks/stop.ts ] || bun \"$CLAUDE_PROJECT_DIR\"/.crank/hooks/stop.ts",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

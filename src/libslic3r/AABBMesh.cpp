@@ -4,6 +4,7 @@
 #include <libslic3r/AABBTreeIndirect.hpp>
 #include <libslic3r/TriangleMesh.hpp>
 
+#include <cmath>
 #include <numeric>
 
 #ifdef SLIC3R_HOLE_RAYCASTER
@@ -63,6 +64,16 @@ public:
         i       = int(idx_unsigned);
         closest = closest_vec3d;
         return dist;
+    }
+
+    std::vector<size_t> faces_in_box(const Eigen::AlignedBox3f &box) const
+    {
+        std::vector<size_t> faces;
+        AABBTreeIndirect::traverse(m_tree, AABBTreeIndirect::intersecting(box), [&faces](const AABBTreeIndirect::Tree3f::Node &node) {
+            faces.push_back(node.idx);
+            return true;
+        });
+        return faces;
     }
 };
 
@@ -145,6 +156,15 @@ const Vec3i32& AABBMesh::indices(size_t idx) const
 Vec3d AABBMesh::normal_by_face_id(int face_id) const {
 
     return its_unnormalized_normal(*m_tm, face_id).cast<double>().normalized();
+}
+
+std::vector<size_t> AABBMesh::faces_in_box(const Vec3d &lo, const Vec3d &hi) const
+{
+    // The tree holds float boxes, so the query box rounds outward: no face the double box meets is lost.
+    const auto down = [](double v) { return std::nextafter(float(v), -std::numeric_limits<float>::infinity()); };
+    const auto up   = [](double v) { return std::nextafter(float(v), std::numeric_limits<float>::infinity()); };
+    return m_aabb->faces_in_box(Eigen::AlignedBox3f(Vec3f(down(lo.x()), down(lo.y()), down(lo.z())),
+                                                    Vec3f(up(hi.x()), up(hi.y()), up(hi.z()))));
 }
 
 

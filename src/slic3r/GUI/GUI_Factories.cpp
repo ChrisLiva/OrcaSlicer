@@ -2152,7 +2152,9 @@ void MenuFactory::append_menu_item_drop(wxMenu* menu)
 void MenuFactory::append_menu_item_auto_tilt(wxMenu* menu)
 {
     append_menu_item(menu, wxID_ANY, _L("Auto-tilt for supports"),
-        _L("Tilt the object backward to reduce where tree supports touch it. Requires tree supports; assumes the model's front faces the front view."),
+        _L("Tilt the object backward to reduce where tree supports touch it. Slim, Strong and Hybrid rank the angles on support the "
+           "slicer actually generated; Organic only estimates contact and generates nothing to check it. Requires tree supports; "
+           "assumes the model's front faces the front view."),
         [](wxCommandEvent&) {
             plater()->auto_tilt();
         }, "", nullptr,

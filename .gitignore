@@ -52,5 +52,7 @@ internal_docs/
 __pycache__/
 *.pyc
 *.opc
+# crank-mem
+.crank/
 /.test/
 docs/superpowers/

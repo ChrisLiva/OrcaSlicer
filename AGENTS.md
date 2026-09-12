@@ -11,7 +11,8 @@ brew install cmake ninja automake libtool texinfo
 ./build_release_macos.sh -d -a arm64 -x
 
 # macOS
-cmake --build build/arm64 --config Release --target all --
+cmake --build build/arm64 --config Release --target fff_print_tests -- -j5
+cmake --build build/arm64 --config Release --target OrcaSlicer -- -j5
 
 # Linux
 cmake --build build --config Release --target all --
@@ -20,15 +21,38 @@ cmake --build build --config Release --target all --
 cmake --build . --config %build_type% --target ALL_BUILD -- -m
 ```
 
-Build `Release` to run the slicer. `CMakeLists.txt:685` strips the optimizer out of
-`RelWithDebInfo`, rewriting `-O2` to `-O0` under Clang and `/O2` to `/Od`, `/Ob1` to `/Ob0`
-under MSVC. Eigen's accessors and Clipper's point math then stop inlining and go through call
-stubs, so a `RelWithDebInfo` build crawls through model loading, slicing and the GUI alike.
-Reach for it only when you need a debugger, and expect the slowdown.
+Build `Release` to run the slicer. The `# Disable optimization for RelWithDebInfo` block in
+`CMakeLists.txt` strips the optimizer out of `RelWithDebInfo`, rewriting `-O2` to `-O0` under
+Clang and `/O2` to `/Od`, `/Ob1` to `/Ob0` under MSVC. Eigen's accessors and Clipper's point math
+then stop inlining and go through call stubs, so a `RelWithDebInfo` build crawls through model
+loading, slicing and the GUI alike. Reach for it only when you need a debugger, and expect the
+slowdown.
 
 `CMakeCache.txt` still reports `CMAKE_CXX_FLAGS_RELWITHDEBINFO:STRING=-O2 -g -DNDEBUG`, because
 that rewrite assigns normal variables rather than cache entries. To read the flags a target
 actually gets, grep the generated `build/<dir>/CMakeFiles/impl-<Config>.ninja` for its `.o` rule.
+
+Cap Ninja's job count on a 16 GB Mac. `cmake --build` without `-j` runs 12 compilers on 10 cores
+and each clang here peaks at 1.4 to 2.1 GB, so the machine pages: rebuilding the 22 `fff_print`
+test objects took 395 s at `-j12` and 53 s at `-j5` (measured 2026-09-08). Pass `-- -j5` or set
+`CMAKE_BUILD_PARALLEL_LEVEL=5` in the shell.
+
+Build the target you are iterating on, not `all`: `all` is 929 objects, `OrcaSlicer` 716,
+`fff_print_tests` 385 (106 of them Catch2, compiled once; counted 2026-09-08). Preview what a change will rebuild with
+`ninja -C build/arm64 -f build-Release.ninja -n -d explain <target> | head`. Headers in the
+precompiled header set (`libslic3r.h`, `Point.hpp`, `PrintConfig.hpp`, `Config.hpp`) reach every
+object in libslic3r and the GUI, `Print.hpp` reaches about 120 per config, `Support/*.hpp` reach 7
+or fewer. A `CMakeLists.txt` edit reconfigures but recompiles only what its flags change:
+the `git_commit_hash_header` target in `src/slic3r/CMakeLists.txt` regenerates `git_commit_hash.h` on every build,
+rewriting it only when the hash changes, and only `GUI/BuildCommit.cpp` (plus `BaseException.cpp` on Windows) and
+`tests/fff_print/support_validation.cpp` include it, where the former global `add_definitions()` re-stamped every object
+after each new commit (1 h 14 min for `--target all`, 2026-09-08).
+
+Never start a second `cmake --build` in a build directory that already has one running: two Ninja
+instances compile the same objects and starved each other to 0.03 s of CPU per compiler over 49 min
+on a 16 GB Mac (2026-09-08). Check `pgrep -x ninja` first: under an agent harness `pgrep -fl 'ninja -f
+build-Release.ninja'` matches the invoking shell's own command line and reports a build that is not running,
+so a guard of the form `pgrep -fl ... || cmake --build ...` never lets a build start (2026-09-10).
 
 ## Testing
 
@@ -46,6 +70,68 @@ count over 139166..141475 and the `Skirt` count over 88..102 while every other f
 byte-identical (measured 2026-09-04). An oracle that expects byte-identical G-code or an exact
 support-move count from `TreeSupport` therefore fails on an unchanged engine; compare the other features
 exactly and the support count within a band (2 % held here).
+The same generator lays branches that end in mid-air: 110 floating components of printed support on plate 3
+of `elf_test.3mf` (Tree Slim, plate only, 0.5 mm xy distance), most of them one-layer slivers where a tip
+circle was clipped against the model, and one branch of the closed-box fixture in roughly 1 run in 8.
+`TreeSupport::remove_floating_toolpaths` takes those extrusions out after `generate_toolpaths` on a pass that
+measures itself (`m_analyze`: analysis requested or miniature contacts on), by the connectivity rule
+`SupportAnalysis::floating_pieces` shares with the stability measurement, so a report measured off generated
+output has `unsupported_paths == 0` (plate 3: 110 -> 0, 2026-09-09); a report whose `EmittedSupport` a test
+edited by hand still counts what the edit left floating. A stock slice runs no floating pass and keeps the
+generator's output. The pass costs the union of every layer's footprints: `STAGE_GENERATE_TOOLPATHS` 0.7 s
+-> 6.4 s per attempt on that plate.
+Gate on Catch2 case counts, not assertion counts: `fff_print_tests "[MiniatureContacts]~[.]"` reported
+102184, 103169, 104814, 106441 and 106975 assertions across five runs of one binary while its case count held
+(2026-09-08/09).
+Under `ctest -j5` a test process occasionally stalls with every thread in `condition_variable::wait`: 2 of
+about 25 suite runs stalled one `fff_print_tests` case, and one run stalled five cases at once
+from four unrelated suites (`SLASupportGeneration`, `MultiFilament`, `AutoTilt`, `MiniatureContacts`), each of
+which passes alone in under 22 s (2026-09-09). `orcaslicer_discover_tests` in `tests/CMakeLists.txt` sets
+`TIMEOUT 300` on every registered case so a stall fails at 300 s instead of holding the run for ten minutes;
+re-run once before reading a lone timeout as a regression.
+ClipperLib's output is not invariant under removing clip polygons that are provably disjoint from the subject: on
+plate 3 of a 36 MB miniature project, clipping 61082 attributed support areas against a bbox-prefiltered clip
+changed the result on 32894 of them by up to 7.4e-7 mm² and joined or split two pieces meeting at a one-unit
+neck on 17, against the whole-layer clip (`intersection_ex`, measured 2026-09-09). An oracle that expects
+byte-identical polygons from a Clipper call whose clip set changed fails on correct code; compare counts and
+areas within an envelope instead.
+The non-support features are not byte-identical either: three `--slice 3` runs of one Release binary on plate 3 of
+`elf_test.3mf` read `Outer wall` extrusion moves 399740, 399740 and 399721, the 19 moves being the retraction wipes
+and travel of one layer (z 1.82) while every wall extrusion vertex matched; an oracle for "support code left the
+walls alone" compares wall vertices or excludes `WIPE_START..WIPE_END` and travel, never the move count (2026-09-10).
+The CLI's `--debug 3` prints about five lines to stderr; the `tree support time` and `Support contact layout for` lines
+land only in the file `--logfile <path>` names (2026-09-10).
+`init_print` in `tests/fff_print/test_helpers.cpp` arranges against `InfiniteBed{}` and leaves the instance at the
+origin, so the stock 0..200 mm `m_machine_border` clips any support branch that walks across x 0 in
+`TreeSupport::draw_circles` (`intersection_ex(base_areas, m_machine_border)`): a fixture centred on the origin whose
+branches cross it loses them to `remove_floating_toolpaths` and reads `CoverageLost` for no router reason. Pass a
+centred `printable_area` (`-100x-100,100x-100,100x100,-100x100`) in `fixture_config` for such a fixture (wedge
+journey in `test_miniature_contacts.cpp`, 2026-09-09).
+`Test::SupportValidation::contact_clusters` counts one cluster per roof-gap `ExPolygon` per support layer, so a thinned
+attempt's fatter tips split into about three pieces each and the piece count barely moves (47 vs 49 on the wedge)
+while the layers holding a contact and `total_mm2` halve (18 vs 50, 18.92 vs 40.88 mm2). An oracle for contact
+thinning counts distinct contact `print_z` values or area, never pieces (2026-09-09).
+`fff_print_tests "[AutoTilt]"` fails one case about 1 run in 12 with no stall (1 of 8 runs and 1 of 15 on 2026-09-09,
+never captured, every re-run green); re-run once before reading a lone `[AutoTilt]` failure as a regression. One such
+failure named its case: "A processed tree-support print
+measures its emitted contact through the support analysis" failed once in the `ctest -j5` gate on 2026-09-10, passing
+alone and on the re-run, assertion not captured. Capture the failing assertion before re-running.
+`[MiniatureContacts]` "Support components come from printed slabs that touch and material with no root is counted"
+failed its `split.stability.unsupported_paths > 0` leg once under `ctest -j5` (read `0 > 0`), then passed 12 of 12
+runs alone, 30 of 30 runs five at a time and the full gate re-run (2026-09-10, no raft, analysis requested); re-run
+once before reading a lone failure there as a regression.
+`SupportAnalysis::Report::missing_anchor_ids` lists every seed whose region never reached printed material through
+that seed, so the seeds `MiniatureSupport::select_contacts` decimates by design are in it: plate 3 of `elf_test.3mf`
+reads 1638 `missing_critical_anchors` in the harness row while the slice log's `Support contact layout for` line
+counts 2 critical printable regions without material. `AutoTiltEvaluation` reads a non-empty list as
+`required_region_unsupported`, and `validate_demonstrations`' `NO_WORSE_METRICS` still bounds the metric; a gate
+that wants the region count reads `SupportAnalysis::support_unresolved` or the log line (2026-09-10).
+Plate 3 baselines for a perf or density reading (`--debug 3 --slice 3`, Release, one slice at a time, 2026-09-10):
+main `f3a07a0b37` 13.5 s wall, interface E 1.21 mm on 45 layers and 81 clusters, stable over three runs; the
+miniature-contacts branch 43.1 s, 1.31 to 1.32 mm on 47 layers and 80 to 81 clusters, drifting
+between runs of one binary. The branch's extra 29.6 s sits in `STAGE_RISK_FIELD` 9.3 s, `STAGE_MEASURE` 7.3 s,
+the serial region-merge double loop in `TreeSupport::build_contact_seeds` 4.7 s (wrapped by no stage),
+`STAGE_SELECT_CONTACTS` 4.0 s and `remove_floating_toolpaths` 3.7 s.
 
 ## Documentation
 

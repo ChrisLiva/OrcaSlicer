@@ -8,6 +8,7 @@
 
 #include "Job.hpp"
 #include "libslic3r/AutoTilt.hpp"
+#include "libslic3r/AutoTiltEvaluation.hpp"
 #include "libslic3r/AutoTiltScorer.hpp"
 #include "libslic3r/ObjectID.hpp"
 #include "libslic3r/Point.hpp"
@@ -29,33 +30,49 @@ public:
     // Menu greying: worker idle, exactly one object selected, and state_preconditions_hold. Main thread.
     static bool can_start(Plater &plater);
 
-    // Main thread. Caches ids/matrices, builds the config, runs the fit pre-pass and clones the
-    // object into the scorer. Returns false, after showing the relevant notification, when the job
-    // must not be queued.
+    // Main thread. Captures the affected plates whole, builds the config, runs the fit pre-pass and
+    // clones the object into the scorer. Returns false, after showing the relevant notification, when
+    // the job must not be queued.
     bool prepare(Plater &plater);
 
     void process(Ctl &ctl) override;
     void finalize(bool canceled, std::exception_ptr &eptr) override;
 
 private:
-    // One transform per instance, always built from the cached root pose, never from the live matrix.
-    std::vector<Transform3d> candidate_transforms(const AutoTilt::Pose &pose) const;
     // `text` with the pre-pass skipped clause appended when the pre-pass skipped at least one pose.
     std::string with_skipped_clause(const std::string &text) const;
     void        push_result(const std::string &text) const;
+    // The notification one applied Organic pose deserves: the cheap contact estimate that picked it,
+    // labelled as the estimate it is.
+    std::string estimated_text(const AutoTilt::Pose &pose, double improvement) const;
+    // The notification one applied legacy pose deserves: the support volume the slicer actually
+    // generated for the root and for the winner, which way the estimated removal risk moved, the pose
+    // itself, and how much of the grid was measured.
+    std::string verified_text() const;
+    // " Reason: <phrase>." for the first reason code the verified search or its root evaluation
+    // recorded, empty when neither recorded one worth showing.
+    std::string reason_detail() const;
+    // Main thread. Moves every affected instance onto `pose` when the live scene still matches the
+    // capture the pose was measured on, and says whether it did.
+    bool        apply_pose(const AutoTilt::Pose &pose);
 
     AutoTilt::Constants                      m_k;
     Plater                                  *m_plater = nullptr;
     ObjectID                                 m_object_id;
-    std::vector<AutoTilt::InstanceSnapshot>  m_instances;
-    std::vector<Transform3d>                 m_root_matrix;
-    std::vector<Vec3d>                       m_pivot;
+    // Every plate the selected object stands on, as it stood when the search started: the model, the
+    // config that plate would slice under, the affected ids, and the ground a candidate has to fit.
+    AutoTilt::EvaluationInput                m_captured;
+    AutoTilt::SupportGenerator               m_generator = AutoTilt::SupportGenerator::Unknown;
     std::vector<AutoTilt::Pose>              m_legal;
     size_t                                   m_total_poses = 0;
     size_t                                   m_skipped     = 0;
-    std::unique_ptr<AutoTilt::ContactScorer> m_scorer;
-    AutoTilt::SearchResult                   m_result;
-    // Read at call time by the main-thread runner handed to the scorer; null until process() sets it.
+    // The shortlist scorer the generator on this object calls for: LegacyShortlistScorer or ContactScorer.
+    std::unique_ptr<AutoTilt::Scorer>        m_scorer;
+    AutoTilt::SearchResult                   m_result;   // Organic: the estimate
+    AutoTilt::VerifiedSearchResult           m_verified; // legacy: measured under the actual settings
+    // Read at call time by the main-thread runner handed to the scorer; null until process() sets it,
+    // which is how that runner tells a request made while prepare() builds the scorer - already on
+    // the main thread - from one score() makes on the worker.
     Ctl                                     *m_ctl = nullptr;
 };
 

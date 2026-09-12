@@ -74,8 +74,9 @@ function(orcaslicer_copy_test_dlls)
 endfunction()
 
 # Register Catch2 tags as CTest labels so `ctest -L`/`-LE` can filter by tag.
+# TIMEOUT 300 fails a stalled case at 300 s instead of holding the run (see AGENTS.md, Testing).
 function(orcaslicer_discover_tests TARGET)
-    catch_discover_tests(${TARGET} ADD_TAGS_AS_LABELS)
+    catch_discover_tests(${TARGET} ADD_TAGS_AS_LABELS PROPERTIES TIMEOUT 300)
 endfunction()
 
 add_subdirectory(libnest2d)

@@ -6786,7 +6786,11 @@ void PrintConfigDef::init_fff_params()
     def = this->add("support_miniature_contacts", coBool);
     def->label    = L("Miniature contacts");
     def->category = L("Support");
-    def->tooltip  = L("Merge support contact points that sit close together, so cleanup is a few deliberate snaps instead of many slivers. Legacy tree styles only.");
+    def->tooltip  = L("Merge support contact points that sit close together, so cleanup is a few deliberate snaps instead of many slivers. "
+                      "Applies to the legacy tree styles only (Slim, Strong and Hybrid): an overhang left without a contact gets one back, "
+                      "contacts move to the sturdiest part of the model their overhang allows, and the slicer warns when a contact it must "
+                      "keep gets no support material: one under paint or a Hybrid large overhang, the lowest one of an overhang, or one on a "
+                      "neck thinner than a single extrusion. Expect additional slicing time.");
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 

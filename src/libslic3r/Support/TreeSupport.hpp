@@ -2,6 +2,8 @@
 #define TREESUPPORT_H
 
 #include <forward_list>
+#include <functional>
+#include <memory>
 #include <unordered_set>
 #include "ExPolygon.hpp"
 #include "Point.hpp"
@@ -13,6 +15,9 @@
 #include "Fill/Lightning/Generator.hpp"
 #include "TreeModelVolumes.hpp"
 #include "TreeSupport3D.hpp"
+#include "MiniatureSupport.hpp"
+#include "ModelSupportRisk.hpp"
+#include "SupportAnalysis.hpp"
 
 #ifndef SQ
 #define SQ(x) ((x)*(x))
@@ -89,8 +94,10 @@ struct SupportNode
                 parents.push_back(neighbor);
             }
             is_sharp_tail = parent->is_sharp_tail;
-            island = parent->island;
             skin_direction = parent->skin_direction;
+            // A node dropped or split off a parent carries the parent's sources: the branch below a
+            // contact is still routing that contact's material.
+            source_ids = parent->source_ids;
         }
     }
 
@@ -124,10 +131,14 @@ struct SupportNode
     bool           is_processed    = false;
     bool           need_extra_wall = false;
     bool           is_sharp_tail   = false;
-    bool           is_pinned       = false; // user-asked contact (enforcer, Hybrid big overhang): decimation keeps it and it suppresses nobody
-    int            island          = -1; // 3-D overhang island from assign_contact_islands; -1 = no polygon (vertical enforcer): decimation treats it as one shared pool
+    bool           is_pinned       = false; // user-asked contact (enforcer, Hybrid big overhang): contact selection keeps it and it crowds nobody
     bool           valid = true;
     ExPolygon      overhang; // when type==ePolygon, set this value to get original overhang area
+    // Which required regions this node is routing material for, by MiniatureSupport::ContactSeed id.
+    // Sorted and unique. A split copies it, a merge unions it; empty unless an analysis was asked for
+    // or support_miniature_contacts is on, and empty for a node that came from a vertical enforcer
+    // point, which has no overhang polygon of its own.
+    std::vector<uint64_t> source_ids;
 
     /*!
      * \brief The direction of the skin lines above the tip of the branch.
@@ -194,7 +205,6 @@ struct SupportNode
 class TreeSupportData
 {
 public:
-    TreeSupportData() = default;
     /*!
      * \brief Construct the TreeSupportData object
      *
@@ -376,9 +386,17 @@ public:
      * \param storage The data storage where the mesh data is gotten from and
      * where the resulting support areas are stored.
      */
+    // Generates this object's support in one pass: detection, then for a pass that measures itself
+    // the required regions and the risk field, then contact points, the contact layout, routing,
+    // toolpaths and the measurement. The output lands on the object.
     void generate();
 
     void detect_overhangs(bool check_support_necessity = false);
+
+    // Asks this generation to measure itself: build the frozen problem, carry contact provenance
+    // through routing, record what it emitted and report on it. Read-only with respect to the
+    // geometry, and off unless a caller asks for it or the miniature contact mode is on.
+    void request_analysis(bool on) { m_analysis_requested = on; }
 
     SupportNode* create_node(const Point  position,
         const int    distance_to_top,
@@ -442,7 +460,7 @@ private:
     const coordf_t MAX_BRANCH_RADIUS = 10.0;
     const coordf_t MIN_BRANCH_RADIUS = 0.4;
     coordf_t contact_radius_floor = MIN_BRANCH_RADIUS; // lower bound of a contact's radius at placement; the branch floor above stays the branch floor
-    double m_threshold_rad = 0.; // support_threshold_angle + 1 deg, capped at 89, in radians: the detector's overhang threshold, also the island band-gap angle
+    double m_threshold_rad = 0.; // support_threshold_angle + 1 deg, capped at 89, in radians: the detector's overhang threshold, also the required-region band-gap angle
     const coordf_t MAX_BRANCH_RADIUS_FIRST_LAYER = 12.0;
     const coordf_t MIN_BRANCH_RADIUS_FIRST_LAYER = 2.0;
     double diameter_angle_scale_factor = tan(5.0*M_PI/180.0);
@@ -457,8 +475,25 @@ private:
     bool  is_slim                            = false;
     bool  miniature_contacts                 = false; // support_miniature_contacts, legacy tree styles only
     bool  with_infill                        = false;
+    bool  m_analysis_requested               = false; // asked for by the caller, consumed by one generation
+    bool  m_analyze                          = false; // this attempt carries provenance and measures itself
+    // The problem this pass ran against, the model's own risk measured off the object's slices for it
+    // (left Invalid where the pass would not consult it), and what it emitted.
+    MiniatureSupport::Problem       m_problem;
+    ModelSupportRisk::Field         m_risk;
+    SupportAnalysis::EmittedSupport m_emitted;
 
 
+
+    // Builds the problem's required regions off the detected overhangs: one region per connected
+    // overhang polygon per object layer, in (layer, polygon order), with the ids they keep.
+    void build_required_regions();
+
+    // Turns this pass's contacts into the problem's seeds: sorts them by (object layer, region,
+    // position, pin category), hands out dense ids in that order and stamps each contact node with
+    // the one it got. Marks the seeds `critical`, which only SupportAnalysis reads
+    // (`critical_anchor_ids`, `support_unresolved`): selection never consults it.
+    void build_contact_seeds();
 
     /*!
      * \brief Draws circles around each node of the tree into the final support.
@@ -517,6 +552,9 @@ private:
     void insert_dropped_node(std::vector<SupportNode*>& nodes_layer, SupportNode* node);
     void create_tree_support_layers();
     void generate_toolpaths();
+    // Removes the extrusions that would print in mid-air, by the measurement's own connectivity rule,
+    // and returns what each support layer still covers.
+    std::vector<ExPolygons> remove_floating_toolpaths();
     // get unscaled radius of node
     coordf_t calc_branch_radius(coordf_t base_radius, size_t layers_to_top, size_t tip_layers, double diameter_angle_scale_factor);
     // get unscaled radius(mm) of node based on the distance mm to top
@@ -538,27 +576,6 @@ private:
         const coordf_t       gap_xy);
 };
 
-// Groups contact nodes into 3-D overhang islands and writes SupportNode::island. Two nodes share an
-// island when their overhang polygons lie at most layer_gap outer-vector indices apart and one polygon,
-// dilated by dilation[i] of the higher index i (scaled units), overlaps the other; membership is
-// transitive. Nodes whose overhang is empty keep island -1. Ids are dense, 0..n-1, in first-seen order
-// over (layer asc, index asc), so the result depends only on the input; a pointer listed twice is one
-// node. Serial and idempotent. dilation.size() must equal contact_nodes.size().
-void assign_contact_islands(std::vector<std::vector<SupportNode*>> &contact_nodes,
-                            const std::vector<coord_t> &dilation, size_t layer_gap);
-
-// Collapses contact nodes lying within min_distance_mm of a stronger neighbour of the same island
-// in 3D, where the distance is hypot(unscale(dx), unscale(dy), dz) and dz is the print_z difference
-// in mm. The survivor order is print_z ascending, then radius descending, then layer, then position;
-// a kept node suppresses a candidate only when their `island` values are equal (-1 equals -1).
-// Serial and thread-count independent: the surviving set depends only on the input.
-// Nodes with is_pinned set are always kept and never suppress a neighbour.
-// Suppressed pointers are erased from the per-layer vectors and nothing is deleted: the nodes
-// stay owned by TreeSupportData::contact_nodes, its vector of unique_ptr. The outer vector keeps
-// its size and its layer_nr - 1 indexing; a layer may be left empty.
-// A non-positive min_distance_mm is a no-op.
-void decimate_contact_nodes(std::vector<std::vector<SupportNode*>> &contact_nodes,
-                            coordf_t min_distance_mm);
 
 }
 

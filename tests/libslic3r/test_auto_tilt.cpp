@@ -2,14 +2,23 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <map>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
 #include "libslic3r/AutoTilt.hpp"
+#include "libslic3r/AutoTiltEvaluation.hpp"
 #include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/BrimEarsPoint.hpp"
+#include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/Geometry.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Slicing.hpp"
+#include "libslic3r/TriangleMesh.hpp"
 
 using namespace Slic3r;
 using namespace Slic3r::AutoTilt;
@@ -165,6 +174,68 @@ private:
     std::map<std::pair<double, double>, Contact> m_contacts;
     std::vector<Pose>                            m_calls;
 };
+
+// Verifier stand-in: hands back the PoseEvaluation the test registered for a pose, and logs every
+// call, so the tests can pin what was verified and how often. A pose nothing was registered for
+// verifies as Unknown, which is what an evaluator answers for a pose it cannot measure at all.
+class FakeVerifier : public Verifier
+{
+public:
+    void set(const Pose &p, const PoseEvaluation &e) { m_evaluations[key(p)] = e; }
+
+    PoseEvaluation evaluate(const Pose &p, const StopPredicate &) override
+    {
+        m_calls.push_back(p);
+        const auto     it  = m_evaluations.find(key(p));
+        PoseEvaluation out = it == m_evaluations.end() ? PoseEvaluation{} : it->second;
+        out.pose           = p;
+        return out;
+    }
+
+    const std::vector<Pose> &calls() const { return m_calls; }
+
+private:
+    static std::pair<double, double> key(const Pose &p) { return {p.tilt_deg, p.lean_deg}; }
+
+    std::map<std::pair<double, double>, PoseEvaluation> m_evaluations;
+    std::vector<Pose>                                   m_calls;
+};
+
+SupportAnalysis::Damage damage_of(size_t unknown_contacts, size_t inaccessible_groups, double max_risk, double total_risk)
+{
+    SupportAnalysis::Damage damage;
+    damage.unknown_contacts    = unknown_contacts;
+    damage.inaccessible_groups = inaccessible_groups;
+    damage.max_group_risk      = max_risk;
+    damage.total_group_risk    = total_risk;
+    damage.available           = true;
+    return damage;
+}
+
+// One affected instance measured in full: complete, nothing left uncovered, and stability admissible
+// on its own terms. The damage numbers are what the ranking tests vary.
+SupportAnalysis::Report measured_instance(const SupportAnalysis::Damage &damage)
+{
+    SupportAnalysis::Report report;
+    report.status                    = SupportAnalysis::Report::Status::Complete;
+    report.coverage_available        = true;
+    report.stability.available       = true;
+    report.stability.min_bed_margin  = 0.5;
+    report.stability.max_slenderness = 4.;
+    report.damage                    = damage;
+    return report;
+}
+
+// One pose measured in full over one affected instance, printing the material asked for.
+PoseEvaluation measured_pose(const SupportAnalysis::Damage &damage, double support_mm3, double raft_mm3 = 0.)
+{
+    PoseEvaluation out;
+    out.status             = PoseEvaluation::Status::Complete;
+    out.instances          = { measured_instance(damage) };
+    out.support_volume_mm3 = support_mm3;
+    out.raft_volume_mm3    = raft_mm3;
+    return out;
+}
 
 const StopPredicate never_stop = [] { return false; };
 const ProgressSink  no_progress = [](size_t, size_t) {};
@@ -359,28 +430,732 @@ TEST_CASE("search reports progress once per scored candidate", "[AutoTilt]")
     }
 }
 
-TEST_CASE("instances_unchanged matches instances by ObjectID and compares matrices exactly", "[AutoTilt]")
+TEST_CASE("verified search evaluates the root in full before it considers any pose", "[AutoTilt]")
 {
-    const Transform3d a = Transform3d::Identity();
-    const Transform3d b = Geometry::translation_transform(Vec3d(5, 0, 0));
-    const std::vector<InstanceSnapshot> cached{{ObjectID(1), a}, {ObjectID(2), b}};
+    const Constants         k;
+    const std::vector<Pose> legal = grid(k);
 
-    SECTION("an identical list is unchanged") {
-        REQUIRE(instances_unchanged(cached, {{ObjectID(1), a}, {ObjectID(2), b}}));
+    SECTION("a stop that fires before the first pose measures nothing") {
+        FakeScorer   scorer(legal, Contact{100, 100, 1000});
+        FakeVerifier verifier;
+
+        const VerifiedSearchResult r = search_verified(legal, scorer, verifier, k, [] { return true; }, no_progress);
+
+        REQUIRE(r.outcome == VerifiedSearchResult::Outcome::Canceled);
+        REQUIRE(r.verified == 0);
+        REQUIRE(verifier.calls().empty());
+        REQUIRE(scorer.calls().empty());
+        REQUIRE(r.selected.pose.is_root());
     }
-    SECTION("the smallest matrix difference counts as changed") {
-        Transform3d moved      = b;
-        moved.matrix()(0, 3) += 1e-12;
-        REQUIRE_FALSE(instances_unchanged(cached, {{ObjectID(1), a}, {ObjectID(2), moved}}));
+
+    SECTION("a cheap root below the negligible-contact floor is verified all the same") {
+        // The estimate search stops on this root: no contact at all against a 100000 mm3 object. A
+        // fragile feature the bottom exclusion plane dropped reads exactly like that, so the verified
+        // path measures the root anyway and still finds the pose the print measures as better.
+        FakeScorer scorer(legal, Contact{0, 0, 100000});
+        scorer.set(Pose{-4, 0}, Contact{-1, 0, 100000}); // the best cheap score of the grid
+        FakeVerifier verifier;
+        verifier.set(Pose{}, measured_pose(damage_of(0, 0, 4., 10.), 100.));
+        verifier.set(Pose{-4, 0}, measured_pose(damage_of(0, 0, 2., 5.), 100.));
+
+        const VerifiedSearchResult r = search_verified(legal, scorer, verifier, k, never_stop, no_progress);
+
+        REQUIRE(r.outcome == VerifiedSearchResult::Outcome::Improved);
+        REQUIRE(r.selected.pose == Pose{-4, 0});
+        REQUIRE(r.verified == 6);
     }
-    SECTION("a missing instance counts as changed") {
-        REQUIRE_FALSE(instances_unchanged(cached, {{ObjectID(1), a}}));
+
+    SECTION("an unknown root analysis leaves the object where it stands") {
+        FakeScorer   scorer(legal, Contact{100, 100, 1000});
+        FakeVerifier verifier; // nothing registered, so every pose measures Unknown
+
+        const VerifiedSearchResult r = search_verified(legal, scorer, verifier, k, never_stop, no_progress);
+
+        REQUIRE(r.outcome == VerifiedSearchResult::Outcome::VerificationUnavailable);
+        REQUIRE(r.selected.pose.is_root());
+        REQUIRE(r.verified == 1);
+        REQUIRE(verifier.calls().size() == 1);
+        REQUIRE(scorer.calls().empty()); // no cheap sweep is worth running for a root nothing measured
     }
-    SECTION("an extra instance counts as changed") {
-        REQUIRE_FALSE(instances_unchanged(cached, {{ObjectID(1), a}, {ObjectID(2), b}, {ObjectID(3), a}}));
+
+    SECTION("unresolved root coverage does not stop the search") {
+        FakeScorer     scorer(legal, Contact{100, 100, 1000});
+        PoseEvaluation root = measured_pose(damage_of(0, 0, 4., 10.), 100.);
+        root.status         = PoseEvaluation::Status::UnresolvedCoverage;
+        FakeVerifier verifier;
+        verifier.set(Pose{}, root);
+        verifier.set(Pose{-4, 0}, measured_pose(damage_of(0, 0, 1., 1.), 1.));
+
+        const VerifiedSearchResult r = search_verified(legal, scorer, verifier, k, never_stop, no_progress);
+
+        REQUIRE(r.outcome == VerifiedSearchResult::Outcome::Improved);
+        REQUIRE(r.selected.pose == Pose{-4, 0});
+        REQUIRE(r.verified > 1);
     }
-    SECTION("reordering the same instances is not a change") {
-        // Index-wise comparison would see id 2's matrix against id 1's and report a change.
-        REQUIRE(instances_unchanged(cached, {{ObjectID(2), b}, {ObjectID(1), a}}));
+}
+
+TEST_CASE("verified search shortlists five finalists by cheap score then deviation then grid order", "[AutoTilt]")
+{
+    const Constants         k;
+    const std::vector<Pose> legal = grid(k);
+    REQUIRE(legal.size() == 77); // the legal angular grid the estimate search already sweeps
+
+    SECTION("the five best cheap scores become the finalists and the sixth is left alone") {
+        FakeScorer scorer(legal, Contact{100, 100, 1000});
+        scorer.set(Pose{-2, 0}, Contact{10, 10, 1000});
+        scorer.set(Pose{-20, -15}, Contact{20, 20, 1000});
+        scorer.set(Pose{-6, 5}, Contact{30, 30, 1000});
+        scorer.set(Pose{0, -5}, Contact{40, 40, 1000});
+        scorer.set(Pose{-4, -10}, Contact{50, 50, 1000});
+        scorer.set(Pose{-8, 0}, Contact{60, 60, 1000}); // the sixth best, and never sliced
+        FakeVerifier verifier;
+        verifier.set(Pose{}, measured_pose(damage_of(0, 0, 4., 10.), 100.));
+
+        const VerifiedSearchResult r = search_verified(legal, scorer, verifier, k, never_stop, no_progress);
+
+        const std::vector<Pose> expected{Pose{-2, 0}, Pose{-20, -15}, Pose{-6, 5}, Pose{0, -5}, Pose{-4, -10}};
+        REQUIRE(r.shortlist == expected);
+        REQUIRE(r.cheap_scored == 76); // every legal pose but the root
+        REQUIRE(r.verified == 6);      // the root plus the five finalists
+        REQUIRE(verifier.calls().size() == 6);
+        REQUIRE(verifier.calls().front().is_root());
+        for (const Pose &finalist : expected)
+            REQUIRE(std::count(verifier.calls().begin(), verifier.calls().end(), finalist) == 1);
+        REQUIRE(std::count(verifier.calls().begin(), verifier.calls().end(), Pose{-8, 0}) == 0);
+    }
+
+    SECTION("equal cheap scores go to the smaller deviation and then to the earlier grid position") {
+        FakeScorer scorer(legal, Contact{100, 100, 1000});
+        for (const Pose &p : {Pose{0, -5}, Pose{-2, 0}, Pose{0, 5}, Pose{-4, 0}, Pose{-2, -5}, Pose{-6, 0}})
+            scorer.set(p, Contact{10, 10, 1000});
+        FakeVerifier verifier;
+        verifier.set(Pose{}, measured_pose(damage_of(0, 0, 4., 10.), 100.));
+
+        const VerifiedSearchResult r = search_verified(legal, scorer, verifier, k, never_stop, no_progress);
+
+        // Deviations 2, 4, 5, 5, 5.39: the two at 5 keep the order the grid lists them in, and the
+        // 6 degree tilt is the sixth of six equal scores.
+        const std::vector<Pose> expected{Pose{-2, 0}, Pose{-4, 0}, Pose{0, -5}, Pose{0, 5}, Pose{-2, -5}};
+        REQUIRE(r.shortlist == expected);
+    }
+
+    SECTION("a cheap score that is not a number orders nothing and is not shortlisted") {
+        FakeScorer   scorer(legal, Contact{100, 100, 1000});
+        const double nan = std::numeric_limits<double>::quiet_NaN();
+        scorer.set(Pose{-2, 0}, Contact{nan, 10, 1000});
+        scorer.set(Pose{-4, 0}, Contact{- std::numeric_limits<double>::infinity(), 10, 1000});
+        scorer.set(Pose{-6, 0}, Contact{10, 10, 1000});
+        FakeVerifier verifier;
+        verifier.set(Pose{}, measured_pose(damage_of(0, 0, 4., 10.), 100.));
+
+        const VerifiedSearchResult r = search_verified(legal, scorer, verifier, k, never_stop, no_progress);
+
+        REQUIRE(r.shortlist.front() == Pose{-6, 0});
+        REQUIRE(std::count(r.shortlist.begin(), r.shortlist.end(), Pose{-2, 0}) == 0);
+        REQUIRE(std::count(r.shortlist.begin(), r.shortlist.end(), Pose{-4, 0}) == 0);
+        REQUIRE(r.cheap_scored == 76); // both were scored; neither was ranked
+    }
+
+    SECTION("a finalist the full evaluation rejects is not retried and no sixth pose replaces it") {
+        FakeScorer scorer(legal, Contact{100, 100, 1000});
+        scorer.set(Pose{-2, 0}, Contact{10, 10, 1000});
+        scorer.set(Pose{-20, -15}, Contact{20, 20, 1000});
+        scorer.set(Pose{-6, 5}, Contact{30, 30, 1000});
+        scorer.set(Pose{0, -5}, Contact{40, 40, 1000});
+        scorer.set(Pose{-4, -10}, Contact{50, 50, 1000});
+        scorer.set(Pose{-8, 0}, Contact{60, 60, 1000}); // the sixth best cheap score
+        FakeVerifier   verifier;
+        verifier.set(Pose{}, measured_pose(damage_of(0, 0, 4., 10.), 100.));
+        // The best cheap score of the whole grid, and a pose the plate cannot print: a cheap score
+        // grants no validity, and the budget does not grow to look for a replacement.
+        PoseEvaluation rejected = measured_pose(damage_of(0, 0, 0., 0.), 0.);
+        rejected.status         = PoseEvaluation::Status::Invalid;
+        verifier.set(Pose{-2, 0}, rejected);
+
+        const VerifiedSearchResult r = search_verified(legal, scorer, verifier, k, never_stop, no_progress);
+
+        REQUIRE(r.shortlist.front() == Pose{-2, 0});
+        REQUIRE(r.outcome == VerifiedSearchResult::Outcome::NoImprovement);
+        REQUIRE(r.selected.pose.is_root());
+        REQUIRE(std::count(verifier.calls().begin(), verifier.calls().end(), Pose{-2, 0}) == 1);
+        REQUIRE(verifier.calls().size() == 6);
+        REQUIRE(std::count(verifier.calls().begin(), verifier.calls().end(), Pose{-8, 0}) == 0);
+    }
+}
+
+TEST_CASE("a verified candidate is measured in full whatever its coverage or stability", "[AutoTilt]")
+{
+    const Constants         k;
+    const std::vector<Pose> legal{Pose{}, Pose{-4, 0}};
+    const PoseEvaluation    root = measured_pose(damage_of(0, 0, 4., 10.), 100.);
+
+    // Half the root's risk on every count, so nothing but admissibility can keep it out.
+    PoseEvaluation candidate = measured_pose(damage_of(0, 0, 2., 5.), 50.);
+
+    const auto outcome_with = [&](const PoseEvaluation &c) {
+        FakeScorer   scorer(legal, Contact{100, 100, 1000});
+        FakeVerifier verifier;
+        verifier.set(Pose{}, root);
+        verifier.set(Pose{-4, 0}, c);
+        return search_verified(legal, scorer, verifier, k, never_stop, no_progress).outcome;
+    };
+
+    SECTION("the candidate that gives nothing up is the one that wins") {
+        REQUIRE(outcome_with(candidate) == VerifiedSearchResult::Outcome::Improved);
+    }
+
+    SECTION("an incomplete pose measurement cannot win") {
+        for (const PoseEvaluation::Status status : {PoseEvaluation::Status::Unknown, PoseEvaluation::Status::Invalid}) {
+            PoseEvaluation c = candidate;
+            c.status         = status;
+            REQUIRE(outcome_with(c) == VerifiedSearchResult::Outcome::NoImprovement);
+        }
+    }
+
+    SECTION("a pose that leaves a required region open still wins on what it measured") {
+        PoseEvaluation c                  = candidate;
+        c.status                          = PoseEvaluation::Status::UnresolvedCoverage;
+        c.instances[0].missing_anchor_ids = {17};
+        REQUIRE(outcome_with(c) == VerifiedSearchResult::Outcome::Improved);
+    }
+
+    SECTION("a pose whose support printed nothing against its required regions cannot win") {
+        // What SupportAnalysis::measure reports when nothing was emitted: no material, so no damage
+        // and no volume, which would otherwise rank above every pose that printed anything.
+        PoseEvaluation c        = candidate;
+        c.status                = PoseEvaluation::Status::UnresolvedCoverage;
+        c.instances[0].status   = SupportAnalysis::Report::Status::UnresolvedCoverage;
+        REQUIRE(outcome_with(c) == VerifiedSearchResult::Outcome::NoImprovement);
+    }
+
+    SECTION("an incomplete instance report cannot win") {
+        PoseEvaluation c        = candidate;
+        c.instances[0].status   = SupportAnalysis::Report::Status::Unknown;
+        REQUIRE(outcome_with(c) == VerifiedSearchResult::Outcome::NoImprovement);
+    }
+
+    SECTION("stability decides nothing: a pose wins on its damage however it stands") {
+        // Material on air, a group that never printed, a centroid off its footprint, no stability
+        // reading at all, and readings worse than the root's own (a margin of 0.5, slenderness 4).
+        const std::vector<std::function<void(SupportAnalysis::Stability &)>> readings{
+            [](SupportAnalysis::Stability &st) { st.unsupported_paths = 1; },
+            [](SupportAnalysis::Stability &st) { st.unrooted_groups = 1; },
+            [](SupportAnalysis::Stability &st) { st.min_bed_margin = -0.01; },
+            [](SupportAnalysis::Stability &st) { st.available = false; },
+            [](SupportAnalysis::Stability &st) { st.min_bed_margin = 0.2; },
+            [](SupportAnalysis::Stability &st) { st.max_slenderness = 5.; },
+        };
+        for (const auto &reading : readings) {
+            PoseEvaluation c = candidate;
+            reading(c.instances[0].stability);
+            REQUIRE(outcome_with(c) == VerifiedSearchResult::Outcome::Improved);
+        }
+    }
+
+    SECTION("a pose that measured a different set of instances is not comparable") {
+        PoseEvaluation two_root = root;
+        two_root.instances.push_back(measured_instance(damage_of(0, 0, 4., 10.)));
+
+        FakeScorer   scorer(legal, Contact{100, 100, 1000});
+        FakeVerifier verifier;
+        verifier.set(Pose{}, two_root);
+        verifier.set(Pose{-4, 0}, candidate); // one instance against the root's two
+        REQUIRE(search_verified(legal, scorer, verifier, k, never_stop, no_progress).outcome ==
+                VerifiedSearchResult::Outcome::NoImprovement);
+    }
+}
+
+TEST_CASE("verified ranking compares damage then volume and gates the first improved continuous objective", "[AutoTilt]")
+{
+    const Constants k; // 5% base plus 0.25% per degree of tilt
+
+    // One root and one candidate, so the ranking has nothing to hide behind: the shortlist is the
+    // single non-root pose, and what comes back is what the gate made of it.
+    const auto against_root = [&k](const Pose &pose, const PoseEvaluation &root, const PoseEvaluation &candidate) {
+        const std::vector<Pose> legal{Pose{}, pose};
+        FakeScorer              scorer(legal, Contact{100, 100, 1000});
+        FakeVerifier            verifier;
+        verifier.set(Pose{}, root);
+        verifier.set(pose, candidate);
+        return search_verified(legal, scorer, verifier, k, never_stop, no_progress);
+    };
+
+    SECTION("one contact fewer that nothing could answer for clears no percentage at all") {
+        // The steepest tilt in the grid, which the continuous gate would charge 10% for.
+        const VerifiedSearchResult r = against_root(Pose{-20, 0}, measured_pose(damage_of(2, 1, 4., 10.), 100.),
+                                                    measured_pose(damage_of(1, 1, 4., 10.), 100.));
+        REQUIRE(r.outcome == VerifiedSearchResult::Outcome::Improved);
+        REQUIRE_THAT(r.required_improvement, WithinAbs(0., 1e-12));
+    }
+
+    SECTION("one group fewer that nothing can reach clears no percentage either") {
+        const VerifiedSearchResult r = against_root(Pose{-20, 0}, measured_pose(damage_of(0, 2, 4., 10.), 100.),
+                                                    measured_pose(damage_of(0, 1, 4., 10.), 100.));
+        REQUIRE(r.outcome == VerifiedSearchResult::Outcome::Improved);
+        REQUIRE_THAT(r.required_improvement, WithinAbs(0., 1e-12));
+    }
+
+    SECTION("a lower worst group is charged against that same worst group") {
+        const PoseEvaluation root = measured_pose(damage_of(0, 0, 4., 10.), 100.);
+
+        const VerifiedSearchResult missed = against_root(Pose{-20, 0}, root, measured_pose(damage_of(0, 0, 3.61, 10.), 100.));
+        REQUIRE(missed.outcome == VerifiedSearchResult::Outcome::NoImprovement);
+        REQUIRE_THAT(missed.improvement, WithinAbs(0.0975, 1e-12)); // of the root's own 4, not of its 10
+        REQUIRE_THAT(missed.required_improvement, WithinAbs(0.10, 1e-12));
+
+        const VerifiedSearchResult cleared = against_root(Pose{-20, 0}, root, measured_pose(damage_of(0, 0, 3.59, 10.), 100.));
+        REQUIRE(cleared.outcome == VerifiedSearchResult::Outcome::Improved);
+        REQUIRE_THAT(cleared.improvement, WithinAbs(0.1025, 1e-12));
+    }
+
+    SECTION("with the counts and the worst group tied, the summed risk is what is charged") {
+        const PoseEvaluation root = measured_pose(damage_of(0, 0, 4., 10.), 100.);
+
+        const VerifiedSearchResult missed = against_root(Pose{-20, 0}, root, measured_pose(damage_of(0, 0, 4., 9.3), 100.));
+        REQUIRE(missed.outcome == VerifiedSearchResult::Outcome::NoImprovement);
+        REQUIRE_THAT(missed.improvement, WithinAbs(0.07, 1e-12));
+
+        const VerifiedSearchResult cleared = against_root(Pose{-20, 0}, root, measured_pose(damage_of(0, 0, 4., 8.9), 100.));
+        REQUIRE(cleared.outcome == VerifiedSearchResult::Outcome::Improved);
+        REQUIRE_THAT(cleared.improvement, WithinAbs(0.11, 1e-12));
+    }
+
+    SECTION("with every damage field tied, the material is what is charged") {
+        const PoseEvaluation root = measured_pose(damage_of(0, 0, 4., 10.), 90., 10.);
+
+        // A lean-only pose asks the 5% base, and the raft counts as material the print lays.
+        const VerifiedSearchResult missed = against_root(Pose{0, 5}, root, measured_pose(damage_of(0, 0, 4., 10.), 86., 10.));
+        REQUIRE(missed.outcome == VerifiedSearchResult::Outcome::NoImprovement);
+        REQUIRE_THAT(missed.improvement, WithinAbs(0.04, 1e-12));
+        REQUIRE_THAT(missed.required_improvement, WithinAbs(0.05, 1e-12));
+
+        const VerifiedSearchResult cleared = against_root(Pose{0, 5}, root, measured_pose(damage_of(0, 0, 4., 10.), 84., 10.));
+        REQUIRE(cleared.outcome == VerifiedSearchResult::Outcome::Improved);
+        REQUIRE_THAT(cleared.improvement, WithinAbs(0.06, 1e-12));
+    }
+
+    SECTION("a regression in an earlier objective is not bought back by a later one") {
+        const VerifiedSearchResult r = against_root(Pose{-4, 0}, measured_pose(damage_of(0, 0, 4., 10.), 100.),
+                                                    measured_pose(damage_of(0, 1, 0.5, 1.), 1.));
+        REQUIRE(r.outcome == VerifiedSearchResult::Outcome::NoImprovement);
+        REQUIRE(r.selected.pose.is_root());
+    }
+
+    SECTION("an exact tie on every objective retains the root") {
+        const VerifiedSearchResult r = against_root(Pose{-4, 0}, measured_pose(damage_of(0, 0, 4., 10.), 100.),
+                                                    measured_pose(damage_of(0, 0, 4., 10.), 100.));
+        REQUIRE(r.outcome == VerifiedSearchResult::Outcome::NoImprovement);
+        REQUIRE(r.selected.pose.is_root());
+        REQUIRE_THAT(r.improvement, WithinAbs(0., 1e-12));
+    }
+
+    SECTION("a root that measured nothing to improve on invents no percentage") {
+        // Nothing weighed and nothing printed on either side: the fraction has no denominator, and a
+        // pose that ties the root is not one to move the object for.
+        const VerifiedSearchResult tied = against_root(Pose{-4, 0}, measured_pose(damage_of(0, 0, 0., 0.), 0.),
+                                                       measured_pose(damage_of(0, 0, 0., 0.), 0.));
+        REQUIRE(tied.outcome == VerifiedSearchResult::Outcome::NoImprovement);
+        REQUIRE(std::isfinite(tied.improvement));
+        REQUIRE_THAT(tied.improvement, WithinAbs(0., 1e-12));
+
+        // The strictly lower earlier objective is what wins there, and it is a count, not a fraction.
+        const VerifiedSearchResult counted = against_root(Pose{-4, 0}, measured_pose(damage_of(1, 0, 0., 0.), 0.),
+                                                          measured_pose(damage_of(0, 0, 0., 0.), 0.));
+        REQUIRE(counted.outcome == VerifiedSearchResult::Outcome::Improved);
+    }
+
+    SECTION("the ranking runs damage, then volume, then deviation, then grid order") {
+        const std::vector<Pose> legal = grid(k);
+        const PoseEvaluation    root  = measured_pose(damage_of(0, 0, 4., 10.), 100.);
+
+        const auto rank_of = [&](const std::map<std::pair<double, double>, PoseEvaluation> &candidates) {
+            FakeScorer   scorer(legal, Contact{100, 100, 1000});
+            FakeVerifier verifier;
+            verifier.set(Pose{}, root);
+            double cheap = 1.;
+            for (const auto &entry : candidates) {
+                const Pose pose{entry.first.first, entry.first.second};
+                scorer.set(pose, Contact{cheap, cheap, 1000}); // both shortlisted, the other finalist slots grid fill; none of it decisive
+                cheap += 1.;
+                verifier.set(pose, entry.second);
+            }
+            return search_verified(legal, scorer, verifier, k, never_stop, no_progress).selected.pose;
+        };
+
+        // Same damage, less material: the material decides.
+        REQUIRE(rank_of({{{-8., 0.}, measured_pose(damage_of(0, 0, 2., 5.), 50.)},
+                         {{-10., 0.}, measured_pose(damage_of(0, 0, 2., 5.), 40.)}}) == Pose{-10, 0});
+        // Lower damage on more material: the damage decides.
+        REQUIRE(rank_of({{{-8., 0.}, measured_pose(damage_of(0, 0, 2., 5.), 50.)},
+                         {{-10., 0.}, measured_pose(damage_of(0, 0, 2., 6.), 40.)}}) == Pose{-8, 0});
+        // Everything tied: the pose closer to the root.
+        REQUIRE(rank_of({{{-8., 0.}, measured_pose(damage_of(0, 0, 2., 5.), 50.)},
+                         {{-10., 0.}, measured_pose(damage_of(0, 0, 2., 5.), 50.)}}) == Pose{-8, 0});
+        // Tied at the same deviation of 10 degrees: the pose the grid lists first.
+        REQUIRE(rank_of({{{-10., 0.}, measured_pose(damage_of(0, 0, 2., 5.), 50.)},
+                         {{0., 10.}, measured_pose(damage_of(0, 0, 2., 5.), 50.)}}) == Pose{0, 10});
+    }
+}
+
+TEST_CASE("the verified oracle answers to the full evaluation and never to the cheap one", "[AutoTilt]")
+{
+    const Constants k;
+
+    SECTION("five finalists, and the one the print measures best is the one applied") {
+        const std::vector<Pose> legal = grid(k);
+        FakeScorer              scorer(legal, Contact{100, 100, 1000});
+        FakeVerifier            verifier;
+        verifier.set(Pose{}, measured_pose(damage_of(0, 0, 4., 10.), 100.));
+
+        // The best cheap score of the whole grid, and the print says it is worse than the root.
+        scorer.set(Pose{-2, 0}, Contact{10, 10, 1000});
+        verifier.set(Pose{-2, 0}, measured_pose(damage_of(0, 0, 4., 11.), 60.));
+        // Nothing printed at all, and a required region left open for it: material saved buys back
+        // no coverage.
+        scorer.set(Pose{-4, 0}, Contact{20, 20, 1000});
+        PoseEvaluation uncovered       = measured_pose(damage_of(0, 0, 0., 0.), 0.);
+        uncovered.status               = PoseEvaluation::Status::UnresolvedCoverage;
+        uncovered.instances[0].status  = SupportAnalysis::Report::Status::UnresolvedCoverage;
+        verifier.set(Pose{-4, 0}, uncovered);
+        // Half the removal risk on the same material.
+        scorer.set(Pose{-6, 0}, Contact{30, 30, 1000});
+        verifier.set(Pose{-6, 0}, measured_pose(damage_of(0, 0, 2., 5.), 100.));
+        // The same removal risk on half the material: a real saving, and not the one that decides.
+        scorer.set(Pose{-8, 0}, Contact{40, 40, 1000});
+        verifier.set(Pose{-8, 0}, measured_pose(damage_of(0, 0, 4., 10.), 50.));
+        // A pose the evaluator does not answer for.
+        scorer.set(Pose{-10, 0}, Contact{50, 50, 1000});
+        PoseEvaluation unknown = measured_pose(damage_of(0, 0, 1., 1.), 1.);
+        unknown.status         = PoseEvaluation::Status::Unknown;
+        verifier.set(Pose{-10, 0}, unknown);
+        // The sixth best cheap score, which nothing ever slices.
+        scorer.set(Pose{-12, 0}, Contact{60, 60, 1000});
+
+        const VerifiedSearchResult r = search_verified(legal, scorer, verifier, k, never_stop, no_progress);
+
+        REQUIRE(r.outcome == VerifiedSearchResult::Outcome::Improved);
+        REQUIRE(r.selected.pose == Pose{-6, 0});
+        // What was actually measured, so a five-finalist answer is never read as a swept grid.
+        REQUIRE(r.cheap_scored == 76);
+        REQUIRE(r.verified == 6);
+        REQUIRE(r.shortlist.size() == 5);
+        REQUIRE(std::count(verifier.calls().begin(), verifier.calls().end(), Pose{-12, 0}) == 0);
+    }
+
+    SECTION("a grid with fewer poses than finalists runs to an answer") {
+        const std::vector<Pose> legal{Pose{}, Pose{0, -5}, Pose{-4, 0}};
+        FakeScorer              scorer(legal, Contact{100, 100, 1000});
+        scorer.set(Pose{-4, 0}, Contact{10, 10, 1000});
+        FakeVerifier verifier;
+        verifier.set(Pose{}, measured_pose(damage_of(0, 0, 4., 10.), 100.));
+        verifier.set(Pose{0, -5}, measured_pose(damage_of(0, 0, 4., 10.), 100.));
+        verifier.set(Pose{-4, 0}, measured_pose(damage_of(0, 0, 2., 5.), 100.));
+
+        const VerifiedSearchResult r = search_verified(legal, scorer, verifier, k, never_stop, no_progress);
+
+        REQUIRE(r.shortlist.size() == 2);
+        REQUIRE(r.verified == 3);
+        REQUIRE(r.outcome == VerifiedSearchResult::Outcome::Improved);
+        REQUIRE(r.selected.pose == Pose{-4, 0});
+    }
+
+    SECTION("a measurement that is not a number cannot win") {
+        const std::vector<Pose> legal{Pose{}, Pose{-4, 0}};
+        FakeScorer              scorer(legal, Contact{100, 100, 1000});
+        FakeVerifier            verifier;
+        verifier.set(Pose{}, measured_pose(damage_of(0, 0, 4., 10.), 100.));
+        // Nothing printed and a risk nobody can read: an unreadable number is not a low one.
+        PoseEvaluation nonsense = measured_pose(damage_of(0, 0, std::numeric_limits<double>::quiet_NaN(), 5.), 0.);
+        verifier.set(Pose{-4, 0}, nonsense);
+
+        const VerifiedSearchResult r = search_verified(legal, scorer, verifier, k, never_stop, no_progress);
+
+        REQUIRE(r.outcome == VerifiedSearchResult::Outcome::NoImprovement);
+        REQUIRE(r.selected.pose.is_root());
+    }
+
+    SECTION("a cancellation part way through the finalists leaves the object where it stands") {
+        const std::vector<Pose> legal{Pose{}, Pose{-4, 0}, Pose{-6, 0}};
+        FakeScorer              scorer(legal, Contact{100, 100, 1000});
+        scorer.set(Pose{-4, 0}, Contact{10, 10, 1000});
+        FakeVerifier verifier;
+        verifier.set(Pose{}, measured_pose(damage_of(0, 0, 4., 10.), 100.));
+        verifier.set(Pose{-4, 0}, measured_pose(damage_of(0, 0, 1., 1.), 1.));
+        verifier.set(Pose{-6, 0}, measured_pose(damage_of(0, 0, 1., 1.), 1.));
+
+        // The root, both cheap scores and the first finalist, and then the user says stop.
+        size_t              asked = 0;
+        const StopPredicate stop_on_fifth = [&asked] { return ++ asked >= 5; };
+
+        const VerifiedSearchResult r = search_verified(legal, scorer, verifier, k, stop_on_fifth, no_progress);
+
+        REQUIRE(r.outcome == VerifiedSearchResult::Outcome::Canceled);
+        REQUIRE(r.selected.pose.is_root());
+    }
+
+    SECTION("an evaluation that came back canceled cannot win either") {
+        const std::vector<Pose> legal{Pose{}, Pose{-4, 0}};
+        FakeScorer              scorer(legal, Contact{100, 100, 1000});
+        FakeVerifier            verifier;
+        verifier.set(Pose{}, measured_pose(damage_of(0, 0, 4., 10.), 100.));
+        PoseEvaluation stopped = measured_pose(damage_of(0, 0, 1., 1.), 1.);
+        stopped.status         = PoseEvaluation::Status::Canceled;
+        verifier.set(Pose{-4, 0}, stopped);
+
+        const VerifiedSearchResult r = search_verified(legal, scorer, verifier, k, never_stop, no_progress);
+
+        REQUIRE(r.outcome == VerifiedSearchResult::Outcome::Canceled);
+        REQUIRE(r.selected.pose.is_root());
+    }
+}
+
+namespace {
+
+// One captured plate: the selected object with two instances, a neighbour object nobody selected, a
+// plate config, the plate's printable ground and one exclusion volume. A Model copy keeps every
+// ObjectID, so the "live" side of a comparison is this input copied and then edited in one place.
+AutoTilt::EvaluationInput captured_plate()
+{
+    AutoTilt::PlateInput plate;
+    plate.plate_index = 0;
+
+    ModelObject *object = plate.model.add_object();
+    object->name        = "selected";
+    object->add_volume(make_cube(10., 10., 10.));
+    object->add_instance()->set_offset(Vec3d(0., 0., 0.));
+    object->add_instance()->set_offset(Vec3d(30., 0., 0.));
+
+    ModelObject *neighbour = plate.model.add_object();
+    neighbour->name        = "neighbour";
+    neighbour->add_volume(make_cube(5., 5., 5.));
+    neighbour->add_instance()->set_offset(Vec3d(-30., 0., 0.));
+
+    plate.full_config.set_key_value("support_top_z_distance", new ConfigOptionFloat(0.2));
+    plate.full_config.set_key_value("support_style", new ConfigOptionEnum<SupportMaterialStyle>(smsTreeSlim));
+    plate.affected_instance_ids = { object->instances[0]->id(), object->instances[1]->id() };
+    plate.printable_regions.emplace_back(Polygon{ Point::new_scale(-100., -100.), Point::new_scale(100., -100.),
+                                                  Point::new_scale(100., 100.), Point::new_scale(-100., 100.) });
+    plate.exclusions.emplace_back(Vec3d(60., 60., 0.), Vec3d(80., 80., 20.));
+    plate.mesh_identity = AutoTilt::mesh_identities(plate.model);
+
+    AutoTilt::EvaluationInput input;
+    input.object_id = object->id();
+    input.plates.push_back(std::move(plate));
+    return input;
+}
+
+// The selected object of a captured input's first plate, by the id the input names.
+ModelObject &selected_object(AutoTilt::EvaluationInput &input)
+{
+    for (ModelObject *object : input.plates.front().model.objects)
+        if (object->id() == input.object_id)
+            return *object;
+    throw std::runtime_error("the captured input names no object of its own plate");
+}
+
+} // namespace
+
+TEST_CASE("pose_admissible reads the plate's printable polygon and height and not its bounding box", "[AutoTilt]")
+{
+    AutoTilt::EvaluationInput input = captured_plate();
+
+    // The L: everything inside the printable ground's 200 x 200 mm bounding box except the quadrant
+    // at positive x and positive y, which a bounding-box test would have called inside.
+    input.plates.front().printable_regions.clear();
+    input.plates.front().printable_regions.emplace_back(Polygon{ Point::new_scale(-100., -100.), Point::new_scale(100., -100.),
+                                                                 Point::new_scale(100., 0.), Point::new_scale(0., 0.),
+                                                                 Point::new_scale(0., 100.), Point::new_scale(-100., 100.) });
+
+    // make_cube builds from the origin corner, so an instance at offset o spans [o, o + 10] on every
+    // axis; these two are the pair the captured plate names in affected_instance_ids.
+    ModelObject &object = selected_object(input);
+    object.instances[0]->set_offset(Vec3d(-50., -50., 0.));
+    object.instances[1]->set_offset(Vec3d(50., -50., 0.));
+    REQUIRE(AutoTilt::pose_admissible(input, AutoTilt::Pose{}));
+
+    // Inside the L's bounding box, outside the L itself, and clear of the plate's one exclusion, so
+    // only a test that reads the polygon refuses it.
+    object.instances[1]->set_offset(Vec3d(30., 30., 0.));
+    REQUIRE_FALSE(AutoTilt::pose_admissible(input, AutoTilt::Pose{}));
+
+    // The height the printer reaches, against the 10 mm cube that stands under it.
+    object.instances[1]->set_offset(Vec3d(50., -50., 0.));
+    input.plates.front().printable_height_mm = 5.;
+    REQUIRE_FALSE(AutoTilt::pose_admissible(input, AutoTilt::Pose{}));
+
+    input.plates.front().printable_height_mm = 10.5;
+    REQUIRE(AutoTilt::pose_admissible(input, AutoTilt::Pose{}));
+}
+
+TEST_CASE("evaluation_inputs_unchanged rejects a changed plate config or membership or plate geometry", "[AutoTilt]")
+{
+    const AutoTilt::EvaluationInput captured = captured_plate();
+
+    SECTION("the same capture read twice is unchanged") {
+        REQUIRE(AutoTilt::evaluation_inputs_unchanged(captured, captured));
+    }
+    SECTION("a config key only one side carries is a change") {
+        // Complete equality, not the partial equals()/diff() pair, which ignore keys the other side
+        // does not have: a plate override that appeared while the search ran is exactly that case.
+        AutoTilt::EvaluationInput live = captured;
+        live.plates.front().full_config.set_key_value("raft_layers", new ConfigOptionInt(3));
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(live, captured));
+    }
+    SECTION("the selected object leaving the plate is a change") {
+        AutoTilt::EvaluationInput live = captured;
+        live.plates.front().affected_instance_ids.pop_back();
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("the same instances read in another order are not a change") {
+        AutoTilt::EvaluationInput live = captured;
+        std::swap(live.plates.front().affected_instance_ids[0], live.plates.front().affected_instance_ids[1]);
+        REQUIRE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("a plate the search never captured is a change") {
+        AutoTilt::EvaluationInput live = captured;
+        live.plates.push_back(live.plates.front());
+        live.plates.back().plate_index = 1;
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("the same instances printed on another plate are a change") {
+        AutoTilt::EvaluationInput live = captured;
+        live.plates.front().plate_index = 2;
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("a plate that moved is a change") {
+        AutoTilt::EvaluationInput live = captured;
+        live.plates.front().plate_origin = Vec3d(240., 0., 0.);
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("a moved exclusion volume is a change") {
+        AutoTilt::EvaluationInput live = captured;
+        live.plates.front().exclusions.front().translate(-40., 0., 0.);
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("a printable ground of another shape is a change") {
+        AutoTilt::EvaluationInput live = captured;
+        live.plates.front().printable_regions.front().contour.points.back().x() -= scaled<coord_t>(20.);
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("another object selected on the same plate is a change") {
+        AutoTilt::EvaluationInput live = captured;
+        live.object_id = live.plates.front().model.objects.back()->id();
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+}
+
+TEST_CASE("evaluation_inputs_unchanged compares object volume and instance records by ObjectID", "[AutoTilt]")
+{
+    const AutoTilt::EvaluationInput captured = captured_plate();
+
+    // Every section edits one value of a copy that otherwise carries the captured ids, so what the
+    // comparison answers to is that value and never the identity of a freshly allocated clone.
+    AutoTilt::EvaluationInput live   = captured;
+    ModelObject              &object = selected_object(live);
+
+    SECTION("a copy that changed nothing is unchanged") {
+        REQUIRE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("the smallest instance move is a change") {
+        Geometry::Transformation moved = object.instances[1]->get_transformation();
+        moved.set_offset(moved.get_offset() + Vec3d(1e-12, 0., 0.));
+        object.instances[1]->set_transformation(moved);
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("the same instances listed in another order are not a change") {
+        std::swap(object.instances[0], object.instances[1]);
+        REQUIRE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("an instance made unprintable is a change") {
+        object.instances[1]->printable = false;
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("an instance that no longer drops to the bed is a change") {
+        object.instances[1]->auto_drop = false;
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("an instance added to the object is a change") {
+        object.add_instance()->set_offset(Vec3d(60., 0., 0.));
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("a moved volume is a change") {
+        object.volumes.front()->set_offset(Vec3d(0., 0., 1.));
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("a model part turned into a modifier is a change") {
+        object.volumes.front()->set_type(ModelVolumeType::PARAMETER_MODIFIER);
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("an object override is a change") {
+        object.config.set("support_top_z_distance", 0.3);
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("a volume override is a change") {
+        object.volumes.front()->config.set("wall_loops", 4);
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("an object made unprintable is a change") {
+        object.printable = false;
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("a layer height profile is a change") {
+        object.layer_height_profile.set(std::vector<coordf_t>{0., 0.2, 10., 0.08});
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("a layer config range is a change") {
+        object.layer_config_ranges[t_layer_height_range(0., 5.)].set("layer_height", 0.08);
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("repainted supports are a change") {
+        object.volumes.front()->supported_facets.reset();
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("repainted seams are a change") {
+        object.volumes.front()->seam_facets.reset();
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("repainted material segmentation is a change") {
+        object.volumes.front()->mmu_segmentation_facets.reset();
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("repainted fuzzy skin is a change") {
+        object.volumes.front()->fuzzy_skin_facets.reset();
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("an added brim ear is a change") {
+        object.brim_points.emplace_back(Vec3f(1.f, 1.f, 0.f), 5.f);
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("an object that left the plate is a change") {
+        live.plates.front().model.delete_object(size_t(1));
+        live.plates.front().mesh_identity = AutoTilt::mesh_identities(live.plates.front().model);
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+}
+
+TEST_CASE("The stale-input oracle rejects a changed gap or a replaced mesh or a moved neighbour", "[AutoTilt]")
+{
+    const AutoTilt::EvaluationInput captured = captured_plate();
+
+    SECTION("a support gap the measurement was not taken under is a change") {
+        AutoTilt::EvaluationInput live = captured;
+        live.plates.front().full_config.set_key_value("support_top_z_distance", new ConfigOptionFloat(0.1));
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("a mesh replaced under the same volume id is a change") {
+        // Same id, same size, same transform, same overrides: the recorded mesh pointer is the only
+        // thing that says this volume is no longer the geometry the pose was measured on.
+        AutoTilt::EvaluationInput live = captured;
+        selected_object(live).volumes.front()->set_mesh(make_cube(10., 10., 10.));
+        live.plates.front().mesh_identity = AutoTilt::mesh_identities(live.plates.front().model);
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
+    }
+    SECTION("a neighbour nobody selected moving is a change") {
+        // The pose was scored against this plate's collision and print-order context, and the
+        // neighbour is part of it even though no rotation would ever touch it.
+        AutoTilt::EvaluationInput live = captured;
+        live.plates.front().model.objects.back()->instances.front()->set_offset(Vec3d(-25., 0., 0.));
+        REQUIRE_FALSE(AutoTilt::evaluation_inputs_unchanged(captured, live));
     }
 }

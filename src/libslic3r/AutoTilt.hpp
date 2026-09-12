@@ -2,13 +2,19 @@
 
 #include <cstddef>
 #include <functional>
+#include <string>
 #include <vector>
 
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ObjectID.hpp"
 #include "libslic3r/Point.hpp"
+#include "libslic3r/Support/SupportAnalysis.hpp"
 
 namespace Slic3r { namespace AutoTilt {
+
+// Hands a piece of work to the main thread and returns once it has run. `Print::apply` mutates
+// ObjectIDs and the model tree, so it may not run on a worker; slicing and measuring may.
+using MainThreadRunner = std::function<void(const std::function<void()> &)>;
 
 // Every bound, step and threshold the search uses. Passed into grid(), search()
 // and fragility_weight() so no loop bakes a number in.
@@ -79,6 +85,25 @@ struct SearchResult
     size_t  evaluated            = 0; // candidates actually scored
 };
 
+// What one pose came to when it was sliced under the actual settings and the support the slicer
+// generated for it was measured. `instances` carries one measurement per affected physical instance,
+// in the order the instances were captured, so a safer instance never stands in for one that got
+// worse; the two volumes are those measurements summed over the instances that print them. Complete
+// says every affected instance was measured in full; UnresolvedCoverage says the generated support
+// left some required region of some instance open; Invalid says the pose never reached processing;
+// Unknown says something the evaluator does not answer for, the Organic style among them.
+struct PoseEvaluation
+{
+    enum class Status { Complete, Canceled, Invalid, Unknown, UnresolvedCoverage };
+
+    Status                               status = Status::Unknown;
+    Pose                                 pose;
+    std::vector<SupportAnalysis::Report> instances;
+    double                               support_volume_mm3 = 0.;
+    double                               raft_volume_mm3    = 0.;
+    std::vector<std::string>             reason_codes;
+};
+
 using StopPredicate = std::function<bool()>;
 using ProgressSink  = std::function<void(size_t done, size_t total)>;
 
@@ -89,14 +114,75 @@ SearchResult search(const std::vector<Pose> &legal,
                     const StopPredicate     &stop,
                     const ProgressSink      &progress);
 
+// One evaluated pose reduced to what the verified ranking compares. The Damage fields are aggregated
+// over every affected instance - counts added up, the worst group the worst of them, the sums added -
+// and the volume is the support plus the raft every instance prints. `damage.available` is false
+// unless the pose measured every affected instance in full, because a domain nothing measured is not
+// damage of zero.
+struct Objectives
+{
+    SupportAnalysis::Damage damage;
+    double                  volume_mm3 = 0.; // support plus raft
+};
+
+Objectives objectives(const PoseEvaluation &evaluation);
+
+// Lexicographic over the Damage fields in the order they are written, then over the volume: negative
+// where `is` is the better of the two, positive where it is the worse, zero where they tie. Counts
+// compare exactly, the weights and the volume within the numeric tolerance. An unavailable tuple is
+// never the better one, and two of them tie, because neither was measured.
+int compare_objectives(const Objectives &was, const Objectives &is);
+
+// Measures one pose under the actual print settings. The search holds one and never assumes what it
+// answers: a pose it cannot measure is a pose that cannot win.
+class Verifier
+{
+public:
+    virtual ~Verifier() = default;
+    virtual PoseEvaluation evaluate(const Pose &, const StopPredicate &) = 0;
+};
+
+// How many cheap-scored poses the verified search takes to full evaluation.
+constexpr size_t verified_finalist_count = 5;
+
+// What the verified search settled on. `root` is the one evaluation of the pose the object already
+// stands in, taken once and compared against throughout; `selected` is the pose to apply on Improved
+// and a copy of `root` on every other outcome. `shortlist` is the finalists the cheap sweep chose,
+// best cheap score first, and the two counts say how much was actually measured, so no caller can
+// read a `verified_finalist_count`-finalist answer as a swept grid. Canceled says the search stopped
+// before it settled;
+// VerificationUnavailable says the root itself was never measured. Coverage decides no outcome: a
+// root or candidate that leaves a required region open is ranked on what it measured.
+struct VerifiedSearchResult
+{
+    enum class Outcome { Canceled, NoImprovement, Improved, VerificationUnavailable };
+
+    Outcome                  outcome = Outcome::Canceled;
+    PoseEvaluation           root;
+    PoseEvaluation           selected;
+    std::vector<Pose>        shortlist;
+    size_t                   cheap_scored         = 0;  // poses the cheap scorer answered for
+    size_t                   verified             = 0;  // full evaluations run, the root included
+    double                   improvement          = 0.; // of the best-ranked verified candidate
+    double                   required_improvement = 0.;
+    std::vector<std::string> reason_codes;
+};
+
+// Answers VerificationUnavailable with "no_root_pose" unless `legal` contains the root pose. Evaluates
+// the root in full first, cheap-scores every other legal pose, and verifies the best
+// `verified_finalist_count` of them under the actual settings. The cheap score orders the shortlist
+// and grants nothing else: a pose wins only on what the full evaluation measured.
+VerifiedSearchResult search_verified(const std::vector<Pose> &legal,
+                                     Scorer                  &scorer,
+                                     Verifier                &verifier,
+                                     const Constants         &k,
+                                     const StopPredicate     &stop,
+                                     const ProgressSink      &progress);
+
 struct InstanceSnapshot
 {
     ObjectID    id;
     Transform3d matrix;
 };
-
-// Same count; every cached id present in live; and for each cached entry, the live entry matched by
-// ObjectID, never by position, carries an exactly equal matrix (Eigen ==, no epsilon).
-bool instances_unchanged(const std::vector<InstanceSnapshot> &cached, const std::vector<InstanceSnapshot> &live);
 
 }} // namespace Slic3r::AutoTilt

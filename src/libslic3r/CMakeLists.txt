@@ -76,6 +76,8 @@ set(lisbslic3r_sources
     Arrange.hpp
     AutoTilt.cpp
     AutoTilt.hpp
+    AutoTiltEvaluation.cpp
+    AutoTiltEvaluation.hpp
     AutoTiltScorer.cpp
     AutoTiltScorer.hpp
     BlacklistedLibraryCheck.cpp
@@ -446,6 +448,13 @@ set(lisbslic3r_sources
     SlicingAdaptive.hpp
     Slicing.cpp
     Slicing.hpp
+    Support/DisjointSets.hpp
+    Support/MiniatureSupport.cpp
+    Support/MiniatureSupport.hpp
+    Support/ModelSupportRisk.cpp
+    Support/ModelSupportRisk.hpp
+    Support/SupportAnalysis.cpp
+    Support/SupportAnalysis.hpp
     Support/SupportCommon.cpp
     Support/SupportCommon.hpp
     Support/SupportLayer.hpp
