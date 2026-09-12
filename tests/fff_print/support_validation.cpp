@@ -595,7 +595,9 @@ CaseResult measure_case(const Manifest &manifest, const ManifestCase &entry, con
             read_print_analyses(print, row);
         }
     } catch (const std::exception &e) {
-        row.status = Outcome::Unknown;
+        row.status    = Outcome::Unknown;
+        row.verified  = false;
+        row.printable = false;
         row.reason_codes.emplace_back(std::string("SliceFailed: ") + e.what());
     }
     row.elapsed_s         = std::chrono::duration<double>(std::chrono::high_resolution_clock::now() - start).count();
