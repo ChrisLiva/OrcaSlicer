@@ -4582,11 +4582,14 @@ void PrintObject::_generate_support_material()
                     if (region.critical && ! region.emitted_path)
                         ++ unreached;
                 }
+            // A report whose stability pass never ran holds zeros that measured nothing.
+            const std::string stability = report->stability.available ?
+                "unsupported paths " + std::to_string(report->stability.unsupported_paths) + ", unrooted groups " +
+                    std::to_string(report->stability.unrooted_groups) :
+                std::string("stability unavailable");
             BOOST_LOG_TRIVIAL(info) << "Support contact layout for " << this->model_object()->name
                                     << ": critical regions without material " << unreached << " of " << printable_count
-                                    << " printable, unsupported paths " << report->stability.unsupported_paths
-                                    << ", unrooted groups " << report->stability.unrooted_groups
-                                    << ", support " << report->support_volume_mm3 << " mm3, seeds candidates "
+                                    << " printable, " << stability << ", support " << report->support_volume_mm3 << " mm3, seeds candidates "
                                     << report->seeds_candidate << " / kept " << report->seeds_kept << " / restored "
                                     << report->seeds_restored << " / retained " << report->seeds_retained;
             // posSupportMaterial is still the active step here, which is what active_step_add_warning
