@@ -680,8 +680,8 @@ double segment_polygon_distance_mm(const Vec2d &a, const Vec2d &b, const ExPolyg
 // Whether the model stops the probe running from `start` to `end`. The ray down the middle of the
 // capsule is the broad phase: every hit past the start lies outside the sphere the contact's own
 // material is excused inside of, so one of them settles the direction. What that ray misses and the
-// capsule's wall does not is found by measuring the segment against each triangle whose own extents
-// reach the capsule at all.
+// capsule's wall does not is found by measuring the segment against each triangle the mesh's AABB tree
+// finds inside the capsule's bounding box.
 bool blocked_by_model(const AABBMesh &mesh, const indexed_triangle_set &its, const Vec3d &contact,
                       const Vec3d &start, const Vec3d &end, const Vec3d &far_start, double r)
 {
@@ -691,7 +691,8 @@ bool blocked_by_model(const AABBMesh &mesh, const indexed_triangle_set &its, con
         if (hit.is_hit() && hit.distance() > 1e-9 && hit.distance() <= length)
             return true;
     const Vec3d lo = start.cwiseMin(end) - Vec3d(r, r, r), hi = start.cwiseMax(end) + Vec3d(r, r, r);
-    for (const Vec3i32 &face : its.indices) {
+    for (const size_t face_id : mesh.faces_in_box(lo, hi)) {
+        const Vec3i32 &face = its.indices[face_id];
         const Vec3d v0 = its.vertices[face(0)].cast<double>(), v1 = its.vertices[face(1)].cast<double>(),
                     v2 = its.vertices[face(2)].cast<double>();
         const Vec3d tri_lo = v0.cwiseMin(v1).cwiseMin(v2), tri_hi = v0.cwiseMax(v1).cwiseMax(v2);
