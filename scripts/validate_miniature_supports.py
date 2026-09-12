@@ -404,8 +404,13 @@ METRIC_DOMAINS = {
 # The statuses a printable legacy row may carry and still be held to the full measurement.
 PRINTABLE_STATUSES = ("complete",)
 
+# The two harnesses that write rows. The name is part of a row's identity, so a row that names neither
+# belongs to no harness and would form a repeat group of its own.
+HARNESSES = ("miniature_contacts", "auto_tilt")
+
 ROW_REQUIRED_KEYS = (
     "case_id",
+    "harness",
     "style",
     "feature_mode",
     "pose",
@@ -488,6 +493,8 @@ def _validate_row_shape(row, index, cases, failures):
 
     if row.get("row_type", "pose") not in ROW_TYPES:
         failures.append("%s: row_type %r is not one of %s" % (where, row.get("row_type"), ", ".join(ROW_TYPES)))
+    if row["harness"] not in HARNESSES:
+        failures.append("%s: harness %r is not one of %s" % (where, row["harness"], ", ".join(HARNESSES)))
     if row["style"] not in case.get("styles", []):
         failures.append("%s: style %r is not declared by its case" % (where, row["style"]))
     if row["feature_mode"] not in case.get("feature_modes", []):

@@ -84,7 +84,6 @@ because it satisfies no manifest.
 {
   "version": 1,
   "model_root": "models",
-  "repeats": 7,
   "improvement_gain": { "support_volume_mm3": 0.5, "max_group_risk": 0.1 },
   "cases": [ … ]
 }
@@ -94,7 +93,6 @@ because it satisfies no manifest.
 | --- | --- |
 | `version` | `1`. Anything else is rejected. |
 | `model_root` | directory holding the models, relative to the manifest file |
-| `repeats` | the suite's default repeat count |
 | `improvement_gain` | how far a candidate has to clear the root before a saving counts, per metric |
 | `cases` | a nonempty array; every case id is unique |
 

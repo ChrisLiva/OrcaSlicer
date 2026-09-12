@@ -6,8 +6,11 @@ import hashlib
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from validate_miniature_supports import (
     ACCEPTANCE_REPEATS,
@@ -86,7 +89,6 @@ def _manifest(**overrides):
     manifest = {
         "version": MANIFEST_VERSION,
         "model_root": "models",
-        "repeats": ACCEPTANCE_REPEATS,
         "improvement_gain": {"support_volume_mm3": 0.5},
         "cases": _suite_cases(),
     }
@@ -235,7 +237,6 @@ def _one_case_manifest(**overrides):
     return {
         "version": MANIFEST_VERSION,
         "model_root": "models",
-        "repeats": ACCEPTANCE_REPEATS,
         "improvement_gain": {"support_volume_mm3": 0.5},
         "cases": [_case(**overrides)],
     }
@@ -294,6 +295,17 @@ class ResultOutcomeTest(unittest.TestCase):
 
     def test_no_rows_at_all_fails(self):
         self.assertTrue(validate_results(self.manifest, []))
+
+    def test_a_row_naming_no_known_harness_fails(self):
+        # A misspelled harness forms a complete repeat group of its own, so only the name catches it.
+        failures = validate_results(self.manifest, _pose_rows(self.case, harness="auto-tilt"))
+        self.assertTrue(any("harness" in failure for failure in failures), failures)
+
+    def test_a_row_without_a_harness_fails(self):
+        rows = _pose_rows(self.case)
+        del rows[0]["harness"]
+        failures = validate_results(self.manifest, rows)
+        self.assertTrue(any("no harness" in failure for failure in failures), failures)
 
     def test_a_row_naming_an_unknown_case_fails(self):
         rows = _pose_rows(self.case)
@@ -663,8 +675,7 @@ class DemonstrationTest(unittest.TestCase):
                         failures)
 
 
-FAKE_BINARY = """#!/usr/bin/env python3
-import json, os, sys
+FAKE_BINARY = """import json, os, sys
 record = {"argv": sys.argv[1:], "env": dict(os.environ)}
 with open(os.environ["FAKE_RECORD"], "w", encoding="utf-8") as handle:
     json.dump(record, handle)
@@ -732,7 +743,6 @@ class RunCommandTest(unittest.TestCase):
         path = os.path.join(root, "fake_tests.py")
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(FAKE_BINARY)
-        os.chmod(path, 0o755)
         return path
 
     def _invoke(self, root, exit_code="0", rows_path=None):
@@ -744,8 +754,13 @@ class RunCommandTest(unittest.TestCase):
         os.environ["FAKE_ROWS"] = rows_path if rows_path is not None else rows
         os.environ["FAKE_EXIT"] = exit_code
         os.environ["ORCA_AUTOTILT_COARSE"] = "1"
+        # The fake binary is a Python script, and Windows runs no script by its shebang: cmd_run's
+        # command goes through this interpreter, with the argv and environment cmd_run built.
+        real_run = subprocess.run
         try:
-            code = cmd_run(manifest_path, binary, out_dir)
+            with mock.patch("validate_miniature_supports.subprocess.run",
+                            lambda command, **kwargs: real_run([sys.executable] + list(command), **kwargs)):
+                code = cmd_run(manifest_path, binary, out_dir)
         finally:
             for key in ("FAKE_RECORD", "FAKE_ROWS", "FAKE_EXIT", "ORCA_AUTOTILT_COARSE"):
                 os.environ.pop(key, None)
