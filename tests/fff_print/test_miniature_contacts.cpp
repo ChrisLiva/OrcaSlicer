@@ -1732,6 +1732,34 @@ TEST_CASE("A blade beside a broader guard is placed off the print's own geometry
     }
 }
 
+TEST_CASE("An analysis under the auto support line width measures its regions at the width the toolpaths use", "[MiniatureContacts]")
+{
+    // line_width and support_line_width both 0 is the auto width Print::validate accepts: the
+    // toolpaths are laid at Flow::auto_extrusion_width for the 0.4 nozzle, so the required regions
+    // have to be measured at that width too, not at the 0 the options read.
+    const DynamicPrintConfig config = fixture_config({ { "support_style", "tree_slim" },
+                                                       { "support_top_z_distance", "0.2" },
+                                                       { "support_remove_small_overhang", "0" },
+                                                       { "nozzle_diameter", "0.4" },
+                                                       { "line_width", "0" },
+                                                       { "support_line_width", "0" } });
+
+    AnalysisRun run;
+    run_analysis(run, tail_fixture(), config);
+    const SupportAnalysis::Report *report = run.report();
+    REQUIRE(report != nullptr);
+    REQUIRE_THAT(report->key.extrusion_width_mm,
+                 WithinAbs(Flow::auto_extrusion_width(FlowRole::frSupportMaterial, 0.4f), 1e-6));
+    REQUIRE(! report->coverage.empty());
+    // A region with room for one extrusion carries the lattice its coverage is counted on; a 0 width
+    // lays no cell, and an empty lattice reads as complete coverage whatever the contacts reach.
+    for (const SupportAnalysis::RegionCoverage &region : report->coverage) {
+        INFO("region " << region.region_id);
+        if (region.printable)
+            REQUIRE(region.cell_count() > 0);
+    }
+}
+
 TEST_CASE("A requested support analysis names required regions and contact seeds by value", "[MiniatureContacts]")
 {
     // support_style, because the default resolves to organic, which the analysis does not run under;

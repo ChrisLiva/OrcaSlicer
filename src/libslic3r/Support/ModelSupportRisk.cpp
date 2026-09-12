@@ -313,21 +313,25 @@ Field build(const std::vector<Slice> &slices, double extrusion_width_mm, const s
             const std::vector<size_t> &island = field.island_nodes[flat];
             if (island.size() < 2 || island.size() > max_joinable_island_nodes)
                 continue;
-            DisjointSets sets(field.nodes.size());
+            // The island's samples were appended one after another, so they are the dense range from
+            // island.front(): the sets cover that range, not every node the field holds so far.
+            const size_t base = island.front();
+            assert(island.back() - base + 1 == island.size());
+            DisjointSets sets(island.size());
             for (size_t e = first_edge; e < field.edges.size(); ++ e)
-                sets.join(field.edges[e].a, field.edges[e].b);
+                sets.join(field.edges[e].a - base, field.edges[e].b - base);
             const size_t anchor = island.front();
             for (const size_t stray : island) {
-                if (sets.find(stray) == sets.find(anchor))
+                if (sets.find(stray - base) == sets.find(anchor - base))
                     continue;
                 // The closest pair between what is already joined and the piece this node belongs to.
                 size_t best_a = anchor, best_b = stray;
                 double best_d = std::numeric_limits<double>::max();
                 for (const size_t here : island) {
-                    if (sets.find(here) != sets.find(anchor))
+                    if (sets.find(here - base) != sets.find(anchor - base))
                         continue;
                     for (const size_t there : island) {
-                        if (sets.find(there) != sets.find(stray))
+                        if (sets.find(there - base) != sets.find(stray - base))
                             continue;
                         const double d = (field.nodes[there].position - field.nodes[here].position).cast<double>().norm();
                         if (d < best_d) {
@@ -338,7 +342,7 @@ Field build(const std::vector<Slice> &slices, double extrusion_width_mm, const s
                     }
                 }
                 add_edge(best_a, best_b, std::numeric_limits<double>::infinity(), best_d * SCALING_FACTOR);
-                sets.join(anchor, stray);
+                sets.join(anchor - base, stray - base);
             }
         }
     }

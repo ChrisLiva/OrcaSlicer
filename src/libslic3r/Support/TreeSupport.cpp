@@ -753,6 +753,18 @@ static Point bounding_box_middle(const BoundingBox &bbox)
     return (bbox.max + bbox.min) / 2;
 }
 
+// The support line width generate_toolpaths() lays support at. SupportParameters leaves
+// support_extrusion_width at 0 where support_line_width and line_width are both 0, which
+// Print::validate accepts as the auto width.
+static coordf_t toolpath_support_width(const SupportParameters &params, const PrintConfig &print_config,
+                                       const PrintObjectConfig &object_config)
+{
+    if (params.support_extrusion_width > 0.)
+        return params.support_extrusion_width;
+    const coordf_t nozzle_diameter = print_config.nozzle_diameter.get_at(object_config.support_filament - 1);
+    return Flow::auto_extrusion_width(FlowRole::frSupportMaterial, float(nozzle_diameter));
+}
+
 TreeSupport::TreeSupport(PrintObject& object, const SlicingParameters &slicing_params)
     : m_object(&object), m_slicing_params(slicing_params), m_support_params(object), m_object_config(&object.config())
 {
@@ -783,9 +795,9 @@ TreeSupport::TreeSupport(PrintObject& object, const SlicingParameters &slicing_p
         m_threshold_rad     = Geometry::deg2rad(thresh_angle);
     }
     if (miniature_contacts) {
-        // All three scale with the support line width SupportParameters resolved (its support_extrusion_width),
-        // never the raw support_line_width option, whose default is an absolute 0.
-        const coordf_t w         = m_support_params.support_extrusion_width;
+        // All three scale with the support line width the toolpaths are laid at, never the raw
+        // support_line_width option, whose default is an absolute 0.
+        const coordf_t w         = toolpath_support_width(m_support_params, *m_print_config, *m_object_config);
         contact_radius_floor     = w;
         minimum_roof_area        = SQ(scaled<double>(2.38 * w)); // 0.42 * 2.38 = 1.0: today's 1 mm2 at the width it was tuned on
         enforcer_overhang_offset = scaled<double>(2. * w);
@@ -1502,14 +1514,10 @@ static void make_perimeter_and_infill(ExtrusionEntitiesPtr& dst, const ExPolygon
 void TreeSupport::generate_toolpaths()
 {
     const PrintObjectConfig &object_config = m_object->config();
-    coordf_t support_extrusion_width = m_support_params.support_extrusion_width;
+    coordf_t support_extrusion_width = toolpath_support_width(m_support_params, *m_print_config, object_config);
     coordf_t nozzle_diameter = m_print_config->nozzle_diameter.get_at(object_config.support_filament - 1);
     coordf_t layer_height = object_config.layer_height.value;
     const size_t wall_count = object_config.tree_support_wall_count.value;
-
-    // Check if set to zero, use default if so.
-    if (support_extrusion_width <= 0.0)
-        support_extrusion_width = Flow::auto_extrusion_width(FlowRole::frSupportMaterial, (float)nozzle_diameter);
 
     // coconut: use same intensity settings as SupportMaterial.cpp
     auto m_support_material_interface_flow = support_material_interface_flow(m_object, float(m_slicing_params.layer_height));
@@ -2028,7 +2036,7 @@ void TreeSupport::build_required_regions()
     MiniatureSupport::Problem &problem = m_problem;
     problem.regions.clear();
     problem.seeds.clear();
-    problem.extrusion_width_mm = m_support_params.support_extrusion_width;
+    problem.extrusion_width_mm = toolpath_support_width(m_support_params, *m_print_config, m_object->config());
     const double reach = MiniatureSupport::legal_reach(m_object->config().tree_support_branch_distance.value,
                                                        m_object->config().max_bridge_length.value);
     // Object layer 0 owns no contact: generate_contact_points() places contacts for the overhangs of

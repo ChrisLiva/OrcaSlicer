@@ -280,9 +280,14 @@ def _validate_case(case, index, failures):
     if not isinstance(bounds, dict) or not bounds:
         failures.append("%s: quality_bounds must state the bounds this case is held to" % where)
     else:
+        # A bound on a metric no row carries reads no observation and so never fails: a misspelled
+        # name would drop the bound without a word.
+        measured = {metric for metrics in METRIC_DOMAINS.values() for metric in metrics}
         for key, value in sorted(bounds.items()):
             if not _is_finite(value):
                 failures.append("%s: quality bound %s is not a finite number" % (where, key))
+            if not key.startswith("max_") or key[len("max_"):] not in measured:
+                failures.append("%s: quality bound %s names no measured metric" % (where, key))
 
     _validate_physical_declaration(case, where, failures)
 
@@ -472,7 +477,10 @@ def validate_corpus(manifest, manifest_dir):
 def _pose_key(pose):
     if not isinstance(pose, dict):
         return None
-    return (round(float(pose.get("tilt_deg", 0.0)), 6), round(float(pose.get("lean_deg", 0.0)), 6))
+    tilt, lean = pose.get("tilt_deg"), pose.get("lean_deg")
+    if not _is_finite(tilt) or not _is_finite(lean):
+        return None
+    return (round(float(tilt), 6), round(float(lean), 6))
 
 
 def _validate_row_shape(row, index, cases, failures):
@@ -626,17 +634,21 @@ def validate_results(manifest, rows):
         return ["the run produced no result rows"]
 
     pose_rows = []
+    selections = {}
     for index, row in enumerate(rows):
         case = _validate_row_shape(row, index, cases, failures)
         if case is None:
             continue
         if row.get("row_type", "pose") == "selection":
             _validate_selection_row(row, case, failures)
+            key = (row["case_id"], row["style"], row["feature_mode"])
+            selections[key] = selections.get(key, 0) + 1
             continue
         pose_rows.append(row)
         _validate_row_outcome(row, case, failures)
 
-    # Every declared style, feature mode and repeat produced exactly one row.
+    # Every declared style, feature mode and repeat produced exactly one row from each harness that
+    # measures it, and the exhaustive sweep one selection row.
     groups = {}
     for row in pose_rows:
         # The harness belongs in the key: both harnesses measure the same case, style and mode, and
@@ -645,17 +657,27 @@ def validate_results(manifest, rows):
         groups.setdefault(key, []).append(row["repeat"])
     for case in manifest.get("cases", []):
         for style in case.get("styles", []):
+            # GeneratedEvaluator refuses Organic before slicing, so the auto-tilt harness writes no row
+            # for it, pose or selection.
+            sweeps = style != "organic"
             for mode in case.get("feature_modes", []):
-                produced = [key for key in groups if key[:3] == (case["id"], style, mode)]
-                if not produced:
-                    failures.append("case %s %s/%s produced no rows" % (case["id"], style, mode))
-                    continue
-                for key in produced:
-                    repeats = sorted(groups[key])
-                    expected = list(range(case.get("repeats", 0)))
-                    if repeats != expected:
-                        failures.append("case %s %s/%s pose %s produced repeats %s, not %s"
-                                        % (case["id"], style, mode, key[3], repeats, expected))
+                for harness in HARNESSES:
+                    if harness == "auto_tilt" and not sweeps:
+                        continue
+                    produced = [key for key in groups if key[:3] == (case["id"], style, mode) and key[4] == harness]
+                    if not produced:
+                        failures.append("case %s %s/%s produced no %s rows" % (case["id"], style, mode, harness))
+                        continue
+                    for key in produced:
+                        repeats = sorted(groups[key])
+                        expected = list(range(case.get("repeats", 0)))
+                        if repeats != expected:
+                            failures.append("case %s %s/%s %s pose %s produced repeats %s, not %s"
+                                            % (case["id"], style, mode, harness, key[3], repeats, expected))
+                selected = selections.get((case["id"], style, mode), 0)
+                if selected != (1 if sweeps else 0):
+                    failures.append("case %s %s/%s produced %d selection rows, not %d"
+                                    % (case["id"], style, mode, selected, 1 if sweeps else 0))
 
     failures.extend(_validate_quality_bounds(manifest, pose_rows))
     return failures
@@ -1193,6 +1215,11 @@ def cmd_run(manifest_path, test_binary, output_dir):
         ENV_MINIATURE_RESULTS: os.path.join(output_dir, "miniature_contacts.jsonl"),
         ENV_AUTOTILT_RESULTS: os.path.join(output_dir, "auto_tilt.jsonl"),
     }
+    # A harness truncates its results file only once its case runs, so a file an earlier run left
+    # would stand in for a case that never ran this time.
+    for path in result_paths.values():
+        if os.path.exists(path):
+            os.remove(path)
     env = dict(os.environ)
     env[ENV_MANIFEST] = os.path.abspath(manifest_path)
     env[ENV_MINIATURE_CORPUS] = model_root

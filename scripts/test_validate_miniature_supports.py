@@ -200,6 +200,12 @@ class ManifestSchemaTest(unittest.TestCase):
         cases[0]["repeats"] = ACCEPTANCE_REPEATS - 1
         self.assertTrue(validate_manifest(_manifest(cases=cases)))
 
+    def test_a_quality_bound_naming_no_measured_metric_fails(self):
+        cases = _suite_cases()
+        cases[0]["quality_bounds"] = {"max_support_volum_mm3": 500.0}
+        self.assertTrue(any("names no measured metric" in failure
+                            for failure in validate_manifest(_manifest(cases=cases))))
+
     def test_an_undocumented_config_override_fails(self):
         cases = _suite_cases()
         cases[0]["config_overrides"] = {"support_style": "tree_strong"}
@@ -242,14 +248,15 @@ def _one_case_manifest(**overrides):
     }
 
 
-def _pose_rows(case, **overrides):
+def _harness_rows(case, harness, overrides):
+    """One harness's pose rows: every declared style, feature mode and repeat at the default pose."""
     rows = []
     for style in case["styles"]:
         for mode in case["feature_modes"]:
             for repeat in range(case["repeats"]):
                 row = {
                     "row_type": "pose",
-                    "harness": "miniature_contacts",
+                    "harness": harness,
                     "case_id": case["id"],
                     "style": style,
                     "feature_mode": mode,
@@ -273,98 +280,132 @@ def _pose_rows(case, **overrides):
     return rows
 
 
+def _run_rows(case, **overrides):
+    """Every row one run over `case` writes: each harness's pose rows, then the one selection row the
+    auto-tilt sweep writes per style and feature mode. The sweep measures no Organic style."""
+    swept = dict(case, styles=[style for style in case["styles"] if style != "organic"])
+    rows = _harness_rows(case, "miniature_contacts", overrides) + _harness_rows(swept, "auto_tilt", overrides)
+    for style in swept["styles"]:
+        for mode in case["feature_modes"]:
+            rows.append(_selection_row(case, style=style, feature_mode=mode, **overrides))
+    return rows
+
+
 class ResultOutcomeTest(unittest.TestCase):
     def setUp(self):
         self.manifest = _one_case_manifest()
         self.case = self.manifest["cases"][0]
 
     def test_a_complete_result_set_passes(self):
-        self.assertEqual(validate_results(self.manifest, _pose_rows(self.case)), [])
+        self.assertEqual(validate_results(self.manifest, _run_rows(self.case)), [])
 
     def test_both_harnesses_measuring_the_same_case_each_keep_their_own_repeats(self):
         # Both harnesses iterate the same manifest. The contact harness writes its repeats at the
         # default pose, and the auto-tilt sweep writes its own repeats at grid entry 0, which is that
         # same default pose. A run that merged the two would read repeats [0, 0, 1, 1, ...] and
         # reject its own correct output.
-        contacts = _pose_rows(self.case)
-        tilt_root = _pose_rows(self.case, harness="auto_tilt")
-        tilt_leaned = _pose_rows(self.case, harness="auto_tilt", pose={"tilt_deg": 6.0, "lean_deg": -3.0})
-        self.assertEqual(validate_results(self.manifest, contacts + tilt_root + tilt_leaned), [])
+        rows = _run_rows(self.case)
+        tilt_leaned = _harness_rows(self.case, "auto_tilt", {"pose": {"tilt_deg": 6.0, "lean_deg": -3.0}})
+        self.assertEqual(validate_results(self.manifest, rows + tilt_leaned), [])
         # A repeat one harness never wrote is still missing, whatever the other harness produced.
-        self.assertTrue(validate_results(self.manifest, contacts + tilt_root[:-1]))
+        tilt_root = [row for row in rows if row["harness"] == "auto_tilt" and row["row_type"] == "pose"]
+        rows.remove(tilt_root[-1])
+        self.assertTrue(validate_results(self.manifest, rows + tilt_leaned))
 
     def test_no_rows_at_all_fails(self):
         self.assertTrue(validate_results(self.manifest, []))
 
     def test_a_row_naming_no_known_harness_fails(self):
         # A misspelled harness forms a complete repeat group of its own, so only the name catches it.
-        failures = validate_results(self.manifest, _pose_rows(self.case, harness="auto-tilt"))
+        failures = validate_results(self.manifest, _run_rows(self.case, harness="auto-tilt"))
         self.assertTrue(any("harness" in failure for failure in failures), failures)
 
     def test_a_row_without_a_harness_fails(self):
-        rows = _pose_rows(self.case)
+        rows = _run_rows(self.case)
         del rows[0]["harness"]
         failures = validate_results(self.manifest, rows)
         self.assertTrue(any("no harness" in failure for failure in failures), failures)
 
+    def test_a_pose_without_a_finite_tilt_and_lean_fails_without_raising(self):
+        # An empty pose is not the root pose, and a coordinate that is not a number is a failure to
+        # report, not an exception that ends the run.
+        for pose in ({}, {"tilt_deg": "x", "lean_deg": 0.0}, {"tilt_deg": float("nan"), "lean_deg": 0.0}):
+            rows = _run_rows(self.case)
+            rows[0]["pose"] = pose
+            failures = validate_results(self.manifest, rows)
+            self.assertTrue(any("pose names no tilt and lean" in failure for failure in failures), (pose, failures))
+
     def test_a_row_naming_an_unknown_case_fails(self):
-        rows = _pose_rows(self.case)
+        rows = _run_rows(self.case)
         rows[0]["case_id"] = "no_such_case"
         self.assertTrue(validate_results(self.manifest, rows))
 
     def test_a_duplicate_repeat_fails(self):
-        rows = _pose_rows(self.case)
+        rows = _run_rows(self.case)
         rows.append(dict(rows[0]))
         self.assertTrue(validate_results(self.manifest, rows))
 
     def test_a_missing_repeat_fails(self):
-        rows = _pose_rows(self.case)[:-1]
+        rows = _run_rows(self.case)[1:]
         self.assertTrue(validate_results(self.manifest, rows))
 
     def test_a_declared_style_that_produced_nothing_fails(self):
         case = _case(styles=["tree_slim", "tree_strong"])
         manifest = _one_case_manifest(styles=["tree_slim", "tree_strong"])
-        rows = [row for row in _pose_rows(case) if row["style"] == "tree_slim"]
+        rows = [row for row in _run_rows(case) if row["style"] == "tree_slim"]
         self.assertTrue(validate_results(manifest, rows))
 
     def test_a_declared_feature_mode_that_produced_nothing_fails(self):
-        rows = [row for row in _pose_rows(self.case) if row["feature_mode"] == "off"]
+        rows = [row for row in _run_rows(self.case) if row["feature_mode"] == "off"]
         self.assertTrue(validate_results(self.manifest, rows))
 
+    def test_a_run_that_one_harness_never_wrote_fails(self):
+        rows = _run_rows(self.case)
+        for harness in ("miniature_contacts", "auto_tilt"):
+            failures = validate_results(self.manifest, [row for row in rows if row["harness"] != harness])
+            self.assertTrue(any("produced no %s rows" % harness in failure for failure in failures), failures)
+
+    def test_an_organic_style_carries_no_auto_tilt_rows(self):
+        # GeneratedEvaluator refuses Organic, so the sweep writes nothing for it and nothing is missing.
+        manifest = _one_case_manifest(styles=["organic"], expected_outcome="organic_estimate")
+        rows = _run_rows(manifest["cases"][0], status="organic_estimate", estimate_only=True, verified=False)
+        self.assertEqual({row["harness"] for row in rows}, {"miniature_contacts"})
+        self.assertEqual(validate_results(manifest, rows), [])
+
     def test_a_nonfinite_available_metric_fails(self):
-        rows = _pose_rows(self.case)
+        rows = _run_rows(self.case)
         rows[0]["metrics"] = _metrics(total_group_risk=float("nan"))
         self.assertTrue(validate_results(self.manifest, rows))
         rows[0]["metrics"] = _metrics(support_volume_mm3=float("inf"))
         self.assertTrue(validate_results(self.manifest, rows))
 
     def test_a_skipped_measurement_fails(self):
-        rows = _pose_rows(self.case)
+        rows = _run_rows(self.case)
         rows[0]["measured"] = False
         self.assertTrue(validate_results(self.manifest, rows))
 
     def test_a_row_whose_hashes_do_not_match_its_case_fails(self):
-        rows = _pose_rows(self.case)
+        rows = _run_rows(self.case)
         rows[0]["source_sha256"] = "c" * 64
         self.assertTrue(validate_results(self.manifest, rows))
-        rows = _pose_rows(self.case)
+        rows = _run_rows(self.case)
         rows[0]["config_digest"] = "c" * 64
         self.assertTrue(validate_results(self.manifest, rows))
 
     def test_an_unavailable_peak_memory_needs_the_explicit_marker(self):
-        rows = _pose_rows(self.case)
+        rows = _run_rows(self.case)
         rows[0]["peak_memory_bytes"] = None
         self.assertTrue(validate_results(self.manifest, rows))
-        rows = _pose_rows(self.case, peak_memory_bytes=None, peak_memory_available=False)
+        rows = _run_rows(self.case, peak_memory_bytes=None, peak_memory_available=False)
         self.assertEqual(validate_results(self.manifest, rows), [])
 
     def test_a_printable_complete_row_with_an_invalid_path_fails(self):
-        rows = _pose_rows(self.case)
+        rows = _run_rows(self.case)
         rows[0]["metrics"] = _metrics(invalid_paths=1)
         self.assertTrue(validate_results(self.manifest, rows))
 
     def test_a_printable_complete_row_with_an_unavailable_metric_fails(self):
-        rows = _pose_rows(self.case)
+        rows = _run_rows(self.case)
         rows[0]["metrics"] = _metrics(damage_available=False)
         self.assertTrue(validate_results(self.manifest, rows))
 
@@ -377,8 +418,8 @@ class ResultOutcomeTest(unittest.TestCase):
             expected_reason_by_mode={"on": "MissingAnchor"},
         )
         case = manifest["cases"][0]
-        rows = [row for row in _pose_rows(case) if row["feature_mode"] == "off"]
-        for row in _pose_rows(case):
+        rows = [row for row in _run_rows(case) if row["feature_mode"] == "off"]
+        for row in _run_rows(case):
             if row["feature_mode"] != "on":
                 continue
             row["status"] = "unresolved_coverage"
@@ -390,13 +431,13 @@ class ResultOutcomeTest(unittest.TestCase):
         self.assertTrue(validate_results(_one_case_manifest(), rows))
 
     def test_a_row_whose_status_is_not_the_declared_outcome_fails(self):
-        rows = _pose_rows(self.case, status="unresolved_coverage", reason_codes=["MissingAnchor"])
+        rows = _run_rows(self.case, status="unresolved_coverage", reason_codes=["MissingAnchor"])
         self.assertTrue(validate_results(self.manifest, rows))
 
     def test_an_unresolved_coverage_case_passes_only_when_every_repeat_is_unresolved(self):
         manifest = _one_case_manifest(expected_outcome="unresolved_coverage", expected_reason="MissingAnchor")
         case = manifest["cases"][0]
-        rows = _pose_rows(
+        rows = _run_rows(
             case,
             status="unresolved_coverage",
             reason_codes=["MissingAnchor"],
@@ -415,7 +456,7 @@ class ResultOutcomeTest(unittest.TestCase):
             quality_bounds={"max_support_volume_mm3": 1.0},
         )
         case = manifest["cases"][0]
-        rows = _pose_rows(
+        rows = _run_rows(
             case,
             status="unresolved_coverage",
             reason_codes=["MissingAnchor"],
@@ -425,37 +466,37 @@ class ResultOutcomeTest(unittest.TestCase):
 
     def test_a_quality_bound_a_ranked_case_exceeds_fails(self):
         manifest = _one_case_manifest(quality_bounds={"max_support_volume_mm3": 1.0})
-        rows = _pose_rows(manifest["cases"][0])
+        rows = _run_rows(manifest["cases"][0])
         self.assertTrue(validate_results(manifest, rows))
 
     def test_an_organic_row_is_estimate_only_and_never_complete(self):
         manifest = _one_case_manifest(expected_outcome="organic_estimate")
         case = manifest["cases"][0]
-        rows = _pose_rows(case, status="organic_estimate", estimate_only=True, verified=False)
+        rows = _run_rows(case, status="organic_estimate", estimate_only=True, verified=False)
         self.assertEqual(validate_results(manifest, rows), [])
-        claimed = _pose_rows(case, status="organic_estimate", estimate_only=False, verified=True)
+        claimed = _run_rows(case, status="organic_estimate", estimate_only=False, verified=True)
         self.assertTrue(validate_results(manifest, claimed))
 
     def test_an_unexpected_unknown_status_fails(self):
-        rows = _pose_rows(self.case, status="unknown")
+        rows = _run_rows(self.case, status="unknown")
         self.assertTrue(validate_results(self.manifest, rows))
 
     def test_an_unexpected_unresolved_status_fails(self):
-        rows = _pose_rows(self.case, status="unresolved_coverage", reason_codes=["MissingAnchor"])
+        rows = _run_rows(self.case, status="unresolved_coverage", reason_codes=["MissingAnchor"])
         self.assertTrue(validate_results(self.manifest, rows))
 
     def test_a_row_stamped_with_the_version_header_fallback_revision_fails(self):
         # libslic3r_version.h defines GIT_COMMIT_HASH "0000000" wherever the build did not stamp the
         # real commit, so a row carrying it names no build at all.
-        rows = _pose_rows(self.case, build_revision="0000000")
+        rows = _run_rows(self.case, build_revision="0000000")
         self.assertTrue(validate_results(self.manifest, rows))
-        rows = _pose_rows(self.case, build_revision="")
+        rows = _run_rows(self.case, build_revision="")
         self.assertTrue(validate_results(self.manifest, rows))
 
     def test_an_invalid_pose_row_is_accepted_only_where_the_plate_cannot_hold_it(self):
-        rows = _pose_rows(self.case, status="invalid", plate_contained=False, printable=False)
+        rows = _run_rows(self.case, status="invalid", plate_contained=False, printable=False)
         self.assertEqual(validate_results(self.manifest, rows), [])
-        rows = _pose_rows(self.case, status="invalid", plate_contained=True, printable=False)
+        rows = _run_rows(self.case, status="invalid", plate_contained=True, printable=False)
         self.assertTrue(validate_results(self.manifest, rows))
 
 
@@ -536,7 +577,9 @@ class SelectionRowTest(unittest.TestCase):
     def setUp(self):
         self.manifest = _one_case_manifest()
         self.case = self.manifest["cases"][0]
-        self.rows = _pose_rows(self.case)
+        # Everything a run writes but the one selection row each test supplies for itself.
+        self.rows = [row for row in _run_rows(self.case)
+                     if row["row_type"] != "selection" or row["feature_mode"] != self.case["feature_modes"][0]]
 
     def _run(self, **overrides):
         return validate_results(self.manifest, self.rows + [_selection_row(self.case, **overrides)])
@@ -570,6 +613,14 @@ class SelectionRowTest(unittest.TestCase):
         row = _selection_row(self.case)
         del row["selection_summary"]
         self.assertTrue(validate_results(self.manifest, self.rows + [row]))
+
+    def test_each_swept_style_and_mode_carries_exactly_one_selection_row(self):
+        row = _selection_row(self.case)
+        self.assertEqual(validate_results(self.manifest, self.rows + [row]), [])
+        missing = validate_results(self.manifest, self.rows)
+        self.assertTrue(any("produced 0 selection rows" in failure for failure in missing), missing)
+        doubled = validate_results(self.manifest, self.rows + [row, dict(row)])
+        self.assertTrue(any("produced 2 selection rows" in failure for failure in doubled), doubled)
 
 
 class DemonstrationTest(unittest.TestCase):
@@ -685,7 +736,7 @@ if source and os.path.isfile(source):
     rows = [json.loads(line) for line in open(source, encoding="utf-8") if line.strip()]
 for variable, harness in (("ORCA_MINIATURE_RESULTS", "miniature_contacts"), ("ORCA_AUTOTILT_RESULTS", "auto_tilt")):
     target = os.environ.get(variable)
-    if not target:
+    if not target or variable in os.environ.get("FAKE_SKIP", "").split(","):
         continue
     with open(target, "w", encoding="utf-8") as handle:
         for row in rows:
@@ -731,8 +782,9 @@ class RunCommandTest(unittest.TestCase):
             if "weaker_neck_risk" in (case.get("demonstrates") or []):
                 on_metrics["max_group_risk"] = 0.5
             on_volumes = [9.0] * 7 if "redundant_support_reduction" in (case.get("demonstrates") or []) else [10.0] * 7
-            rows += _demo_rows(case, [10.0] * 7, on_volumes, on_metrics=on_metrics)
-            rows.append(_selection_row(case))
+            demo = _demo_rows(case, [10.0] * 7, on_volumes, on_metrics=on_metrics)
+            rows += demo + [dict(row, harness="auto_tilt") for row in demo]
+            rows += [_selection_row(case, feature_mode=mode) for mode in case["feature_modes"]]
         rows_path = os.path.join(root, "rows.jsonl")
         with open(rows_path, "w", encoding="utf-8") as handle:
             for row in rows:
@@ -745,14 +797,21 @@ class RunCommandTest(unittest.TestCase):
             handle.write(FAKE_BINARY)
         return path
 
-    def _invoke(self, root, exit_code="0", rows_path=None):
+    def _invoke(self, root, exit_code="0", rows_path=None, skip="", stale=False):
         manifest_path, rows = self._corpus(root)
         binary = self._binary(root)
         record = os.path.join(root, "record.json")
         out_dir = os.path.join(root, "out")
+        if stale:
+            # The auto-tilt rows a passing earlier run left in the same output directory.
+            os.mkdir(out_dir)
+            with open(rows, "r", encoding="utf-8") as source, \
+                    open(os.path.join(out_dir, "auto_tilt.jsonl"), "w", encoding="utf-8") as target:
+                target.writelines(line for line in source if json.loads(line).get("harness") == "auto_tilt")
         os.environ["FAKE_RECORD"] = record
         os.environ["FAKE_ROWS"] = rows_path if rows_path is not None else rows
         os.environ["FAKE_EXIT"] = exit_code
+        os.environ["FAKE_SKIP"] = skip
         os.environ["ORCA_AUTOTILT_COARSE"] = "1"
         # The fake binary is a Python script, and Windows runs no script by its shebang: cmd_run's
         # command goes through this interpreter, with the argv and environment cmd_run built.
@@ -762,7 +821,7 @@ class RunCommandTest(unittest.TestCase):
                             lambda command, **kwargs: real_run([sys.executable] + list(command), **kwargs)):
                 code = cmd_run(manifest_path, binary, out_dir)
         finally:
-            for key in ("FAKE_RECORD", "FAKE_ROWS", "FAKE_EXIT", "ORCA_AUTOTILT_COARSE"):
+            for key in ("FAKE_RECORD", "FAKE_ROWS", "FAKE_EXIT", "FAKE_SKIP", "ORCA_AUTOTILT_COARSE"):
                 os.environ.pop(key, None)
         return code, record, out_dir, manifest_path
 
@@ -808,6 +867,11 @@ class RunCommandTest(unittest.TestCase):
     def test_a_failing_process_propagates(self):
         with tempfile.TemporaryDirectory() as root:
             code, _, _, _ = self._invoke(root, exit_code="3")
+            self.assertEqual(code, 1)
+
+    def test_a_results_file_an_earlier_run_left_does_not_stand_in_for_one_never_written(self):
+        with tempfile.TemporaryDirectory() as root:
+            code, _, _, _ = self._invoke(root, skip=ENV_AUTOTILT_RESULTS, stale=True)
             self.assertEqual(code, 1)
 
     def test_rows_that_do_not_satisfy_the_manifest_fail_the_run(self):
