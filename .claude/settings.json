@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bun \"$CLAUDE_PROJECT_DIR\"/.crank/hooks/session-start.ts",
+            "command": "[ ! -f \"$CLAUDE_PROJECT_DIR\"/.crank/hooks/session-start.ts ] || bun \"$CLAUDE_PROJECT_DIR\"/.crank/hooks/session-start.ts",
             "timeout": 10
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bun \"$CLAUDE_PROJECT_DIR\"/.crank/hooks/post-write.ts",
+            "command": "[ ! -f \"$CLAUDE_PROJECT_DIR\"/.crank/hooks/post-write.ts ] || bun \"$CLAUDE_PROJECT_DIR\"/.crank/hooks/post-write.ts",
             "timeout": 10
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bun \"$CLAUDE_PROJECT_DIR\"/.crank/hooks/stop.ts",
+            "command": "[ ! -f \"$CLAUDE_PROJECT_DIR\"/.crank/hooks/stop.ts ] || bun \"$CLAUDE_PROJECT_DIR\"/.crank/hooks/stop.ts",
             "timeout": 10
           }
         ]

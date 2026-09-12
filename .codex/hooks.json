@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bun .crank/hooks/session-start.ts",
+            "command": "[ ! -f .crank/hooks/session-start.ts ] || bun .crank/hooks/session-start.ts",
             "timeout": 10
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bun .crank/hooks/post-write.ts",
+            "command": "[ ! -f .crank/hooks/post-write.ts ] || bun .crank/hooks/post-write.ts",
             "timeout": 10
           }
         ]
