@@ -2140,9 +2140,11 @@ void TreeSupport::build_contact_seeds()
     }
 
     // The deterministic order: object layer, then polygon order within it (region ids are handed out
-    // in exactly that order), then position, then pin category. Never the order the parallel contact
-    // pass inserted the nodes in, and never a node address.
-    std::sort(candidates.begin(), candidates.end(), [](const SeedCandidate &a, const SeedCandidate &b) {
+    // in exactly that order), then position, then pin category, and never a node address. Hybrid's
+    // forced contacts can tie on all four, so a tie keeps the order the contact pass placed them in:
+    // one worker fills each layer's list, so that order repeats run to run, and stable_sort keeps it
+    // where std::sort's tie order differs between standard libraries.
+    std::stable_sort(candidates.begin(), candidates.end(), [](const SeedCandidate &a, const SeedCandidate &b) {
         if (a.region != b.region)
             return a.region < b.region;
         if (a.position != b.position)
