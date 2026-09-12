@@ -31,7 +31,7 @@ Point pt_mm(double x, double y) { return Point(scale_(x), scale_(y)); }
 
 } // namespace
 
-TEST_CASE("Local model width reads the solid the query sits in, not the overhang under it", "[ModelSupportRisk]")
+TEST_CASE("Local model width reads the solid the query sits in and not the overhang under it", "[ModelSupportRisk]")
 {
     SECTION("a 4 mm strip and a 0.8 mm strip of the same length measure their own widths")
     {
@@ -192,7 +192,7 @@ TEST_CASE("A hanging weapon reaches the bed upward through its hand and the hand
 }
 
 
-TEST_CASE("The risk weight rises with thinner material, a narrower neck and a longer lever", "[ModelSupportRisk]")
+TEST_CASE("The risk weight rises with thinner material or a narrower neck or a longer lever", "[ModelSupportRisk]")
 {
     const double w = 0.42;   // the resolved support extrusion width
 
@@ -259,7 +259,7 @@ std::vector<ModelSupportRisk::Slice> two_necks(double left_neck_mm)
 
 } // namespace
 
-TEST_CASE("Model risk ranks a narrow neck, a long lever and thin material worse, and unknown geometry as unknown", "[ModelSupportRisk]")
+TEST_CASE("Model risk ranks a narrow neck or a long lever or thin material worse and unknown geometry as unknown", "[ModelSupportRisk]")
 {
     const auto   never_stop = []() { return false; };
     const double w          = 0.42;
@@ -484,7 +484,7 @@ TEST_CASE("Removal access answers with the first clear direction of the fixed or
     }
 }
 
-TEST_CASE("Printed support blocks removal access, bar the contact's own material at the contact", "[ModelSupportRisk]")
+TEST_CASE("Printed support blocks removal access except the contact's own material at the contact", "[ModelSupportRisk]")
 {
     const double               probe = 0.3;
     const indexed_triangle_set plate = open_plate();

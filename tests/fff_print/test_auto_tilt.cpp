@@ -1896,7 +1896,7 @@ TEST_CASE("Repeated generations decide an improvement by envelope and write one 
     }
 }
 
-TEST_CASE("A manifest case naming the Organic style is measured as an estimate, never as a generated result", "[AutoTilt]")
+TEST_CASE("A manifest case naming the Organic style is measured as an estimate and never as a generated result", "[AutoTilt]")
 {
     // A case's style string goes straight into set_deserialize_strict (case_object), so it has to be
     // a value s_keys_map_SupportMaterialStyle carries. A spelling the enum does not know throws

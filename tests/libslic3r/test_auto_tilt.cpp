@@ -494,7 +494,7 @@ TEST_CASE("verified search evaluates the root in full before it considers any po
     }
 }
 
-TEST_CASE("verified search shortlists five finalists by cheap score, deviation and grid order", "[AutoTilt]")
+TEST_CASE("verified search shortlists five finalists by cheap score then deviation then grid order", "[AutoTilt]")
 {
     const Constants         k;
     const std::vector<Pose> legal = grid(k);
@@ -583,7 +583,7 @@ TEST_CASE("verified search shortlists five finalists by cheap score, deviation a
     }
 }
 
-TEST_CASE("a verified candidate is measured in full, whatever its coverage or stability", "[AutoTilt]")
+TEST_CASE("a verified candidate is measured in full whatever its coverage or stability", "[AutoTilt]")
 {
     const Constants         k;
     const std::vector<Pose> legal{Pose{}, Pose{-4, 0}};
@@ -665,7 +665,7 @@ TEST_CASE("a verified candidate is measured in full, whatever its coverage or st
     }
 }
 
-TEST_CASE("verified ranking compares damage, then volume, and gates the first improved continuous objective", "[AutoTilt]")
+TEST_CASE("verified ranking compares damage then volume and gates the first improved continuous objective", "[AutoTilt]")
 {
     const Constants k; // 5% base plus 0.25% per degree of tilt
 
@@ -955,7 +955,7 @@ ModelObject &selected_object(AutoTilt::EvaluationInput &input)
 
 } // namespace
 
-TEST_CASE("pose_admissible reads the plate's printable polygon and height, not its bounding box", "[AutoTilt]")
+TEST_CASE("pose_admissible reads the plate's printable polygon and height and not its bounding box", "[AutoTilt]")
 {
     AutoTilt::EvaluationInput input = captured_plate();
 

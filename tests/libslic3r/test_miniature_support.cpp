@@ -138,7 +138,7 @@ std::vector<Point> retained_positions(const MiniatureSupport::Problem &problem, 
 
 } // namespace
 
-TEST_CASE("A contact moves only inside its own region, within its legal reach and over every witness it held", "[MiniatureSupport][MiniatureContacts]")
+TEST_CASE("A contact moves only inside its own region and within its legal reach and over every witness it held", "[MiniatureSupport][MiniatureContacts]")
 {
     // A 6 x 6 mm guard block standing on the bed with a 0.8 mm blade off its +x face, and one overhang
     // band laid along the blade's centre line from 4 mm inside the guard to 2 mm out along the blade.
@@ -253,7 +253,7 @@ TEST_CASE("A contact moves only inside its own region, within its legal reach an
     }
 }
 
-TEST_CASE("Placement takes measured printable ground only, and settles what it cannot tell apart by the shorter move", "[MiniatureSupport][MiniatureContacts]")
+TEST_CASE("Placement takes measured printable ground only and settles what it cannot tell apart by the shorter move", "[MiniatureSupport][MiniatureContacts]")
 {
     const ModelSupportRisk::Field field =
         ModelSupportRisk::build(blade_and_stilted_pad(), 0.42, []() { return false; });
@@ -369,7 +369,7 @@ TEST_CASE("Placement weighs a contact over the width it will be printed at and n
     }
 }
 
-TEST_CASE("The frozen witness lattice halves the extrusion width, aligns to scaled coordinates and keeps every clipped cell", "[MiniatureSupport][MiniatureContacts]")
+TEST_CASE("The frozen witness lattice halves the extrusion width and aligns to scaled coordinates and keeps every clipped cell", "[MiniatureSupport][MiniatureContacts]")
 {
     // A 1.05 x 0.55 mm rectangle whose lower-left corner sits at (0.209, -0.209) mm: no edge of it
     // lines up with a 0.21 mm lattice, the region straddles y = 0, and its left column is 0.001 mm

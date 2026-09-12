@@ -116,7 +116,7 @@ never captured, every re-run green); re-run once before reading a lone `[AutoTil
 failure named its case: "A processed tree-support print
 measures its emitted contact through the support analysis" failed once in the `ctest -j5` gate on 2026-09-10, passing
 alone and on the re-run, assertion not captured. Capture the failing assertion before re-running.
-`[MiniatureContacts]` "Support components come from printed slabs that touch, and material with no root is counted"
+`[MiniatureContacts]` "Support components come from printed slabs that touch and material with no root is counted"
 failed its `split.stability.unsupported_paths > 0` leg once under `ctest -j5` (read `0 > 0`), then passed 12 of 12
 runs alone, 30 of 30 runs five at a time and the full gate re-run (2026-09-10, no raft, analysis requested); re-run
 once before reading a lone failure there as a regression.

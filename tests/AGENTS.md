@@ -57,4 +57,4 @@ Check these before writing your own setup or output-parsing code.
 - Never combine conditions with `&&` or `||` inside one assertion. Split them so Catch2 can print both operands on failure.
 - Compare floats with `WithinAbs` or `WithinRel`, never `==`. Prefer these over `Approx` in new tests.
 - Keep tests self-contained: no shared state, green under `--order rand`.
-- A comma in a test-case name splits the name into two Catch2 test specs, so the binary run by full name matches nothing and exits nonzero with no failure printed. Select such a case with `ctest -R '<prefix regex>'`, or escape the comma as `\,` on the binary.
+- Keep commas out of a test-case name. A comma splits the name into two Catch2 test specs, so the binary run by full name matches nothing and exits nonzero with no failure printed. Select an older case that still carries one with `ctest -R '<prefix regex>'`, or escape the comma as `\,` on the binary.

@@ -755,7 +755,7 @@ TEST_CASE("A region with no contact of its own is covered and has a path when a 
     REQUIRE_FALSE(uncarried.coverage[1].emitted_path);
 }
 
-TEST_CASE("A removal group is what printed support connects, and a drawn roof gap divides nothing", "[MiniatureContacts]")
+TEST_CASE("A removal group is what printed support connects and a drawn roof gap divides nothing", "[MiniatureContacts]")
 {
     // One real required region off a processed print: the band under the lip, on the object layer and
     // at the contact Z the detector filed it at. What stands under it is written out below, so the
@@ -828,7 +828,7 @@ TEST_CASE("A removal group is what printed support connects, and a drawn roof ga
     }
 }
 
-TEST_CASE("Group risk weighs contact area by model risk, lengthens with the run to the root and counts blocked access apart", "[MiniatureContacts]")
+TEST_CASE("Group risk weighs contact area by model risk and the run to the root and counts blocked access apart", "[MiniatureContacts]")
 {
     AnalysisRun run;
     run_analysis(run, lip_fixture(),
@@ -1976,7 +1976,7 @@ TEST_CASE("Merged support branches carry every contact source that reached them"
     REQUIRE(reached.size() == anchors.size());
 }
 
-TEST_CASE("Emitted contact is measured from printed support material, not from the planned gap", "[MiniatureContacts]")
+TEST_CASE("Emitted contact is measured from printed support material and not from the planned gap", "[MiniatureContacts]")
 {
     // Leg 1, a positive top gap: the tip sits a planned gap under the model and the layer drawn
     // inside that gap is never extruded, so only what the toolpaths cover can count as contact.
@@ -2122,7 +2122,7 @@ TEST_CASE("Support and raft volume are summed from the emitted extrusions alone"
     REQUIRE(std::abs(no_raft.report()->support_volume_mm3 - (no_raft_support + brim_volume)) > 1e-6);
 }
 
-TEST_CASE("Support components come from printed slabs that touch, and material with no root is counted", "[MiniatureContacts]")
+TEST_CASE("Support components come from printed slabs that touch and material with no root is counted", "[MiniatureContacts]")
 {
     AnalysisRun run;
     run_analysis(run, fin_fixture(),
@@ -2539,7 +2539,7 @@ TEST_CASE("A branch roots on the model only where the settings allow it", "[Mini
     REQUIRE(volume_above(measured.object(), measured.object().slicing_parameters().object_print_z_min) > 0.);
 }
 
-TEST_CASE("A disabled print measures itself only when asked, and lets the measurement go with its slice", "[MiniatureContacts]")
+TEST_CASE("A disabled print measures itself only when asked and lets the measurement go with its slice", "[MiniatureContacts]")
 {
     const DynamicPrintConfig config = fixture_config({ { "support_style", "tree_slim" }, { "support_top_z_distance", "0.2" } });
 
@@ -2629,7 +2629,7 @@ TEST_CASE("A disabled print measures itself only when asked, and lets the measur
 
 
 
-TEST_CASE("An overhang no branch can reach warns the user, and one every branch reaches does not", "[MiniatureContacts]")
+TEST_CASE("An overhang no branch can reach warns the user and one every branch reaches does not", "[MiniatureContacts]")
 {
     // The closed box's ceiling is an overhang its own walls give a branch no way out of, so under
     // settings that forbid resting on the model the generated pass places no support for it at all:
