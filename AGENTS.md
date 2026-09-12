@@ -43,8 +43,9 @@ Build the target you are iterating on, not `all`: `all` is 929 objects, `OrcaSli
 precompiled header set (`libslic3r.h`, `Point.hpp`, `PrintConfig.hpp`, `Config.hpp`) reach every
 object in libslic3r and the GUI, `Print.hpp` reaches about 120 per config, `Support/*.hpp` reach 7
 or fewer. A `CMakeLists.txt` edit reconfigures but recompiles only what its flags change:
-`GIT_COMMIT_HASH` reaches the five sources that read it (`set_source_files_properties` in
-`src/slic3r/CMakeLists.txt` and `tests/fff_print/CMakeLists.txt`), where the former global `add_definitions()` re-stamped every object
+the `git_commit_hash_header` target in `src/slic3r/CMakeLists.txt` regenerates `git_commit_hash.h` on every build,
+rewriting it only when the hash changes, and only `GUI/BuildCommit.cpp` (plus `BaseException.cpp` on Windows) and
+`tests/fff_print/support_validation.cpp` include it, where the former global `add_definitions()` re-stamped every object
 after each new commit (1 h 14 min for `--target all`, 2026-09-08).
 
 Never start a second `cmake --build` in a build directory that already has one running: two Ninja
@@ -131,6 +132,13 @@ miniature-contacts branch 43.1 s, 1.31 to 1.32 mm on 47 layers and 80 to 81 clus
 between runs of one binary. The branch's extra 29.6 s sits in `STAGE_RISK_FIELD` 9.3 s, `STAGE_MEASURE` 7.3 s,
 the serial region-merge double loop in `TreeSupport::build_contact_seeds` 4.7 s (wrapped by no stage),
 `STAGE_SELECT_CONTACTS` 4.0 s and `remove_floating_toolpaths` 3.7 s.
+
+## Documentation
+
+- Docs live in `docs/`; the high-level design of a subsystem goes in `docs/HLSD/<subsystem>.md`.
+- Describe the design as it stands — what the subsystem does, why it exists, and the constraints that shape it. Not the route that got there: no phases, task lists, status markers, or "before/after this PR" framing.
+- Planning and investigation output (brainstorms, superpowers design and plan docs) stays in `docs/superpowers/`, which is gitignored. Never commit it.
+- Write a doc only when the design is not evident from the code, and when a change invalidates an existing one, update it in the same PR.
 
 ## Code Style
 

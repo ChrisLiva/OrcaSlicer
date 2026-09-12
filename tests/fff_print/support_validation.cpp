@@ -6,6 +6,12 @@
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/Utils.hpp"
 
+#if __has_include("git_commit_hash.h")
+#include "git_commit_hash.h"
+#else
+#define GIT_COMMIT_HASH "0000000" // no generated header: a build without the GUI
+#endif
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>

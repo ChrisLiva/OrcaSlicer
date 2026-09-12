@@ -54,3 +54,5 @@ __pycache__/
 *.opc
 # crank-mem
 .crank/
+/.test/
+docs/superpowers/

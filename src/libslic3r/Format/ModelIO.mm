@@ -1,5 +1,11 @@
 #include "ModelIO.hpp"
+// ModelIO pulls in CoreGraphics' CGToneMapping.h, which uses a macOS 15 type with no availability
+// guard. Apple clang 21 rejects that inside the SDK header under the project's
+// -Werror=unguarded-availability-new at the 11.3 deployment target, with the 26.5 and 27 SDKs alike.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunguarded-availability-new"
 #import <ModelIO/ModelIO.h>
+#pragma clang diagnostic pop
 
 namespace Slic3r {
 
