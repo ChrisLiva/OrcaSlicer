@@ -677,7 +677,10 @@ TEST_CASE("Generated evaluation measures legacy support read-only and refuses Or
 
     // Legacy with the miniature contact mode off: the one generated pass is measured where it
     // stands, nothing thinned it, and the required regions the support never reached are reported
-    // rather than passed.
+    // rather than passed. The pose reads UnresolvedCoverage under the rule `SupportAnalysis::support_unresolved`
+    // exports - a critical region wide enough for one support extrusion whose sources reached no
+    // printed material, or a routed group that never printed - which the fin's overhang trips on
+    // both counts.
     const AutoTilt::PoseEvaluation plain = evaluate(config({ { "support_style", "tree_slim" }, { "support_miniature_contacts", "0" } }));
     INFO("reasons: " << reasons_of(plain));
     REQUIRE(plain.instances.size() == 1);
@@ -685,7 +688,6 @@ TEST_CASE("Generated evaluation measures legacy support read-only and refuses Or
     REQUIRE(measured.coverage_available);
     REQUIRE(measured.contact_risk_available);
     REQUIRE(! measured.key.region_ids.empty());
-    REQUIRE(! measured.missing_anchor_ids.empty());
     REQUIRE(plain.status == AutoTilt::PoseEvaluation::Status::UnresolvedCoverage);
     REQUIRE(std::find(plain.reason_codes.begin(), plain.reason_codes.end(),
                       AutoTilt::Reason::required_region_unsupported) != plain.reason_codes.end());

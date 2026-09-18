@@ -601,7 +601,7 @@ PoseEvaluation GeneratedEvaluator::evaluate(const Pose &pose, const StopPredicat
 
             switch (report.status) {
             case SupportAnalysis::Report::Status::Complete:
-                if (! report.missing_anchor_ids.empty()) {
+                if (SupportAnalysis::support_unresolved(report)) {
                     out.status = worse(out.status, PoseEvaluation::Status::UnresolvedCoverage);
                     add_reason(out.reason_codes, Reason::required_region_unsupported);
                 }
