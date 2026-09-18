@@ -459,6 +459,8 @@ set(lisbslic3r_sources
     Support/SupportAnalysis.hpp
     Support/SupportCommon.cpp
     Support/SupportCommon.hpp
+    Support/SupportComponents.cpp
+    Support/SupportComponents.hpp
     Support/SupportLayer.hpp
     Support/SupportMaterial.cpp
     Support/SupportMaterial.hpp

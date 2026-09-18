@@ -1,7 +1,7 @@
 #include "SupportAnalysis.hpp"
 
-#include "DisjointSets.hpp"
 #include "RemovalAccess.hpp"
+#include "SupportComponents.hpp"
 #include "../AABBMesh.hpp"
 #include "../ClipperUtils.hpp"
 #include "../Geometry/ConvexHull.hpp"
@@ -58,155 +58,6 @@ CoverageKey CoverageKey::from_problem(const MiniatureSupport::Problem &problem)
 
 namespace {
 
-// One polygon of one slab, and the polygons of the neighbouring slabs whose material it continues
-// into.
-struct Piece
-{
-    ExPolygon           polygon;
-    double              bottom_z  = 0.;
-    double              print_z   = 0.;
-    std::vector<size_t> below;
-    std::vector<size_t> above;
-    size_t              component = 0;
-};
-
-struct Components
-{
-    std::vector<Piece>                    pieces;
-    std::vector<std::pair<size_t, size_t>> slab_range;  // [first, last) piece index of each slab
-    size_t                                count = 0;
-    std::vector<char>                     bed_rooted;   // one per component
-};
-
-// A slab whose underside is on the plate. `EmittedLayer::bottom_z` and a `Layer`'s print_z minus its
-// height are both the plan's own arithmetic, so the plate slab's bottom is zero to floating-point
-// noise and every slab above it starts a whole layer up: nothing about the slab's own height enters
-// this, which is what keeps a thin first layer under a thicker one (0.1 mm under 0.25 mm) from
-// letting the floating slab above it pass as plate-rooted.
-bool on_bed(double bottom_z)
-{
-    return bottom_z <= EPSILON;
-}
-
-// What positive-area overlap between the polygons of consecutive touching slabs joins up. Two slabs
-// take part only when their closed Z intervals touch, so material separated by a slab that printed
-// nothing is separate however far the two overlap in plan, and an overlap that has no area joins
-// nothing either. `slabs` is ordered by ascending print_z. A component is rooted where one of its pieces
-// starts at `ground_z`: the plate for support, whose first slab (the raft's, where there is one) starts
-// there, and the object's own first slab for the model, which the plate or a raft carries.
-Components build_components(const std::vector<Slab> &slabs, double ground_z)
-{
-    Components out;
-    out.slab_range.resize(slabs.size());
-    for (size_t s = 0; s < slabs.size(); ++ s) {
-        out.slab_range[s].first = out.pieces.size();
-        for (const ExPolygon &polygon : slabs[s].polygons) {
-            Piece piece;
-            piece.polygon  = polygon;
-            piece.bottom_z = slabs[s].bottom_z;
-            piece.print_z  = slabs[s].print_z;
-            out.pieces.emplace_back(std::move(piece));
-        }
-        out.slab_range[s].second = out.pieces.size();
-    }
-
-    DisjointSets sets(out.pieces.size());
-
-    // Two pieces whose boxes do not overlap intersect in nothing, so the clip runs on the pairs whose
-    // boxes do: a few per piece on a layer of hundreds, where the pairwise clip is hundreds per piece.
-    std::vector<BoundingBox> boxes;
-    boxes.reserve(out.pieces.size());
-    for (const Piece &piece : out.pieces)
-        boxes.push_back(get_extents(piece.polygon));
-    for (size_t s = 0; s + 1 < slabs.size(); ++ s) {
-        if (slabs[s + 1].bottom_z > slabs[s].print_z + 1e-6)
-            continue; // the two slabs do not touch: nothing printed between them
-        for (size_t i = out.slab_range[s].first; i < out.slab_range[s].second; ++ i)
-            for (size_t j = out.slab_range[s + 1].first; j < out.slab_range[s + 1].second; ++ j) {
-                if (! boxes[i].overlap(boxes[j]))
-                    continue;
-                if (intersection_ex(ExPolygons{ out.pieces[i].polygon }, ExPolygons{ out.pieces[j].polygon }).empty())
-                    continue;
-                out.pieces[i].above.push_back(j);
-                out.pieces[j].below.push_back(i);
-                sets.join(j, i);
-            }
-    }
-
-    std::vector<size_t> label(out.pieces.size(), size_t(-1));
-    for (size_t i = 0; i < out.pieces.size(); ++ i) {
-        const size_t root = sets.find(i);
-        if (label[root] == size_t(-1))
-            label[root] = out.count ++;
-        out.pieces[i].component = label[root];
-    }
-    out.bed_rooted.assign(out.count, 0);
-    for (const Piece &piece : out.pieces)
-        if (piece.bottom_z <= ground_z + EPSILON)
-            out.bed_rooted[piece.component] = 1;
-    return out;
-}
-
-// Which components of `support` stand on something. The plate first, then a termination against the
-// object, which counts only where the settings permit resting on the model at all and where the model
-// it rests on is itself connected to the object's own first layer, which the plate or a raft carries.
-// `model` is the object's own sliced body, in the same frame as the support and already grouped into
-// its own components.
-std::vector<char> rooted_components(const Components &support, const std::vector<Slab> &model_slabs, const Components &model,
-                                    bool on_build_plate_only, double bottom_gap)
-{
-    std::vector<char> rooted = support.bed_rooted;
-    if (on_build_plate_only)
-        return rooted;
-    std::vector<double> model_tops(model_slabs.size(), 0.);
-    for (size_t s = 0; s < model_slabs.size(); ++ s)
-        model_tops[s] = model_slabs[s].print_z;
-    for (const Piece &piece : support.pieces) {
-        if (rooted[piece.component])
-            continue;
-        // The object material this slab comes down onto: no further below its underside than the
-        // gap the settings leave between a support bottom and the object, plus the slab itself,
-        // because the surface it stands over is only known to the layer it was sliced at.
-        const double reach = bottom_gap + (piece.print_z - piece.bottom_z);
-        size_t       s     = size_t(std::lower_bound(model_tops.begin(), model_tops.end(),
-                                                     piece.bottom_z - reach - 1e-6) - model_tops.begin());
-        for (; s < model_slabs.size() && model_slabs[s].print_z <= piece.bottom_z + 1e-6; ++ s) {
-            for (size_t m = model.slab_range[s].first; m < model.slab_range[s].second; ++ m) {
-                // The object it rests on has to be standing up itself: material that is floating
-                // holds nothing.
-                if (! model.bed_rooted[model.pieces[m].component])
-                    continue;
-                if (intersection_ex(ExPolygons{ piece.polygon }, ExPolygons{ model.pieces[m].polygon }).empty())
-                    continue;
-                rooted[piece.component] = 1;
-                break;
-            }
-            if (rooted[piece.component])
-                break;
-        }
-    }
-    return rooted;
-}
-
-// The middle of a piece's section in mm: the centroid of its outline, half way up its own slab.
-Vec3d piece_middle(const Piece &piece)
-{
-    const Point point = piece.polygon.contour.centroid();
-    return Vec3d(point.x() * SCALING_FACTOR, point.y() * SCALING_FACTOR, 0.5 * (piece.bottom_z + piece.print_z));
-}
-
-// The piece of `slab` a printed part sits in, or npos when the part has no outline or no piece holds
-// its first point.
-size_t piece_containing(const Components &support, size_t slab, const ExPolygon &part)
-{
-    if (part.contour.points.empty())
-        return size_t(-1);
-    for (size_t k = support.slab_range[slab].first; k < support.slab_range[slab].second; ++ k)
-        if (support.pieces[k].polygon.contains(part.contour.points.front(), true))
-            return k;
-    return size_t(-1);
-}
-
 // What the support extrusions covered, layer by layer, at the width they were emitted with. The raft
 // the object stands on comes first and comes from the support layers themselves: it is emitted
 // support material that carries no routed provenance, so the attributed record does not hold it, and
@@ -241,23 +92,6 @@ std::vector<Slab> printed_support_slabs(const PrintObject &object, const Emitted
         slab_of_layer.push_back(l);
     }
     return slabs;
-}
-
-// The ground the object stands on: its own first layer where that layer is the one on the plate,
-// every printed support slab that starts on the plate, the raft among them, and whatever bed adhesion
-// the print laid afterwards. A support slab that starts on the plate roots its own component by
-// construction, so which components hold something up does not enter this. A skirt is neither support
-// nor the object's, so it never gets here.
-ExPolygons bed_ground(const std::vector<Slab> &model_slabs, const std::vector<Slab> &support_slabs, const Polygons &adhesion)
-{
-    ExPolygons ground;
-    if (! model_slabs.empty() && on_bed(model_slabs.front().bottom_z))
-        ground = model_slabs.front().polygons;
-    for (const Slab &slab : support_slabs)
-        if (on_bed(slab.bottom_z))
-            append(ground, slab.polygons);
-    append(ground, union_ex(adhesion));
-    return union_ex(ground);
 }
 
 // Where the sliced volume's mass sits in plan: each slice weighted by the layer height it fills,
@@ -683,36 +517,6 @@ void measure_contact_risk(Report &report, const PrintObject &object, const Minia
 }
 
 } // namespace
-
-std::vector<Slab> model_slabs_of(const PrintObject &object)
-{
-    std::vector<Slab> slabs;
-    slabs.reserve(object.layers().size());
-    for (const Layer *layer : object.layers()) {
-        Slab slab;
-        slab.print_z  = layer->print_z;
-        slab.bottom_z = layer->print_z - layer->height;
-        slab.polygons = layer->lslices;
-        slabs.emplace_back(std::move(slab));
-    }
-    return slabs;
-}
-
-std::vector<std::vector<bool>> floating_pieces(const std::vector<Slab> &support, const std::vector<Slab> &model,
-                                               bool on_build_plate_only, double bottom_gap_mm)
-{
-    const Components        components = build_components(support, 0.);
-    const std::vector<char> rooted     = model.empty() ? components.bed_rooted :
-        rooted_components(components, model, build_components(model, model.front().bottom_z), on_build_plate_only,
-                          std::max(0., bottom_gap_mm));
-    std::vector<std::vector<bool>> floating(support.size());
-    for (size_t s = 0; s < support.size(); ++ s) {
-        floating[s].assign(support[s].polygons.size(), false);
-        for (size_t k = components.slab_range[s].first; k < components.slab_range[s].second; ++ k)
-            floating[s][k - components.slab_range[s].first] = ! rooted[components.pieces[k].component];
-    }
-    return floating;
-}
 
 double cross_section_width_mm(const ExPolygon &section)
 {

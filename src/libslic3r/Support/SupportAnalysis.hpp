@@ -3,6 +3,7 @@
 
 #include "MiniatureSupport.hpp"
 #include "ModelSupportRisk.hpp"
+#include "SupportComponents.hpp"
 
 #include "../ExPolygon.hpp"
 
@@ -24,16 +25,6 @@ enum class Reason : uint8_t {
     MissingAnchor,          // some required region reached no emitted material
     StabilityUnavailable,
     DamageUnavailable,
-};
-
-// One printed slab: the closed Z interval [bottom_z, print_z] one layer occupies and the ground its
-// material covers on it. Support material and model material are described the same way, so one
-// connectivity walk serves both.
-struct Slab
-{
-    double     bottom_z = 0.;
-    double     print_z  = 0.;
-    ExPolygons polygons;
 };
 
 // What one routed node area became on its support layer. GapAbove is the planned gap between a tip
@@ -230,23 +221,6 @@ struct Report
     std::vector<Reason>         reasons;
     bool has_reason(Reason reason) const;
 };
-
-// The object's own body, sliced: one slab per object layer, in the object's canonical unshifted
-// instance frame. It is what a branch may terminate against, what has to be connected to its own first
-// layer before such a termination holds anything up, and that first layer, which the plate or a raft
-// carries, is what the object stands on.
-std::vector<Slab> model_slabs_of(const PrintObject &object);
-
-// Which polygons of `support` the print would lay in mid-air: one flag per polygon of each slab, set
-// where the polygon's connected component of support material neither starts on the plate nor, where
-// `on_build_plate_only` is off, comes down onto model material connected to the object's first layer
-// within `bottom_gap_mm` plus its own slab of its underside. Components join through positive-area
-// overlap between the polygons of consecutive slabs whose Z intervals touch, so a slab that printed
-// nothing separates what is above it from what is below. A geometric connectivity rule, not a force
-// estimate: it is what the stability measurement counts as unsupported paths, offered to a generator
-// so the material it counts is never printed.
-std::vector<std::vector<bool>> floating_pieces(const std::vector<Slab> &support, const std::vector<Slab> &model,
-                                               bool on_build_plate_only, double bottom_gap_mm);
 
 // The model's own weakness field for contacts of `extrusion_width_mm`, built off the object's sliced layers
 // (bottom_z, print_z, lslices per layer) and canceled through the object's Print. Status::Invalid where the
