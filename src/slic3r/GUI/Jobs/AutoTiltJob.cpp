@@ -49,14 +49,13 @@ static bool root_pose_fits(const ModelObject &obj, const std::vector<PartPlate *
 {
     if (obj.instances.size() != plates.size())
         return false;
-    std::vector<BoundingBoxf3> boxes(obj.instances.size());
     for (size_t i = 0; i < obj.instances.size(); ++i) {
         const Transform3d matrix = obj.instances[i]->get_transformation().get_matrix();
-        boxes[i]                 = obj.instance_convex_hull_bounding_box(i);
-        if (boxes[i].defined && obj.instances[i]->auto_drop)
-            boxes[i].translate(0., 0., -boxes[i].min.z());
-        if (!boxes[i].defined)
+        BoundingBoxf3     box    = obj.instance_convex_hull_bounding_box(i);
+        if (! box.defined)
             return false;
+        if (obj.instances[i]->auto_drop)
+            box.translate(0., 0., -box.min.z());
         // The same rule a candidate pose is held to, read off the live plate: the shared printable
         // polygon capture_inputs would store, the exclude areas and the top of the build volume.
         // A degenerate shared polygon leaves the polygon test out, exactly as capture_inputs does.
@@ -65,7 +64,7 @@ static bool root_pose_fits(const ModelObject &obj, const std::vector<PartPlate *
         if (p.points.size() > 2)
             ground.emplace_back(std::move(p));
         if (AutoTilt::plate_refusal(ground, plates[i]->get_exclude_areas(), plates[i]->get_build_volume().max.z(),
-                                    AutoTilt::posed_footprint(obj, matrix), boxes[i]))
+                                    AutoTilt::posed_footprint(obj, matrix), box))
             return false;
     }
     return true;
@@ -254,7 +253,7 @@ std::string AutoTiltJob::with_skipped_clause(const std::string &text) const
 void AutoTiltJob::push_result(const std::string &text) const
 {
     BOOST_LOG_TRIVIAL(info) << "auto-tilt notification: " << text;
-    NotificationManager *notify = m_plater == nullptr ? nullptr : m_plater->get_notification_manager();
+    NotificationManager *notify = m_plater->get_notification_manager();
     if (notify != nullptr)
         notify->push_notification(NotificationType::AutoTiltResult, NotificationManager::NotificationLevel::RegularNotificationLevel, text);
 }

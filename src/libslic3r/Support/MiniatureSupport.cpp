@@ -48,8 +48,9 @@ int standing_rank(const ModelSupportRisk::Sample &sample)
     switch (sample.status) {
     case ModelSupportRisk::Sample::Status::Known:               return 2;
     case ModelSupportRisk::Sample::Status::BelowPrintableWidth: return 1;
-    default:                                                    return 0;
+    case ModelSupportRisk::Sample::Status::Unknown:             return 0;
     }
+    return 0;
 }
 
 // Whether a contact at `position` still holds every one of `required`, which is a lattice cut down to

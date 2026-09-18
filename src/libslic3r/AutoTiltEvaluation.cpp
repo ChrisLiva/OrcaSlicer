@@ -579,10 +579,11 @@ PoseEvaluation GeneratedEvaluator::evaluate(const Pose &pose, const StopPredicat
         // One measurement per affected physical instance, in capture order: a generated pass shared
         // by several copies is counted once per copy that prints it.
         for (const InstanceSnapshot &instance : posed) {
-            size_t             index  = 0;
+            size_t index = 0;
+            // Non-null: the generator scan above walked this same list against this same Print and
+            // left the plate on the first instance that resolved to no object, before process() ran.
             const PrintObject *object = print_object_of_instance(print, instance.id, index);
-            const std::shared_ptr<const SupportAnalysis::Report> measured =
-                object == nullptr ? nullptr : object->support_analysis();
+            const std::shared_ptr<const SupportAnalysis::Report> measured = object->support_analysis();
             if (measured == nullptr) {
                 out.status = worse(out.status, PoseEvaluation::Status::Unknown);
                 add_reason(out.reason_codes, Reason::analysis_missing);

@@ -88,29 +88,23 @@ Contact ContactScorer::score(const Pose &pose)
             const double fraction = root_height_fraction(m_root, posed, m_root_box, centroid_world);
             const bool   excluded = fraction < m_k.bottom_exclusion_fraction;
 
-            // The row describes the whole polygon, excluded or not: the harness needs the rows the
-            // plane drops to judge where to put it. Written before the `continue` for that reason.
-            if (this->records != nullptr) {
-                const double a = p.area() * SCALING_FACTOR * SCALING_FACTOR;
-                double       perimeter_scaled = p.contour.length();
-                for (const Polygon &hole : p.holes)
-                    perimeter_scaled += hole.length();
-                const double perimeter = unscale<double>(perimeter_scaled);
-                this->records->push_back(PolygonRecord{ i, layer->print_z, a, perimeter,
-                                                        perimeter > 0. ? 2. * a / perimeter : std::numeric_limits<double>::quiet_NaN(),
-                                                        fragility_weight(a, perimeter, type_floor, m_k), fraction, type_floor, excluded });
-            }
-
-            if (excluded)
-                continue;
-
             const double a = p.area() * SCALING_FACTOR * SCALING_FACTOR;
             double       perimeter_scaled = p.contour.length();
             for (const Polygon &hole : p.holes)
                 perimeter_scaled += hole.length();
             const double perimeter = unscale<double>(perimeter_scaled);
+            const double w         = fragility_weight(a, perimeter, type_floor, m_k);
 
-            const double w = fragility_weight(a, perimeter, type_floor, m_k);
+            // The row describes the whole polygon, excluded or not: the harness needs the rows the
+            // plane drops to judge where to put it. Written before the `continue` for that reason.
+            if (this->records != nullptr)
+                this->records->push_back(PolygonRecord{ i, layer->print_z, a, perimeter,
+                                                        perimeter > 0. ? 2. * a / perimeter : std::numeric_limits<double>::quiet_NaN(),
+                                                        w, fraction, type_floor, excluded });
+
+            if (excluded)
+                continue;
+
             c.volume_mm3 += a * m_k.h_ref_mm;
             c.score_mm3 += w * a * m_k.h_ref_mm;
         }

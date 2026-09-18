@@ -178,9 +178,8 @@ SearchResult search(const std::vector<Pose> &legal,
     // always has a zero gain against a positive threshold, so it is never admissible.
     const Record *best = nullptr;
     for (const Record &rec : records)
-        if (gain(result.root, rec.contact) >= required_gain(rec.pose, k))
-            if (best == nullptr || ranks_before(rec, *best))
-                best = &rec;
+        if (gain(result.root, rec.contact) >= required_gain(rec.pose, k) && (best == nullptr || ranks_before(rec, *best)))
+            best = &rec;
 
     if (best != nullptr) {
         result.outcome = SearchResult::Outcome::Improved;

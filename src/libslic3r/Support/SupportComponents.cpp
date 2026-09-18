@@ -8,8 +8,6 @@
 #include "../libslic3r.h"
 
 #include <algorithm>
-#include <cmath>
-#include <queue>
 
 namespace Slic3r {
 namespace SupportAnalysis {

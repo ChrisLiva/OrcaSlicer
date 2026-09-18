@@ -112,7 +112,7 @@ ThickPolylines medial_axis_of(const ExPolygon &solid)
 // The width measurement over a skeleton already in hand, so a query costs no second Voronoi.
 bool measured_width(const ExPolygon &solid, const ThickPolylines &medial, const Point &query, double *width_mm)
 {
-    if (width_mm == nullptr || degenerate(solid))
+    if (degenerate(solid))
         return false;
     if (! medial.empty())
         return width_from_medial(solid, medial, query, width_mm);
