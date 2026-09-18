@@ -146,6 +146,11 @@ Plate-3 contact counts are not run-to-run reproducible either: one Release binar
 `candidates 3738 / kept 2427 / retained 2430` with 977.213 mm3, `restored 3` either way; four runs of one
 unmodified binary read 3738, 3738, 3738, 3737. An oracle that pins a plate-3 contact count to one number fails
 on unchanged code; compare against the two-value set (2026-09-18).
+Auto-tilt runs only from the GUI (`Plater::auto_tilt()` is its one caller), so verifying it means relaunching the
+app: a session already open holds the binary it started with, and a run driven in it exercises the pre-rebuild code
+while `build/arm64/src/Release/OrcaSlicer.app` on disk is current. Which binary answered is readable off the log's
+`auto-tilt root:` line, whose field order is `objectives_text`'s, and off `ps -eo lstart` against the executable's
+mtime; one plate-4 run was read as a result before the start times were compared (2026-09-18).
 
 ## Documentation
 

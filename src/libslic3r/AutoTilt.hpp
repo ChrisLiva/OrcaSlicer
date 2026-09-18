@@ -164,9 +164,10 @@ struct Objectives
 
 Objectives objectives(const PoseEvaluation &evaluation);
 
-// Lexicographic over the Damage fields in the order they are written, then over the volume: negative
-// where `is` is the better of the two, positive where it is the worse, zero where they tie. Counts
-// compare exactly, the weights and the volume within the numeric tolerance. An unavailable tuple is
+// Lexicographic over the Damage fields - groups nothing can reach, the worst group, the sum of the
+// groups, then contacts nothing could answer for - and last over the volume: negative where `is` is
+// the better of the two, positive where it is the worse, zero where they tie. Counts compare
+// exactly, the weights and the volume within the numeric tolerance. An unavailable tuple is
 // never the better one, and two of them tie, because neither was measured.
 int compare_objectives(const Objectives &was, const Objectives &is);
 

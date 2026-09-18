@@ -1344,18 +1344,20 @@ TEST_CASE("A fragile contact in the lower fifth reaches the verified evaluation 
     REQUIRE(verified.root.support_volume_mm3 > 0.);
     REQUIRE(AutoTilt::objectives(verified.root).damage.available); // the ranking had a full tuple to compare
 
-    // The estimate reads a 6 degree tilt as the pose that removes the most contact. The print, sliced,
-    // leaves a required region of the pose it applies open, and the search applies it all the same:
-    // an open region ranks on what the pose measured and never keeps the object where it is.
+    // The estimate reads a 6 degree tilt as the pose that removes the most contact, and the two paths
+    // disagree: sliced, every one of those poses lays a worse worst removal group than the root, and
+    // the ranking reads that group before it reads any count of contacts nothing answered for. So the
+    // object stays where it stands, and the field it stayed on is the one the search reports.
     AutoTilt::LegacyShortlistScorer estimating(shelf, k, inline_runner());
     const AutoTilt::SearchResult    estimated =
         AutoTilt::search(legal, estimating, k, [] { return false; }, [](size_t, size_t) {});
     INFO("estimate outcome " << int(estimated.outcome) << ", best " << estimated.best.tilt_deg << "/" << estimated.best.lean_deg);
     REQUIRE(estimated.outcome == AutoTilt::SearchResult::Outcome::Improved);
     REQUIRE_FALSE(estimated.best.is_root());
-    REQUIRE(verified.outcome == AutoTilt::VerifiedSearchResult::Outcome::Improved);
-    REQUIRE_FALSE(verified.selected.pose.is_root());
-    REQUIRE(verified.selected.status == AutoTilt::PoseEvaluation::Status::UnresolvedCoverage);
+    REQUIRE(verified.outcome == AutoTilt::VerifiedSearchResult::Outcome::NoImprovement);
+    REQUIRE(verified.selected.pose.is_root());
+    REQUIRE(std::find(verified.reason_codes.begin(), verified.reason_codes.end(), AutoTilt::Reason::gain_max_group_risk) !=
+            verified.reason_codes.end());
 
     // The shortlist score is one answer over every instance the pose would move: a second copy of the
     // object on the plate is a second copy of the contact, and the estimate says so.
@@ -1826,8 +1828,9 @@ TEST_CASE("The corpus false-move predicate compares the selected pose with the r
     CHECK(SupportValidation::is_false_move({ root, AutoTilt::Objectives{ { 0, 0, 4., 11., true }, 100. } }, measured, 1));
     // The material alone can make it one, once every damage field ties.
     CHECK(SupportValidation::is_false_move({ root, AutoTilt::Objectives{ { 0, 0, 4., 10., true }, 120. } }, measured, 1));
-    // A contact nobody could answer for is worse whatever the pose saved after it.
-    CHECK(SupportValidation::is_false_move({ root, AutoTilt::Objectives{ { 1, 0, 0.5, 1., true }, 10. } }, measured, 1));
+    // A contact nobody could answer for does not make a move a false one: the worst group at 0.5
+    // against the root's 4 decides before the count is ever read.
+    CHECK_FALSE(SupportValidation::is_false_move({ root, AutoTilt::Objectives{ { 1, 0, 0.5, 1., true }, 10. } }, measured, 1));
 
     // Better, and tied, are both moves the print does not regret.
     CHECK_FALSE(SupportValidation::is_false_move({ root, AutoTilt::Objectives{ { 0, 0, 2., 5., true }, 100. } }, measured, 1));
@@ -2008,8 +2011,10 @@ TEST_CASE("The exhaustive sweep measures a selected pose against the best pose i
     CHECK(AutoTilt::grid(AutoTilt::Constants()).size() == 77);
 
     // The best pose in the grid, and the pose the production search settled on. Lower is better on
-    // every field; the two counts are the discrete safety classification and the three doubles are
-    // the continuous objectives, compared in that order.
+    // every field. The brace order is the struct's own - unmeasured contacts, groups nothing can
+    // reach, the worst group, the sum of the groups, then the material - while the ranking reads
+    // groups nothing can reach, the worst group, the sum of the groups, unmeasured contacts, then
+    // the material.
     const AutoTilt::Objectives best{ { 0, 0, 4., 10., true }, 100. };
 
     SECTION("regret is the first continuous objective that differs, relative to the best") {
@@ -2035,11 +2040,11 @@ TEST_CASE("The exhaustive sweep measures a selected pose against the best pose i
         CHECK(std::isnan(SupportValidation::regret_of(unavailable, best)));
         CHECK(std::isnan(SupportValidation::regret_of(best, unavailable)));
     }
-    SECTION("a worse discrete classification is reported whatever the scalar regret says") {
-        // Fewer mm3 than the best pose, and a contact nobody could answer for: the classification is
-        // worse, and the material it saved does not buy that back.
+    SECTION("a group nothing can reach is the one classification reported, whatever the scalar regret says") {
+        // Fewer mm3 than the best pose, and a contact nobody could answer for: production ranks that
+        // contact behind every measured quantity, so the harness does not call the pose worse for it.
         const AutoTilt::Objectives cheaper_but_unknown{ { 1, 0, 1., 1., true }, 10. };
-        CHECK(SupportValidation::discrete_worse(cheaper_but_unknown, best));
+        CHECK_FALSE(SupportValidation::discrete_worse(cheaper_but_unknown, best));
         CHECK(SupportValidation::discrete_worse(AutoTilt::Objectives{ { 0, 1, 4., 10., true }, 100. }, best));
         CHECK_FALSE(SupportValidation::discrete_worse(AutoTilt::Objectives{ { 0, 0, 40., 100., true }, 1000. }, best));
         // An unmeasured end classifies nothing, so it is not a worse classification either.

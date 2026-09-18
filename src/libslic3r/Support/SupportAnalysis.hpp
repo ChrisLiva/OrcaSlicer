@@ -141,7 +141,9 @@ struct ContactRisk
 struct Damage
 {
     // Contacts the measurement could not answer for: the model under them was never measured, or no
-    // probe could tell whether anything reaches them. Not damage of zero, and first in the order.
+    // probe could tell whether anything reaches them. Not damage of zero, and last in the order: an
+    // absence of measurement ranks behind every quantity that was measured, so a pose trading a
+    // higher worst group for one contact fewer here loses on the risk it raised.
     size_t unknown_contacts     = 0;
     // Groups every probe met something on the way to: material that would have to be cut out through
     // the model or another group rather than pulled away from it.
@@ -164,7 +166,8 @@ struct DamageComparison
 // The tolerance two floating metrics compare within: relative to the larger of the two, never finer than 1e-9.
 double comparison_epsilon(double a, double b);
 
-// Where two measured Damage domains first differ, in the order the fields are written: `order` negative where
+// Where two measured Damage domains first differ, reading `inaccessible_groups`, `max_group_risk`,
+// `total_group_risk`, then `unknown_contacts`: `order` negative where
 // `is` is the better of the two, positive where it is the worse, zero where they tie; `field` names the
 // first field that differed, None on a tie. Reads neither side's `available`: callers settle that first.
 DamageComparison compare_damage(const Damage &was, const Damage &is);

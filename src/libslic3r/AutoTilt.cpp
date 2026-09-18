@@ -246,11 +246,13 @@ struct Gain
 
 // The gain gate, on the terms the estimate search already uses: the same
 // threshold_base + threshold_per_degree * |tilt| percentage, charged against the first objective the
-// candidate strictly improved. A count is not a percentage - one contact nobody can answer for, or
-// one group nothing can reach, is worth removing whatever fraction of the total it is - so the
-// discrete fields clear no gate. A continuous field is charged against the root's own reading of
-// that same field, and a root reading of zero yields no percentage at all rather than an infinite
-// one, so a candidate needs a strictly lower earlier objective to win there.
+// candidate strictly improved. One group nothing can reach is worth removing whatever fraction of
+// the total it is - material that would have to be cut out through the model has no fraction that
+// makes it acceptable - so that one field clears the gate free. Every other field pays, unmeasured
+// contacts included: their count is what the measurement could not answer for, not damage it found,
+// and a tilt bought with one of them is a tilt bought with nothing measured. Each is charged against
+// the root's own reading of that same field, and a root reading of zero yields no percentage at all
+// rather than an infinite one, so a candidate needs a strictly lower earlier objective to win there.
 Gain gain_over_root(const Objectives &root, const Objectives &candidate, const Pose &pose, const Constants &k)
 {
     Gain  out;
@@ -263,11 +265,6 @@ Gain gain_over_root(const Objectives &root, const Objectives &candidate, const P
 
     const auto discrete = [](size_t was, size_t is) { return was > 0 ? double(was - is) / double(was) : 0.; };
     switch (d.field) {
-    case SupportAnalysis::DamageField::UnknownContacts:
-        out.gain     = discrete(root.damage.unknown_contacts, candidate.damage.unknown_contacts);
-        out.required = 0.;
-        out.improved = true;
-        return out;
     case SupportAnalysis::DamageField::InaccessibleGroups:
         out.gain     = discrete(root.damage.inaccessible_groups, candidate.damage.inaccessible_groups);
         out.required = 0.;
@@ -280,6 +277,9 @@ Gain gain_over_root(const Objectives &root, const Objectives &candidate, const P
     case SupportAnalysis::DamageField::TotalGroupRisk:
         out.gain = root.damage.total_group_risk > 0. ?
             (root.damage.total_group_risk - candidate.damage.total_group_risk) / root.damage.total_group_risk : 0.;
+        break;
+    case SupportAnalysis::DamageField::UnknownContacts:
+        out.gain = discrete(root.damage.unknown_contacts, candidate.damage.unknown_contacts);
         break;
     case SupportAnalysis::DamageField::None:
         // the damage tied and only the material moved
@@ -344,10 +344,10 @@ std::string objectives_text(const Objectives &objectives)
     if (! objectives.damage.available)
         return "objectives unavailable";
     std::ostringstream out;
-    out << "unknown_contacts " << objectives.damage.unknown_contacts
-        << ", inaccessible_groups " << objectives.damage.inaccessible_groups
+    out << "inaccessible_groups " << objectives.damage.inaccessible_groups
         << ", max_group_risk " << objectives.damage.max_group_risk
         << ", total_group_risk " << objectives.damage.total_group_risk
+        << ", unknown_contacts " << objectives.damage.unknown_contacts
         << ", material " << objectives.volume_mm3 << " mm3";
     return out.str();
 }

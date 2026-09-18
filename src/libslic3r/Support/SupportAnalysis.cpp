@@ -833,8 +833,6 @@ double comparison_epsilon(double a, double b)
 
 DamageComparison compare_damage(const Damage &was, const Damage &is)
 {
-    if (is.unknown_contacts != was.unknown_contacts)
-        return { is.unknown_contacts < was.unknown_contacts ? -1 : 1, DamageField::UnknownContacts };
     if (is.inaccessible_groups != was.inaccessible_groups)
         return { is.inaccessible_groups < was.inaccessible_groups ? -1 : 1, DamageField::InaccessibleGroups };
     if (std::abs(is.max_group_risk - was.max_group_risk) >
@@ -843,6 +841,8 @@ DamageComparison compare_damage(const Damage &was, const Damage &is)
     if (std::abs(is.total_group_risk - was.total_group_risk) >
         comparison_epsilon(was.total_group_risk, is.total_group_risk))
         return { is.total_group_risk < was.total_group_risk ? -1 : 1, DamageField::TotalGroupRisk };
+    if (is.unknown_contacts != was.unknown_contacts)
+        return { is.unknown_contacts < was.unknown_contacts ? -1 : 1, DamageField::UnknownContacts };
     return { 0, DamageField::None };
 }
 

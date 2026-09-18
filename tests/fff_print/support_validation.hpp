@@ -83,8 +83,11 @@ bool is_false_move(const std::vector<AutoTilt::Objectives> &quality, const std::
 double regret_of(const AutoTilt::Objectives &selected, const AutoTilt::Objectives &best);
 
 // Whether the selected pose carries a worse discrete safety classification than the best pose: more
-// contacts nothing could answer for, or more groups nothing can reach. A worse classification is a
-// failure whatever the scalar regret says, and an unmeasured end classifies nothing.
+// groups nothing can reach. A worse classification is a failure whatever the scalar regret says, and
+// an unmeasured end classifies nothing. Contacts nothing could answer for are not counted here:
+// production ranks them behind every measured quantity, so it may correctly settle on a pose
+// carrying more of them for lower measured removal risk, and a gate that failed such a run would be
+// reporting the harness's opinion of the ranking rather than a regression in it.
 bool discrete_worse(const AutoTilt::Objectives &selected, const AutoTilt::Objectives &best);
 
 // Whether one repeated measurement clears another: lower is better throughout, so the candidate's
@@ -149,7 +152,7 @@ struct SelectionSummary
     size_t         evaluated_poses = 0;   // of those, the ones the plate could hold and the evaluator measured
     size_t         invalid_poses   = 0;   // the ones exact plate containment refused
     bool           false_move      = false;
-    bool           discrete_worse  = false;  // a worse safety or damage classification than the best pose
+    bool           discrete_worse  = false;  // more groups nothing can reach than the best pose carries
     // The scalar regret, and whether both ends of it were measured. An unmeasured comparison is a
     // null under an explicit marker, never a zero that reads like a pose with nothing to regret.
     bool           regret_available = false;

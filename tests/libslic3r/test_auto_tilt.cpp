@@ -680,12 +680,20 @@ TEST_CASE("verified ranking compares damage then volume and gates the first impr
         return search_verified(legal, scorer, verifier, k, never_stop, no_progress);
     };
 
-    SECTION("one contact fewer that nothing could answer for clears no percentage at all") {
-        // The steepest tilt in the grid, which the continuous gate would charge 10% for.
-        const VerifiedSearchResult r = against_root(Pose{-20, 0}, measured_pose(damage_of(2, 1, 4., 10.), 100.),
-                                                    measured_pose(damage_of(1, 1, 4., 10.), 100.));
-        REQUIRE(r.outcome == VerifiedSearchResult::Outcome::Improved);
-        REQUIRE_THAT(r.required_improvement, WithinAbs(0., 1e-12));
+    SECTION("one contact fewer that nothing could answer for is charged the percentage its tilt asks") {
+        // The steepest tilt in the grid, which the gate charges 10% for whatever field it is spent on.
+        const VerifiedSearchResult half = against_root(Pose{-20, 0}, measured_pose(damage_of(2, 1, 4., 10.), 100.),
+                                                       measured_pose(damage_of(1, 1, 4., 10.), 100.));
+        REQUIRE(half.outcome == VerifiedSearchResult::Outcome::Improved);
+        REQUIRE_THAT(half.improvement, WithinAbs(0.50, 1e-12)); // one of the root's two
+        REQUIRE_THAT(half.required_improvement, WithinAbs(0.10, 1e-12));
+
+        // The same one contact against a root carrying twenty: a fraction the tilt does not earn.
+        const VerifiedSearchResult twentieth = against_root(Pose{-20, 0}, measured_pose(damage_of(20, 1, 4., 10.), 100.),
+                                                            measured_pose(damage_of(19, 1, 4., 10.), 100.));
+        REQUIRE(twentieth.outcome == VerifiedSearchResult::Outcome::NoImprovement);
+        REQUIRE_THAT(twentieth.improvement, WithinAbs(0.05, 1e-12));
+        REQUIRE_THAT(twentieth.required_improvement, WithinAbs(0.10, 1e-12));
     }
 
     SECTION("one group fewer that nothing can reach clears no percentage either") {
@@ -795,6 +803,53 @@ TEST_CASE("verified ranking compares damage then volume and gates the first impr
         REQUIRE(rank_of({{{-10., 0.}, measured_pose(damage_of(0, 0, 2., 5.), 50.)},
                          {{0., 10.}, measured_pose(damage_of(0, 0, 2., 5.), 50.)}}) == Pose{0, 10});
     }
+}
+
+// Plate 4 of elf_test.3mf as the app measured it, one run of the build at bc41c99f95 on 2026-09-18,
+// logged to ~/Library/Application Support/OrcaSlicer/log/debug_Fri_Sep_18_09_21_05_26773.log.0: the
+// root and the five finalists it shortlisted, with that run's contact counts, removal risks and
+// support material. Every pose there left a required region open, so every pose here does.
+TEST_CASE("The verified ranking keeps the root when every finalist raises the measured removal risk", "[AutoTilt]")
+{
+    const Constants k; // 5% base plus 0.25% per degree of tilt
+
+    // measured_pose carrying the coverage status the whole run read: measured in full with one
+    // required region still open, which keeps neither the root nor a candidate out of the ranking.
+    const auto uncovered_pose = [](const SupportAnalysis::Damage &damage, double support_mm3) {
+        PoseEvaluation out                  = measured_pose(damage, support_mm3);
+        out.status                          = PoseEvaluation::Status::UnresolvedCoverage;
+        out.instances[0].missing_anchor_ids = {17};
+        return out;
+    };
+
+    // Five non-root poses against a verified_finalist_count of 5: all five are finalists whatever
+    // the cheap score makes of them, so every pose the run measured is measured here too.
+    const std::vector<Pose> legal{Pose{}, Pose{-8, -10}, Pose{-12, -15}, Pose{-18, -10}, Pose{-18, -5}, Pose{-20, -10}};
+    FakeScorer              scorer(legal, Contact{100, 100, 1000});
+    FakeVerifier            verifier;
+    verifier.set(Pose{},         uncovered_pose(damage_of(1, 0, 3.1351e6, 3.1351e6), 1245.55));
+    verifier.set(Pose{-8, -10},  uncovered_pose(damage_of(0, 0, 7.5162e6, 7.5162e6), 1316.51));
+    verifier.set(Pose{-12, -15}, uncovered_pose(damage_of(1, 0, 6.53751e6, 6.53751e6), 1246.58));
+    verifier.set(Pose{-18, -10}, uncovered_pose(damage_of(1, 0, 2.17186e7, 2.17186e7), 1417.91));
+    verifier.set(Pose{-18, -5},  uncovered_pose(damage_of(2, 0, 2.5479e7, 2.5479e7), 1411.07));
+    verifier.set(Pose{-20, -10}, uncovered_pose(damage_of(0, 0, 2.06538e7, 2.06538e7), 1326.92));
+
+    const VerifiedSearchResult r = search_verified(legal, scorer, verifier, k, never_stop, no_progress);
+    const auto                 reported = [&r](Reason code) {
+        return std::find(r.reason_codes.begin(), r.reason_codes.end(), code) != r.reason_codes.end();
+    };
+
+    REQUIRE(r.verified == 6); // the root and all five finalists
+    REQUIRE(r.outcome == VerifiedSearchResult::Outcome::NoImprovement);
+    REQUIRE(r.selected.pose.is_root());
+    // The two poses that shave the root's one unmeasured contact carry 2.4 and 6.6 times its worst
+    // group's risk, so the worst group is what answers for the object staying where it stands.
+    REQUIRE(reported(Reason::gain_max_group_risk));
+    REQUIRE_FALSE(reported(Reason::gain_unknown_contacts));
+    REQUIRE_THAT(r.improvement, WithinAbs(0., 1e-12));
+    // tilt -12 carries the lowest worst-group risk of the five, so it is the best-ranked loser, and
+    // the percentage reported is the one its own tilt asks.
+    REQUIRE_THAT(r.required_improvement, WithinAbs(0.08, 1e-12));
 }
 
 TEST_CASE("the verified oracle answers to the full evaluation and never to the cheap one", "[AutoTilt]")

@@ -177,7 +177,7 @@ rows, because the evaluator refuses Organic before slicing; the contact harness 
 | `grid_entries` | has to be 77, the entries `AutoTilt::grid()` returns unchanged |
 | `evaluated_poses`, `invalid_poses` | they add up to `grid_entries` |
 | `false_move` | the production comparator found the selected pose worse than the root |
-| `discrete_worse` | the selected pose carries more contacts nothing could answer for, or more groups nothing can reach, than the best pose |
+| `discrete_worse` | the selected pose carries more groups nothing can reach than the best pose |
 | `regret`, `regret_available` | `(selected - best) / max(abs(best), 1e-9)` on the first continuous objective of the ranking the two do not tie on |
 
 ## What a run has to clear

@@ -115,8 +115,6 @@ bool discrete_worse(const AutoTilt::Objectives &selected, const AutoTilt::Object
 {
     if (! selected.damage.available || ! best.damage.available)
         return false;
-    if (selected.damage.unknown_contacts > best.damage.unknown_contacts)
-        return true;
     return selected.damage.inaccessible_groups > best.damage.inaccessible_groups;
 }
 
