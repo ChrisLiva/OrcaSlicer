@@ -2645,24 +2645,20 @@ void TreeSupport::draw_circles()
                         }
                     }
 
-                    SupportAnalysis::Termination termination = SupportAnalysis::Termination::Base;
                     if (obj_layer_nr>0 && node.distance_to_top < 0) {
                         append(roof_gap_areas, area);
-                        termination = SupportAnalysis::Termination::GapAbove;
                     }
                     else if (obj_layer_nr > 0 && node.support_roof_layers_below == 1 &&
                              node.is_sharp_tail == false)
                     {
                         append(roof_1st_layer, area);
                         max_layers_above_roof1 = std::max(max_layers_above_roof1, node.dist_mm_to_top);
-                        termination = SupportAnalysis::Termination::RoofFirstLayer;
                     }
                     else if (obj_layer_nr > 0 && node.support_roof_layers_below > 1 &&
                              node.is_sharp_tail == false)
                     {
                         append(node.support_roof_layers_below <= top_base_interface_layers ? roof_base_areas : roof_areas, area);
                         max_layers_above_roof = std::max(max_layers_above_roof, node.dist_mm_to_top);
-                        termination = SupportAnalysis::Termination::Roof;
                     }
                     else
                     {
@@ -2679,11 +2675,9 @@ void TreeSupport::draw_circles()
                             SupportAnalysis::AttributedArea record;
                             record.source_ids      = node.source_ids;
                             record.area            = piece;
-                            record.termination     = termination;
                             // A negative distance_to_top is the planned gap between the tip and the
                             // model: drawn, never extruded, and never counted as printed contact.
                             record.virtual_gap     = node.distance_to_top < 0;
-                            record.to_buildplate   = node.to_buildplate;
                             // The section that was drawn, not the radius the router planned for the
                             // node: collision clipping, the xy distance and a merged overhang all
                             // move the one away from the other.
@@ -3167,7 +3161,6 @@ void TreeSupport::draw_circles()
             if (attributed[layer_nr].empty())
                 continue;
             SupportAnalysis::EmittedLayer emitted_layer;
-            emitted_layer.support_layer_index = layer_nr + m_raft_layers;
             emitted_layer.print_z             = m_ts_data->layer_heights[layer_nr].print_z;
             emitted_layer.bottom_z            = emitted_layer.print_z - m_ts_data->layer_heights[layer_nr].height;
             emitted_layer.areas               = std::move(attributed[layer_nr]);

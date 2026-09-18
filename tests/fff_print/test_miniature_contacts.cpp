@@ -612,7 +612,6 @@ Fabricated fabricate(const SupportAnalysis::CoverageKey &key, const std::vector<
     const ExPolygons ground = union_ex(all);
     for (size_t i = 0; i < count; ++ i) {
         SupportAnalysis::EmittedLayer layer;
-        layer.support_layer_index = i;
         layer.print_z             = tip_z - slab * double(count - 1 - i);
         layer.bottom_z            = layer.print_z - slab;
         layer.emitted             = ground;
@@ -625,7 +624,6 @@ Fabricated fabricate(const SupportAnalysis::CoverageKey &key, const std::vector<
         SupportAnalysis::AttributedArea area;
         area.area            = footprints[i];
         area.source_ids      = { uint64_t(i) };
-        area.termination     = SupportAnalysis::Termination::Roof;
         area.min_diameter_mm = 1.;
         out.emitted.layers.back().areas.push_back(area);
     }
@@ -646,7 +644,6 @@ SupportAnalysis::AttributedArea drawn_gap(const ExPolygon &where, std::vector<ui
     SupportAnalysis::AttributedArea area;
     area.area        = where;
     area.source_ids  = std::move(sources);
-    area.termination = SupportAnalysis::Termination::GapAbove;
     area.virtual_gap = true;
     return area;
 }
@@ -1974,7 +1971,7 @@ TEST_CASE("Merged support branches carry every contact source that reached them"
     size_t             areas = 0, multi_region_areas = 0, max_regions_in_area = 0;
     std::set<uint64_t> reached;
     for (const SupportAnalysis::EmittedLayer &layer : emitted->layers) {
-        INFO("support layer " << layer.support_layer_index);
+        INFO("support layer at z " << layer.print_z);
         REQUIRE(layer.print_z > layer.bottom_z);
         for (const SupportAnalysis::AttributedArea &area : layer.areas) {
             ++ areas;

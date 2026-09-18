@@ -27,19 +27,13 @@ enum class Reason : uint8_t {
     DamageUnavailable,
 };
 
-// What one routed node area became on its support layer. GapAbove is the planned gap between a tip
-// and the model: a virtual layer that is drawn and never extruded.
-enum class Termination : uint8_t { Base, Roof, RoofFirstLayer, Floor, GapAbove };
-
 // One routed node's area on one support layer, with every source it carries, recorded before
 // draw_circles unions the layer's areas together and the source identity is gone.
 struct AttributedArea
 {
     std::vector<uint64_t> source_ids;         // sorted, unique
     ExPolygon             area;               // the polygon the router clipped, pre-union
-    Termination           termination     = Termination::Base;
     bool                  virtual_gap     = false;  // never extruded: the planned top gap
-    bool                  to_buildplate   = false;  // routed-source root fact
     // The width of the section that was drawn here, not the radius the router planned for the node.
     double                min_diameter_mm = 0.;
 };
@@ -47,7 +41,6 @@ struct AttributedArea
 // One support layer's slab, what was routed onto it, and what was actually printed on it.
 struct EmittedLayer
 {
-    size_t                      support_layer_index = 0;
     double                      print_z             = 0.;
     double                      bottom_z            = 0.;
     std::vector<AttributedArea> areas;
