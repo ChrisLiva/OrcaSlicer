@@ -1,6 +1,7 @@
 #include "SupportAnalysis.hpp"
 
 #include "DisjointSets.hpp"
+#include "RemovalAccess.hpp"
 #include "../AABBMesh.hpp"
 #include "../ClipperUtils.hpp"
 #include "../Geometry/ConvexHull.hpp"
@@ -595,17 +596,17 @@ void measure_damage(Report &report, const PrintObject &object, const MiniatureSu
                 continue;
             const Vec3d where(unscale<double>(seed.position.x()), unscale<double>(seed.position.y()),
                               problem.regions[size_t(seed.region_id)].contact_z_mm);
-            const ModelSupportRisk::Access access =
-                ModelSupportRisk::assess_access(mesh, others, slab_tops, where, 0.5 * width);
-            if (access.status == ModelSupportRisk::Access::Status::Clear) {
+            const RemovalAccess::Access access =
+                RemovalAccess::assess_access(mesh, others, slab_tops, where, 0.5 * width);
+            if (access.status == RemovalAccess::Access::Status::Clear) {
                 ++ probed_clear;
                 reached = true;
                 break;
             }
-            if (access.status == ModelSupportRisk::Access::Status::Unknown) {
+            if (access.status == RemovalAccess::Access::Status::Unknown) {
                 ++ unknown;
                 ++ probed_unknown;
-                ++ access_missing[ModelSupportRisk::missing_name(access.missing)];
+                ++ access_missing[RemovalAccess::missing_name(access.missing)];
             } else {
                 ++ probed_blocked;
             }

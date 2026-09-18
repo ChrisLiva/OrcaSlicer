@@ -453,6 +453,8 @@ set(lisbslic3r_sources
     Support/MiniatureSupport.hpp
     Support/ModelSupportRisk.cpp
     Support/ModelSupportRisk.hpp
+    Support/RemovalAccess.cpp
+    Support/RemovalAccess.hpp
     Support/SupportAnalysis.cpp
     Support/SupportAnalysis.hpp
     Support/SupportCommon.cpp
