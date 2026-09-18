@@ -709,6 +709,39 @@ TEST_CASE("Generated evaluation measures legacy support read-only and refuses Or
                     (report.coverage_available && report.stability.available && report.damage.available));
 }
 
+TEST_CASE("Generated evaluation reads a decimated contact as no open required region", "[AutoTilt]")
+{
+    // The miniature contact mode thins the contacts of the problem it prepared, and every seed it
+    // drops lands in `missing_anchor_ids` - which is why that list is not the question the evaluator
+    // asks. It asks `SupportAnalysis::support_unresolved`: whether a critical region wide enough for
+    // one support extrusion reached no printed material, or a routed group never printed. The
+    // table's slab underside gets its support either way, so a pose whose only complaint is a seed
+    // the thinning dropped by design is Complete and files no open-region code.
+    Slic3r::Model model = Slic3r::Test::model("table", table_fixture());
+    model.objects.front()->ensure_on_bed();
+    const DynamicPrintConfig config = fixture_config({ { "support_style", "tree_slim" },
+                                                       { "support_top_z_distance", "0.2" },
+                                                       { "layer_change_gcode", "G92 E0" },
+                                                       { "support_miniature_contacts", "1" },
+                                                       { "support_contact_min_distance", "1" } });
+
+    AutoTilt::GeneratedEvaluator evaluator(
+        plate_input(model, config, { model.objects.front()->instances.front()->id() }), inline_runner());
+    const AutoTilt::PoseEvaluation evaluation = evaluator.evaluate(AutoTilt::Pose{}, {});
+    INFO("reasons: " << reasons_of(evaluation));
+    REQUIRE(evaluation.instances.size() == 1);
+
+    const SupportAnalysis::Report &report = evaluation.instances.front();
+    REQUIRE(report.status == SupportAnalysis::Report::Status::Complete);
+    // Both halves of the separation: seeds the thinning dropped, and no requirement left open.
+    REQUIRE(! report.missing_anchor_ids.empty());
+    REQUIRE_FALSE(SupportAnalysis::support_unresolved(report));
+
+    CHECK(evaluation.status == AutoTilt::PoseEvaluation::Status::Complete);
+    CHECK(std::find(evaluation.reason_codes.begin(), evaluation.reason_codes.end(),
+                    AutoTilt::Reason::required_region_unsupported) == evaluation.reason_codes.end());
+}
+
 TEST_CASE("Generated evaluation reads an object with no overhang as complete", "[AutoTilt]")
 {
     // A cube standing on its face has no overhang, so the measured pass requires no region: nothing
