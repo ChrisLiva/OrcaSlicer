@@ -8,6 +8,8 @@
 #include <mutex>
 #include <thread>
 
+#include <boost/log/trivial.hpp>
+
 #include "Worker.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Geometry.hpp"
@@ -251,6 +253,7 @@ std::string AutoTiltJob::with_skipped_clause(const std::string &text) const
 
 void AutoTiltJob::push_result(const std::string &text) const
 {
+    BOOST_LOG_TRIVIAL(info) << "auto-tilt notification: " << text;
     NotificationManager *notify = m_plater == nullptr ? nullptr : m_plater->get_notification_manager();
     if (notify != nullptr)
         notify->push_notification(NotificationType::AutoTiltResult, NotificationManager::NotificationLevel::RegularNotificationLevel, text);
@@ -341,20 +344,39 @@ static std::string reason_phrase(const std::string &code)
     return code;
 }
 
-// search_verified files every root it cannot use under "root_analysis_unavailable", which names none
-// of the reasons the root carries, so there the root's own code comes first. On any other outcome the
-// root was used, and a code it carries (an open required region) is not why the orientation was kept.
+// search_verified files every root it cannot use under "root_analysis_unavailable", which names none of
+// the reasons the root carries, so there the root's own codes are read, its own first. On any other
+// outcome the root was used and its codes gated nothing: an open required region is carried by every
+// measured miniature, and reading it there would name it as the reason a pose was kept. The search's own
+// codes answer that case, the objective the best candidate fell short on among them.
 std::string AutoTiltJob::reason_detail() const
 {
     const bool root_first = m_verified.outcome == AutoTilt::VerifiedSearchResult::Outcome::VerificationUnavailable;
-    const std::vector<std::string> &first  = root_first ? m_verified.root.reason_codes : m_verified.reason_codes;
-    const std::vector<std::string> &second = root_first ? m_verified.reason_codes : m_verified.root.reason_codes;
-    for (const std::vector<std::string> *codes : {&first, &second})
-        for (const std::string &code : *codes)
+    std::vector<const std::vector<std::string> *> codes{ &m_verified.reason_codes };
+    if (root_first)
+        codes.insert(codes.begin(), &m_verified.root.reason_codes);
+    for (const std::vector<std::string> *list : codes)
+        for (const std::string &code : *list)
             // Cancellation is already silent, so it is never the reason a result is shown for.
             if (code != "canceled")
                 return " " + GUI::format(_L("Reason: %1%."), reason_phrase(code));
     return {};
+}
+
+// The two percentages behind a kept orientation: what the best-ranked measured candidate took off the
+// objective reason_detail just named, and what that pose had to take off to be worth applying. One
+// decimal, because the gate turns on tenths and two numbers rounded to "10% against 10%" would read as
+// a contradiction. Empty where there is no shortfall to name: a candidate whose first differing
+// objective moved the wrong way gained nothing, and a zero printed against a threshold reads as a near
+// miss rather than as a regression.
+std::string AutoTiltJob::shortfall_text() const
+{
+    if (m_verified.improvement <= 0. || m_verified.required_improvement <= 0.)
+        return {};
+    // xgettext:no-c-format, no-boost-format
+    return " " + GUI::format(_L("Measured %1%%% against the %2%%% required."),
+                             wxString::Format("%.1f", 100. * m_verified.improvement),
+                             wxString::Format("%.1f", 100. * m_verified.required_improvement));
 }
 
 std::string AutoTiltJob::estimated_text(const AutoTilt::Pose &pose, double improvement) const
@@ -556,7 +578,8 @@ void AutoTiltJob::finalize(bool canceled, std::exception_ptr &eptr)
                 push_result(with_skipped_clause(verified_text()));
             break;
         case AutoTilt::VerifiedSearchResult::Outcome::NoImprovement:
-            push_result(with_skipped_clause(_u8L("No verified improvement found. Model orientation was kept.") + reason_detail()));
+            push_result(with_skipped_clause(_u8L("No verified improvement found. Model orientation was kept.") + reason_detail() +
+                                            shortfall_text()));
             break;
         case AutoTilt::VerifiedSearchResult::Outcome::VerificationUnavailable:
             push_result(with_skipped_clause(_u8L("Support verification was unavailable. Model orientation was kept.") + reason_detail()));

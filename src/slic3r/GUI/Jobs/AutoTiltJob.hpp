@@ -49,9 +49,12 @@ private:
     // generated for the root and for the winner, which way the estimated removal risk moved, the pose
     // itself, and how much of the grid was measured.
     std::string verified_text() const;
-    // " Reason: <phrase>." for the first reason code the verified search or its root evaluation
-    // recorded, empty when neither recorded one worth showing.
+    // " Reason: <phrase>." for the first reason code the verified search recorded, or the root's own
+    // codes where the root is why the search stopped. Empty where there is no code worth showing.
     std::string reason_detail() const;
+    // " Measured <gain>% against the <required>% required." for a kept orientation, empty where the
+    // best-ranked candidate measured no gain to fall short with.
+    std::string shortfall_text() const;
     // Main thread. Moves every affected instance onto `pose` when the live scene still matches the
     // capture the pose was measured on, and says whether it did.
     bool        apply_pose(const AutoTilt::Pose &pose);
