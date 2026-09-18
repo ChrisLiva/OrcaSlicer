@@ -3,6 +3,7 @@
 #include "DisjointSets.hpp"
 #include "../ClipperUtils.hpp"
 #include "../AABBMesh.hpp"
+#include "../AABBTreeIndirect.hpp"
 #include "../BoundingBox.hpp"
 #include "../Geometry/MedialAxis.hpp"
 #include "../libslic3r.h"
@@ -591,35 +592,6 @@ const std::vector<Vec3d> &escape_directions()
     return directions;
 }
 
-// The point of triangle abc nearest to p, by the barycentric region test: the interior projection
-// where the projection lands inside, and the nearest edge point or vertex otherwise.
-Vec3d closest_point_on_triangle(const Vec3d &p, const Vec3d &a, const Vec3d &b, const Vec3d &c)
-{
-    const Vec3d  ab = b - a, ac = c - a, ap = p - a;
-    const double d1 = ab.dot(ap), d2 = ac.dot(ap);
-    if (d1 <= 0. && d2 <= 0.)
-        return a;
-    const Vec3d  bp = p - b;
-    const double d3 = ab.dot(bp), d4 = ac.dot(bp);
-    if (d3 >= 0. && d4 <= d3)
-        return b;
-    const double vc = d1 * d4 - d3 * d2;
-    if (vc <= 0. && d1 >= 0. && d3 <= 0.)
-        return a + ab * (d1 / (d1 - d3));
-    const Vec3d  cp = p - c;
-    const double d5 = ab.dot(cp), d6 = ac.dot(cp);
-    if (d6 >= 0. && d5 <= d6)
-        return c;
-    const double vb = d5 * d2 - d1 * d6;
-    if (vb <= 0. && d2 >= 0. && d6 <= 0.)
-        return a + ac * (d2 / (d2 - d6));
-    const double va = d3 * d6 - d5 * d4;
-    if (va <= 0. && (d4 - d3) >= 0. && (d5 - d6) >= 0.)
-        return b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)));
-    const double denom = 1. / (va + vb + vc);
-    return a + ab * (vb * denom) + ac * (vc * denom);
-}
-
 // The nearest pair of points of two segments, clamped at both ends, parallel segments included.
 void closest_points_on_segments(const Vec3d &p0, const Vec3d &p1, const Vec3d &q0, const Vec3d &q1,
                                 Vec3d &on_p, Vec3d &on_q)
@@ -675,8 +647,8 @@ double segment_triangle_distance(const Vec3d &a, const Vec3d &b, const Vec3d &v0
             best_point = on;
         }
     };
-    keep(a, closest_point_on_triangle(a, v0, v1, v2));
-    keep(b, closest_point_on_triangle(b, v0, v1, v2));
+    keep(a, AABBTreeIndirect::detail::closest_point_to_triangle(a, v0, v1, v2));
+    keep(b, AABBTreeIndirect::detail::closest_point_to_triangle(b, v0, v1, v2));
     const Vec3d edges[3][2] = { { v0, v1 }, { v1, v2 }, { v2, v0 } };
     for (const Vec3d (&edge)[2] : edges) {
         Vec3d on_segment, on_edge;
