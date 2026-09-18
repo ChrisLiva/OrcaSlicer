@@ -100,6 +100,7 @@ struct Field
 // that is narrow nowhere) answers twice the clearance itself, for a query it contains. Answers false,
 // leaving *width_mm alone, for a degenerate polygon, a query no medial segment answers for, a medial
 // axis whose width vector does not carry two entries per segment, and any nonfinite value.
+// `width_mm` is written only on a true answer, and may not be null.
 bool local_width(const ExPolygon &solid, const Point &query, double *width_mm);
 
 // Builds the field over the model's own slices. Islands on adjacent layers connect in both directions

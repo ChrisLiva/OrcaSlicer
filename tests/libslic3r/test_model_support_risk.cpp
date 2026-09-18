@@ -3,9 +3,7 @@
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/Point.hpp"
-#include "libslic3r/AABBMesh.hpp"
 #include "libslic3r/Support/ModelSupportRisk.hpp"
-#include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/libslic3r.h"
 
 #include <cmath>

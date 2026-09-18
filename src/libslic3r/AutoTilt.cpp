@@ -47,7 +47,6 @@ void add_reason(std::vector<Reason> &codes, Reason code)
         codes.push_back(code);
 }
 
-
 double Pose::deviation_deg() const { return std::sqrt(this->tilt_deg * this->tilt_deg + this->lean_deg * this->lean_deg); }
 
 bool operator==(const Pose &lhs, const Pose &rhs) { return lhs.tilt_deg == rhs.tilt_deg && lhs.lean_deg == rhs.lean_deg; }
@@ -317,7 +316,6 @@ bool candidate_admissible(const PoseEvaluation &root, const PoseEvaluation &cand
     }
     return true;
 }
-
 
 // The text the log lines below are built from. Nothing in the program reads them: they exist so a run
 // that kept the orientation can be read back afterwards, with the objectives in the order the gate

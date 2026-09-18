@@ -2,7 +2,6 @@
 
 #include "DisjointSets.hpp"
 #include "../ClipperUtils.hpp"
-#include "../Geometry/ConvexHull.hpp"
 #include "../Layer.hpp"
 #include "../Print.hpp"
 #include "../libslic3r.h"

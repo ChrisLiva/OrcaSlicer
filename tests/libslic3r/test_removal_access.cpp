@@ -7,7 +7,6 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/libslic3r.h"
 
-#include <cmath>
 #include <limits>
 #include <vector>
 
