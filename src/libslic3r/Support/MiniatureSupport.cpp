@@ -466,6 +466,19 @@ Selection select_contacts(const Problem &problem, const ModelSupportRisk::Field 
     std::vector<char> kept(problem.seeds.size(), 1);
     size_t            restored = 0;
 
+    // One coverage walk per retained contact, read at the contact's own position, which is where the
+    // decimation judged it and where the add-back and the placement below both read it. With
+    // `contact_min_distance_mm <= 0` the rule carries nothing between regions, so the walk is the own
+    // region's cells alone, which is all the placement asks for (the rule is on `select_contacts`; a
+    // sliver carries no cells, see `region_witnesses`).
+    const CoverageRule                    rule(problem);
+    std::vector<std::vector<CoveredCell>> walk(problem.seeds.size());
+    std::vector<char>                     walked(problem.seeds.size(), 0);
+    const auto walk_seed = [&](size_t s) {
+        walk[s]   = rule.cells(s, problem.seeds[s].position);
+        walked[s] = 1;
+    };
+
     if (problem.contact_min_distance_mm > 0.) {
         // The contact z a seed stands at is its own region's.
         const auto z_of = [&problem](size_t s) {
@@ -516,16 +529,18 @@ Selection select_contacts(const Problem &problem, const ModelSupportRisk::Field 
                 settled.push_back(s);
         }
 
-        // The add-back, read at the contacts' own positions, which is where the decimation judged them
-        // (the rule is on `select_contacts`; a sliver carries no cells, see `region_witnesses`).
-        const CoverageRule             rule(problem);
+        // The add-back, over the walk of the set as the decimation left it: a seed this loop restores
+        // below was off when the walk ran and is absent from it, which is what makes the restore a
+        // restore.
         std::vector<std::vector<char>> covered(region_count);
         for (size_t r = 0; r < region_count; ++ r)
             covered[r].assign(region_witnesses(problem.regions[r], problem.extrusion_width_mm)->size(), 0);
         for (size_t s = 0; s < problem.seeds.size(); ++ s)
-            if (kept[s])
-                for (const CoveredCell &cell : rule.cells(s, problem.seeds[s].position))
+            if (kept[s]) {
+                walk_seed(s);
+                for (const CoveredCell &cell : walk[s])
                     covered[cell.region][cell.cell] = 1;
+            }
         for (size_t r = 0; r < region_count; ++ r) {
             if (! problem.regions[r].printable || seeds_of_region[r].empty())
                 continue;
@@ -542,27 +557,31 @@ Selection select_contacts(const Problem &problem, const ModelSupportRisk::Field 
         }
     }
 
+    // Every contact the add-back turned back on was off when the walk above ran, so it carries no
+    // cells yet; so does every contact when no minimum distance decimated anything.
+    for (size_t s = 0; s < problem.seeds.size(); ++ s)
+        if (kept[s] && ! walked[s])
+            walk_seed(s);
+
     // What each retained contact legally covers on its own region and how many retained contacts stand
-    // behind each cell: the coverage placement below may not give up. The lattice is thrown away again,
-    // only the cover vectors indexed by it outlive this loop.
+    // behind each cell: the coverage placement below may not give up. Read off the one walk, filtered
+    // to the contact's own region: what a contact carries for a region above it anchors nothing there.
     std::vector<std::vector<bool>> cover(problem.seeds.size());
     std::vector<std::vector<int>>  cover_count(region_count);
-    for (size_t r = 0; r < region_count; ++ r) {
-        if (seeds_of_region[r].empty())
-            continue;
-        const auto      lattice_ptr = region_witnesses(problem.regions[r], problem.extrusion_width_mm);
-        const Witnesses &lattice    = *lattice_ptr;
-        cover_count[r].assign(lattice.size(), 0);
+    for (size_t r = 0; r < region_count; ++ r)
+        if (! seeds_of_region[r].empty())
+            cover_count[r].assign(region_witnesses(problem.regions[r], problem.extrusion_width_mm)->size(), 0);
+    for (size_t r = 0; r < region_count; ++ r)
         for (size_t s : seeds_of_region[r]) {
             if (! kept[s])
                 continue;
-            cover[s] = covered_by_contact(problem.regions[r].polygon, lattice, problem.seeds[s].position,
-                                          problem.regions[r].legal_reach_mm);
-            for (size_t c = 0; c < cover[s].size(); ++ c)
-                if (cover[s][c])
-                    ++ cover_count[r][c];
+            cover[s].assign(cover_count[r].size(), false);
+            for (const CoveredCell &cell : walk[s])
+                if (cell.region == r) {
+                    cover[s][cell.cell] = true;
+                    ++ cover_count[r][cell.cell];
+                }
         }
-    }
 
     // Where each retained contact ends up, under the placement rule on `select_contacts`.
     std::vector<Point> position(problem.seeds.size());
