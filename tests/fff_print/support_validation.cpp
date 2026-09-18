@@ -289,7 +289,10 @@ void read_evaluation_analyses(const AutoTilt::PoseEvaluation &evaluation, CaseRe
     row.plate_contained = evaluation.status != AutoTilt::PoseEvaluation::Status::Invalid;
     row.printable       = row.plate_contained;
     row.metrics         = metrics_of(evaluation);
-    row.reason_codes    = evaluation.reason_codes;
+    row.reason_codes.clear();
+    row.reason_codes.reserve(evaluation.reason_codes.size());
+    for (AutoTilt::Reason code : evaluation.reason_codes)
+        row.reason_codes.emplace_back(AutoTilt::reason_code_name(code));
 }
 
 Outcome outcome_of(const AutoTilt::PoseEvaluation &evaluation)

@@ -12,6 +12,42 @@ namespace Slic3r { namespace AutoTilt {
 
 bool Pose::is_root() const { return this->tilt_deg == 0. && this->lean_deg == 0.; }
 
+const char *reason_code_name(Reason code)
+{
+    switch (code) {
+    case Reason::canceled:                    return "canceled";
+    case Reason::outside_printable_region:    return "outside_printable_region";
+    case Reason::exclusion_area:              return "exclusion_area";
+    case Reason::instance_missing:            return "instance_missing";
+    case Reason::apply_produced_no_object:    return "apply_produced_no_object";
+    case Reason::validate_rejected:           return "validate_rejected";
+    case Reason::organic_or_non_tree_support: return "organic_or_non_tree_support";
+    case Reason::analysis_missing:            return "analysis_missing";
+    case Reason::required_region_unsupported: return "required_region_unsupported";
+    case Reason::analysis_incomplete:         return "analysis_incomplete";
+    case Reason::nothing_measured:            return "nothing_measured";
+    case Reason::no_root_pose:                return "no_root_pose";
+    case Reason::root_analysis_unavailable:   return "root_analysis_unavailable";
+    case Reason::cheap_score_not_finite:      return "cheap_score_not_finite";
+    case Reason::candidate_inadmissible:      return "candidate_inadmissible";
+    case Reason::no_candidate_measured:       return "no_candidate_measured";
+    case Reason::gain_unknown_contacts:       return "gain_unknown_contacts";
+    case Reason::gain_inaccessible_groups:    return "gain_inaccessible_groups";
+    case Reason::gain_max_group_risk:         return "gain_max_group_risk";
+    case Reason::gain_total_group_risk:       return "gain_total_group_risk";
+    case Reason::gain_volume:                 return "gain_volume";
+    case Reason::gain_none:                   return "gain_none";
+    }
+    return "gain_none";
+}
+
+void add_reason(std::vector<Reason> &codes, Reason code)
+{
+    if (std::find(codes.begin(), codes.end(), code) == codes.end())
+        codes.push_back(code);
+}
+
+
 double Pose::deviation_deg() const { return std::sqrt(this->tilt_deg * this->tilt_deg + this->lean_deg * this->lean_deg); }
 
 bool operator==(const Pose &lhs, const Pose &rhs) { return lhs.tilt_deg == rhs.tilt_deg && lhs.lean_deg == rhs.lean_deg; }
@@ -175,19 +211,19 @@ struct Objective
     bool                         volume = false;
     int                          order  = 0;
     bool differs() const { return field != SupportAnalysis::DamageField::None || volume; }
-    const char *code() const;
+    Reason code() const;
 };
 
-const char *Objective::code() const
+Reason Objective::code() const
 {
     switch (field) {
-    case SupportAnalysis::DamageField::UnknownContacts:    return "gain_unknown_contacts";
-    case SupportAnalysis::DamageField::InaccessibleGroups: return "gain_inaccessible_groups";
-    case SupportAnalysis::DamageField::MaxGroupRisk:       return "gain_max_group_risk";
-    case SupportAnalysis::DamageField::TotalGroupRisk:     return "gain_total_group_risk";
+    case SupportAnalysis::DamageField::UnknownContacts:    return Reason::gain_unknown_contacts;
+    case SupportAnalysis::DamageField::InaccessibleGroups: return Reason::gain_inaccessible_groups;
+    case SupportAnalysis::DamageField::MaxGroupRisk:       return Reason::gain_max_group_risk;
+    case SupportAnalysis::DamageField::TotalGroupRisk:     return Reason::gain_total_group_risk;
     case SupportAnalysis::DamageField::None:               break;
     }
-    return volume ? "gain_volume" : "gain_none";
+    return volume ? Reason::gain_volume : Reason::gain_none;
 }
 
 Objective first_objective(const Objectives &was, const Objectives &is)
@@ -207,7 +243,7 @@ struct Gain
     bool        improved = false;
     double      gain     = 0.;
     double      required = 0.;
-    const char *code     = "gain_none";
+    Reason      code     = Reason::gain_none;
 };
 
 // The gain gate, on the terms the estimate search already uses: the same
@@ -283,11 +319,6 @@ bool candidate_admissible(const PoseEvaluation &root, const PoseEvaluation &cand
     return true;
 }
 
-void add_reason(VerifiedSearchResult &out, const char *code)
-{
-    if (std::find(out.reason_codes.begin(), out.reason_codes.end(), code) == out.reason_codes.end())
-        out.reason_codes.emplace_back(code);
-}
 
 // The text the log lines below are built from. Nothing in the program reads them: they exist so a run
 // that kept the orientation can be read back afterwards, with the objectives in the order the gate
@@ -324,15 +355,15 @@ std::string objectives_text(const Objectives &objectives)
     return out.str();
 }
 
-std::string codes_text(const std::vector<std::string> &codes)
+std::string codes_text(const std::vector<Reason> &codes)
 {
     if (codes.empty())
         return "none";
     std::string out;
-    for (const std::string &code : codes) {
+    for (Reason code : codes) {
         if (! out.empty())
             out += " ";
-        out += code;
+        out += reason_code_name(code);
     }
     return out;
 }
@@ -421,7 +452,7 @@ VerifiedSearchResult search_verified(const std::vector<Pose> &legal,
     const auto root_it = std::find_if(legal.begin(), legal.end(), [](const Pose &p) { return p.is_root(); });
     if (root_it == legal.end()) {
         result.outcome = VerifiedSearchResult::Outcome::VerificationUnavailable;
-        add_reason(result, "no_root_pose");
+        add_reason(result.reason_codes, Reason::no_root_pose);
         BOOST_LOG_TRIVIAL(info) << "auto-tilt: verification unavailable, reasons " << codes_text(result.reason_codes);
         return result;
     }
@@ -444,7 +475,7 @@ VerifiedSearchResult search_verified(const std::vector<Pose> &legal,
     const auto canceled = [&result]() {
         result.outcome  = VerifiedSearchResult::Outcome::Canceled;
         result.selected = result.root;
-        add_reason(result, "canceled");
+        add_reason(result.reason_codes, Reason::canceled);
         BOOST_LOG_TRIVIAL(info) << "auto-tilt: canceled after " << result.verified << " full evaluations";
     };
 
@@ -473,7 +504,7 @@ VerifiedSearchResult search_verified(const std::vector<Pose> &legal,
         return result;
     default:
         result.outcome = VerifiedSearchResult::Outcome::VerificationUnavailable;
-        add_reason(result, "root_analysis_unavailable");
+        add_reason(result.reason_codes, Reason::root_analysis_unavailable);
         BOOST_LOG_TRIVIAL(info) << "auto-tilt: the root was not measured, reasons " << codes_text(result.root.reason_codes);
         return result;
     }
@@ -493,7 +524,7 @@ VerifiedSearchResult search_verified(const std::vector<Pose> &legal,
         tick();
         // A score that is not a number orders nothing, so the pose carrying it is not shortlisted.
         if (! std::isfinite(c.score_mm3)) {
-            add_reason(result, "cheap_score_not_finite");
+            add_reason(result.reason_codes, Reason::cheap_score_not_finite);
             continue;
         }
         cheap.push_back(Cheap{legal[i], c.score_mm3, i});
@@ -541,7 +572,7 @@ VerifiedSearchResult search_verified(const std::vector<Pose> &legal,
             return result;
         }
         if (! candidate_admissible(result.root, evaluation)) {
-            add_reason(result, "candidate_inadmissible");
+            add_reason(result.reason_codes, Reason::candidate_inadmissible);
             BOOST_LOG_TRIVIAL(info) << "auto-tilt candidate " << pose_text(evaluation.pose) << ": inadmissible, "
                                     << status_name(evaluation.status) << ", reasons " << codes_text(evaluation.reason_codes);
             continue;
@@ -552,7 +583,7 @@ VerifiedSearchResult search_verified(const std::vector<Pose> &legal,
         candidate.order      = shortlist_order[i];
         BOOST_LOG_TRIVIAL(info) << "auto-tilt candidate " << pose_text(evaluation.pose) << ": "
                                 << status_name(evaluation.status) << ", " << objectives_text(candidate.objectives)
-                                << ", first difference " << candidate.gain.code << ", gain " << candidate.gain.gain
+                                << ", first difference " << reason_code_name(candidate.gain.code) << ", gain " << candidate.gain.gain
                                 << " of " << candidate.gain.required << " required"
                                 << (candidate.gain.improved ? ", clears the gate" : ", short of the gate");
         candidate.evaluation = std::move(evaluation);
@@ -571,8 +602,8 @@ VerifiedSearchResult search_verified(const std::vector<Pose> &legal,
         result.selected             = best->evaluation;
         result.improvement          = best->gain.gain;
         result.required_improvement = best->gain.required;
-        add_reason(result, best->gain.code);
-        BOOST_LOG_TRIVIAL(info) << "auto-tilt: " << pose_text(result.selected.pose) << " wins on " << best->gain.code
+        add_reason(result.reason_codes, best->gain.code);
+        BOOST_LOG_TRIVIAL(info) << "auto-tilt: " << pose_text(result.selected.pose) << " wins on " << reason_code_name(best->gain.code)
                                 << ", gain " << result.improvement << " of " << result.required_improvement << " required";
         return result;
     }
@@ -589,10 +620,10 @@ VerifiedSearchResult search_verified(const std::vector<Pose> &legal,
         // The objective the best-ranked candidate failed on, which is the one thing that answers why the
         // object stayed where it is. Filed here and not only on the winning path, so no caller has to
         // reach for a code the root happens to carry instead.
-        add_reason(result, best->gain.code);
+        add_reason(result.reason_codes, best->gain.code);
     } else {
         result.required_improvement = k.threshold_base;
-        add_reason(result, "no_candidate_measured");
+        add_reason(result.reason_codes, Reason::no_candidate_measured);
     }
     BOOST_LOG_TRIVIAL(info) << "auto-tilt: no pose earned its tilt over " << admissible.size() << " admissible of "
                             << result.shortlist.size() << " finalists, best gain " << result.improvement << " of "

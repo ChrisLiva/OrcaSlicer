@@ -109,8 +109,8 @@ AutoTilt::EvaluationInput plate_input(const Slic3r::Model &model, const DynamicP
 std::string reasons_of(const AutoTilt::PoseEvaluation &evaluation)
 {
     std::string out;
-    for (const std::string &code : evaluation.reason_codes)
-        out += (out.empty() ? "" : ", ") + code;
+    for (AutoTilt::Reason code : evaluation.reason_codes)
+        out += (out.empty() ? "" : ", ") + std::string(AutoTilt::reason_code_name(code));
     return out.empty() ? "none" : out;
 }
 
@@ -672,7 +672,7 @@ TEST_CASE("Generated evaluation measures legacy support read-only and refuses Or
         REQUIRE(organic.status == AutoTilt::PoseEvaluation::Status::Unknown);
         REQUIRE(organic.instances.empty());
         REQUIRE(std::find(organic.reason_codes.begin(), organic.reason_codes.end(),
-                          std::string("organic_or_non_tree_support")) != organic.reason_codes.end());
+                          AutoTilt::Reason::organic_or_non_tree_support) != organic.reason_codes.end());
     }
 
     // Legacy with the miniature contact mode off: the one generated pass is measured where it
@@ -688,7 +688,7 @@ TEST_CASE("Generated evaluation measures legacy support read-only and refuses Or
     REQUIRE(! measured.missing_anchor_ids.empty());
     REQUIRE(plain.status == AutoTilt::PoseEvaluation::Status::UnresolvedCoverage);
     REQUIRE(std::find(plain.reason_codes.begin(), plain.reason_codes.end(),
-                      std::string("required_region_unsupported")) != plain.reason_codes.end());
+                      AutoTilt::Reason::required_region_unsupported) != plain.reason_codes.end());
 
     // With the mode on, the generator thins the contacts of the one problem it prepared, and the
     // report the object hands out still names the regions that problem carried.
@@ -734,7 +734,7 @@ TEST_CASE("Generated evaluation reads an object with no overhang as complete", "
     CHECK(report.missing_anchor_ids.empty());
     CHECK(report.has_reason(SupportAnalysis::Reason::NoProblem));
     CHECK(std::find(evaluation.reason_codes.begin(), evaluation.reason_codes.end(),
-                    std::string("required_region_unsupported")) == evaluation.reason_codes.end());
+                    AutoTilt::Reason::required_region_unsupported) == evaluation.reason_codes.end());
 }
 
 TEST_CASE("Generated evaluation counts every affected instance and refreshes the footprint after brim", "[AutoTilt]")
@@ -924,7 +924,7 @@ TEST_CASE("Generated evaluation reproduces an independent full Print and refuses
         const AutoTilt::PoseEvaluation refused = refuser.evaluate(AutoTilt::Pose{ -8., 0. }, {});
         REQUIRE(refused.status == AutoTilt::PoseEvaluation::Status::Invalid);
         REQUIRE(std::find(refused.reason_codes.begin(), refused.reason_codes.end(),
-                          std::string("outside_printable_region")) != refused.reason_codes.end());
+                          AutoTilt::Reason::outside_printable_region) != refused.reason_codes.end());
         // Before processing: nothing was applied, so the private Print holds no object at all.
         REQUIRE(refuser.print(0).objects().empty());
         REQUIRE(refused.instances.empty());
@@ -937,7 +937,7 @@ TEST_CASE("Generated evaluation reproduces an independent full Print and refuses
         AutoTilt::GeneratedEvaluator   missing_evaluator(missing, inline_runner());
         const AutoTilt::PoseEvaluation unknown = missing_evaluator.evaluate(AutoTilt::Pose{ -8., 0. }, {});
         REQUIRE(unknown.status == AutoTilt::PoseEvaluation::Status::Unknown);
-        REQUIRE(unknown.reason_codes == std::vector<std::string>{ "instance_missing" });
+        REQUIRE(unknown.reason_codes == std::vector<AutoTilt::Reason>{ AutoTilt::Reason::instance_missing });
         REQUIRE(missing_evaluator.print(0).objects().empty());
 
         // A second plate, whose own instance reaches into a volume nothing may print in.
@@ -951,7 +951,7 @@ TEST_CASE("Generated evaluation reproduces an independent full Print and refuses
         const AutoTilt::PoseEvaluation excluded = two.evaluate(AutoTilt::Pose{ -8., 0. }, {});
         REQUIRE(excluded.status == AutoTilt::PoseEvaluation::Status::Invalid);
         REQUIRE(std::find(excluded.reason_codes.begin(), excluded.reason_codes.end(),
-                          std::string("exclusion_area")) != excluded.reason_codes.end());
+                          AutoTilt::Reason::exclusion_area) != excluded.reason_codes.end());
         REQUIRE(two.print(1).objects().empty());
     }
 
@@ -1116,7 +1116,7 @@ TEST_CASE("Generated evaluation validates a BBL printer's plate the way the slic
         AutoTilt::GeneratedEvaluator   evaluator(plate_input(model, config, { obj->instances.front()->id() }), inline_runner());
         const AutoTilt::PoseEvaluation evaluation = evaluator.evaluate(AutoTilt::Pose{}, {});
         REQUIRE(evaluation.status == AutoTilt::PoseEvaluation::Status::Invalid);
-        REQUIRE(evaluation.reason_codes == std::vector<std::string>{ "validate_rejected" });
+        REQUIRE(evaluation.reason_codes == std::vector<AutoTilt::Reason>{ AutoTilt::Reason::validate_rejected });
     }
 }
 
@@ -1177,7 +1177,7 @@ TEST_CASE("A generated evaluation canceled from another thread stops its Print a
     driver.join();
 
     REQUIRE(out.status == AutoTilt::PoseEvaluation::Status::Canceled);
-    REQUIRE(std::find(out.reason_codes.begin(), out.reason_codes.end(), std::string("canceled")) != out.reason_codes.end());
+    REQUIRE(std::find(out.reason_codes.begin(), out.reason_codes.end(), AutoTilt::Reason::canceled) != out.reason_codes.end());
     REQUIRE(out.instances.empty());
     REQUIRE_THAT(out.support_volume_mm3, WithinAbs(0., 1e-12));
     // Real Print work had started - the plate was applied and slicing had reported progress - and it
@@ -1613,8 +1613,8 @@ void run_exhaustive_case(const SupportValidation::Manifest &manifest, const Supp
         SupportValidation::discrete_worse(envelopes[chosen].optimistic, envelopes[best].optimistic);
     // Why the search settled where it did, on top of the reason codes the chosen pose's own
     // evaluation already put on the row.
-    for (const std::string &code : result.reason_codes)
-        summary.reason_codes.push_back(code);
+    for (AutoTilt::Reason code : result.reason_codes)
+        summary.reason_codes.emplace_back(AutoTilt::reason_code_name(code));
     SupportValidation::write_result(summary, rows);
 
     std::cout << "case " << entry.id << " " << style << "/" << mode

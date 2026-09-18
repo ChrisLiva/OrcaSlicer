@@ -65,7 +65,7 @@ static bool root_pose_fits(const ModelObject &obj, const std::vector<PartPlate *
         if (p.points.size() > 2)
             ground.emplace_back(std::move(p));
         if (AutoTilt::plate_refusal(ground, plates[i]->get_exclude_areas(), plates[i]->get_build_volume().max.z(),
-                                    AutoTilt::posed_footprint(obj, matrix), boxes[i]) != nullptr)
+                                    AutoTilt::posed_footprint(obj, matrix), boxes[i]))
             return false;
     }
     return true;
@@ -301,47 +301,55 @@ static std::string damage_direction_text(const AutoTilt::PoseEvaluation &root, c
 }
 
 // The user-facing half of one machine reason code. The codes come from AutoTilt::search_verified and
-// from the root evaluation it carries; an unmapped code falls through to the code itself, so a code a
-// later change adds shows up in the notification instead of vanishing from it.
-static std::string reason_phrase(const std::string &code)
+// from the root evaluation it carries. Every enumerator has an arm, so a code a later change adds
+// fails the build here rather than reaching a user as a machine name. Cancellation is silent, so its
+// arm is empty and reason_detail skips it before ever asking for a phrase.
+static std::string reason_phrase(AutoTilt::Reason code)
 {
-    if (code == "no_root_pose")
+    switch (code) {
+    case AutoTilt::Reason::canceled:
+        return {};
+    case AutoTilt::Reason::no_root_pose:
         return _u8L("the current orientation was not among the angles tested");
-    if (code == "required_region_unsupported")
+    case AutoTilt::Reason::required_region_unsupported:
         return _u8L("a required support region stayed unreachable");
-    if (code == "root_analysis_unavailable" || code == "analysis_missing" || code == "analysis_incomplete")
+    case AutoTilt::Reason::root_analysis_unavailable:
+    case AutoTilt::Reason::analysis_missing:
+    case AutoTilt::Reason::analysis_incomplete:
         return _u8L("the support analysis did not finish");
-    if (code == "nothing_measured")
+    case AutoTilt::Reason::nothing_measured:
         return _u8L("no instance was measured");
-    if (code == "cheap_score_not_finite")
+    case AutoTilt::Reason::cheap_score_not_finite:
         return _u8L("some angles could not be scored");
-    if (code == "candidate_inadmissible")
+    case AutoTilt::Reason::candidate_inadmissible:
         return _u8L("no angle tested gave a complete support measurement");
-    if (code == "no_candidate_measured")
+    case AutoTilt::Reason::no_candidate_measured:
         return _u8L("no candidate angle could be measured");
-    if (code == "instance_missing")
+    case AutoTilt::Reason::instance_missing:
         return _u8L("an instance was missing from the test slice");
-    if (code == "outside_printable_region")
+    case AutoTilt::Reason::outside_printable_region:
         return _u8L("an instance left the printable area");
-    if (code == "exclusion_area")
+    case AutoTilt::Reason::exclusion_area:
         return _u8L("an instance reached into an exclusion area");
-    if (code == "apply_produced_no_object" || code == "validate_rejected")
+    case AutoTilt::Reason::apply_produced_no_object:
+    case AutoTilt::Reason::validate_rejected:
         return _u8L("the print settings rejected the test slice");
-    if (code == "organic_or_non_tree_support")
+    case AutoTilt::Reason::organic_or_non_tree_support:
         return _u8L("the affected copies do not all use a legacy tree style");
-    if (code == "gain_unknown_contacts")
+    case AutoTilt::Reason::gain_unknown_contacts:
         return _u8L("contacts of unknown removal risk did not drop enough");
-    if (code == "gain_inaccessible_groups")
+    case AutoTilt::Reason::gain_inaccessible_groups:
         return _u8L("support groups with no removal access did not drop enough");
-    if (code == "gain_max_group_risk")
+    case AutoTilt::Reason::gain_max_group_risk:
         return _u8L("the worst group's estimated removal risk did not drop enough");
-    if (code == "gain_total_group_risk")
+    case AutoTilt::Reason::gain_total_group_risk:
         return _u8L("the total estimated removal risk did not drop enough");
-    if (code == "gain_volume")
+    case AutoTilt::Reason::gain_volume:
         return _u8L("generated support volume did not drop enough");
-    if (code == "gain_none")
+    case AutoTilt::Reason::gain_none:
         return _u8L("no measured objective differed");
-    return code;
+    }
+    return {};
 }
 
 // search_verified files every root it cannot use under "root_analysis_unavailable", which names none of
@@ -352,13 +360,13 @@ static std::string reason_phrase(const std::string &code)
 std::string AutoTiltJob::reason_detail() const
 {
     const bool root_first = m_verified.outcome == AutoTilt::VerifiedSearchResult::Outcome::VerificationUnavailable;
-    std::vector<const std::vector<std::string> *> codes{ &m_verified.reason_codes };
+    std::vector<const std::vector<AutoTilt::Reason> *> codes{ &m_verified.reason_codes };
     if (root_first)
         codes.insert(codes.begin(), &m_verified.root.reason_codes);
-    for (const std::vector<std::string> *list : codes)
-        for (const std::string &code : *list)
+    for (const std::vector<AutoTilt::Reason> *list : codes)
+        for (AutoTilt::Reason code : *list)
             // Cancellation is already silent, so it is never the reason a result is shown for.
-            if (code != "canceled")
+            if (code != AutoTilt::Reason::canceled)
                 return " " + GUI::format(_L("Reason: %1%."), reason_phrase(code));
     return {};
 }

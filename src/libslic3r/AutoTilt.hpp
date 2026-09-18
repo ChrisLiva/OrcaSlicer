@@ -16,6 +16,43 @@ namespace Slic3r { namespace AutoTilt {
 // ObjectIDs and the model tree, so it may not run on a worker; slicing and measuring may.
 using MainThreadRunner = std::function<void(const std::function<void()> &)>;
 
+// Why one pose was refused, or why the search settled where it did. Filed as a set, never a tally:
+// a pose that fails the same way on two plates carries the code once. The `gain_` codes name the
+// objective the best measured candidate fell short on, so a NoImprovement outcome says which one.
+// Every consumer switches over this, so a code added here has to be phrased before it compiles.
+enum class Reason {
+    canceled,                    // the search or a slice stopped before it settled
+    outside_printable_region,    // an instance left the printable ground or rose above the height
+    exclusion_area,              // an instance reached into an exclusion
+    instance_missing,            // an affected id had no snapshot, no object, or no defined hull box
+    apply_produced_no_object,    // Print::apply left no object to slice
+    validate_rejected,           // Print::validate refused the arrangement
+    organic_or_non_tree_support, // not every affected copy uses the legacy tree style
+    analysis_missing,            // a sliced object carried no support analysis
+    required_region_unsupported, // the generated support left a required region open
+    analysis_incomplete,         // the analysis answered Unknown
+    nothing_measured,            // no instance was measured at all
+    no_root_pose,                // the legal list did not contain the root pose
+    root_analysis_unavailable,   // the root itself was never measured
+    cheap_score_not_finite,      // the cheap scorer answered with a non-finite score
+    candidate_inadmissible,      // no finalist reached a complete measurement
+    no_candidate_measured,       // no candidate was measured at all
+    gain_unknown_contacts,
+    gain_inaccessible_groups,
+    gain_max_group_risk,
+    gain_total_group_risk,
+    gain_volume,
+    gain_none,                   // the measured objectives tied, or neither side was measured
+};
+
+// The machine name of one reason, for logs and for the test harness's JSON rows. Never shown to a
+// user: the notification phrases every code itself.
+const char *reason_code_name(Reason);
+
+// Adds `code` once: a pose that fails the same way on two plates says so once, so the codes read as
+// a set of conditions rather than as a tally of instances.
+void add_reason(std::vector<Reason> &codes, Reason code);
+
 // Every bound, step and threshold the search uses. Passed into grid(), search()
 // and fragility_weight() so no loop bakes a number in.
 struct Constants
@@ -101,7 +138,7 @@ struct PoseEvaluation
     std::vector<SupportAnalysis::Report> instances;
     double                               support_volume_mm3 = 0.;
     double                               raft_volume_mm3    = 0.;
-    std::vector<std::string>             reason_codes;
+    std::vector<Reason>                  reason_codes;
 };
 
 using StopPredicate = std::function<bool()>;
@@ -165,10 +202,10 @@ struct VerifiedSearchResult
     size_t                   verified             = 0;  // full evaluations run, the root included
     double                   improvement          = 0.; // of the best-ranked verified candidate
     double                   required_improvement = 0.;
-    std::vector<std::string> reason_codes;
+    std::vector<Reason>      reason_codes;
 };
 
-// Answers VerificationUnavailable with "no_root_pose" unless `legal` contains the root pose. Evaluates
+// Answers VerificationUnavailable with Reason::no_root_pose unless `legal` contains the root pose. Evaluates
 // the root in full first, cheap-scores every other legal pose, and verifies the best
 // `verified_finalist_count` of them under the actual settings. The cheap score orders the shortlist
 // and grants nothing else: a pose wins only on what the full evaluation measured.

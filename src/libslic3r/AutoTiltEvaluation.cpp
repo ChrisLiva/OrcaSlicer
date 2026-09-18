@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cstring>
 #include <utility>
 
 #include "ClipperUtils.hpp"
@@ -34,16 +33,16 @@ Polygon posed_footprint(const ModelObject &object, const Transform3d &matrix)
     return Geometry::convex_hull(points);
 }
 
-const char *plate_refusal(const ExPolygons &printable_regions, const std::vector<BoundingBoxf3> &exclusions,
-                          double printable_height_mm, const Polygon &footprint, const BoundingBoxf3 &hull_box)
+std::optional<Reason> plate_refusal(const ExPolygons &printable_regions, const std::vector<BoundingBoxf3> &exclusions,
+                                    double printable_height_mm, const Polygon &footprint, const BoundingBoxf3 &hull_box)
 {
     if ((! printable_regions.empty() && ! diff(Polygons{ footprint }, to_polygons(printable_regions)).empty()) ||
         hull_box.max.z() > printable_height_mm)
-        return "outside_printable_region";
+        return Reason::outside_printable_region;
     for (const BoundingBoxf3 &exclusion : exclusions)
         if (hull_box.intersects(exclusion))
-            return "exclusion_area";
-    return nullptr;
+            return Reason::exclusion_area;
+    return std::nullopt;
 }
 
 namespace {
@@ -98,14 +97,6 @@ Polygons instance_adhesion(const Print &print, const PrintObject &object, size_t
     for (Polygon &polygon : adhesion)
         polygon.translate(- shift);
     return adhesion;
-}
-
-// Adds `code` once: a pose that fails the same way on two plates says so once, so the codes read as
-// a set of conditions rather than as a tally of instances.
-void add_reason(PoseEvaluation &out, const char *code)
-{
-    if (std::find(out.reason_codes.begin(), out.reason_codes.end(), code) == out.reason_codes.end())
-        out.reason_codes.emplace_back(code);
 }
 
 // The worse of two outcomes, so the whole pose reads as its weakest plate. Complete is the only
@@ -355,16 +346,16 @@ BoundingBoxf3 posed_hull_box(const Model &model, const InstanceSnapshot &snapsho
 
 namespace {
 
-// Why one plate cannot print the pose, or nullptr where it can. Membership is the plate's own affected
+// Why one plate cannot print the pose, or no value where it can. Membership is the plate's own affected
 // list, never "whichever ids this plate's model happens to carry": two plates can be captured from
 // models that carry the same instance ids, and only one of them prints each of them. An affected id
-// with no snapshot is "instance_missing" for the whole plate before any instance is held to the
+// with no snapshot is Reason::instance_missing for the whole plate before any instance is held to the
 // ground; then, in affected-id order, an instance with no object in the plate's model or no defined
-// hull box is "instance_missing" and the first plate_refusal code is the answer. Where `posed` is
+// hull box is Reason::instance_missing and the first plate_refusal code is the answer. Where `posed` is
 // given, the plate's snapshots are collected into it in that order, so the caller applies exactly
 // what was judged.
-const char *plate_refusal_of(const PlateInput &plate, const std::vector<InstanceSnapshot> &all_posed,
-                             std::vector<InstanceSnapshot> *posed)
+std::optional<Reason> plate_refusal_of(const PlateInput &plate, const std::vector<InstanceSnapshot> &all_posed,
+                                       std::vector<InstanceSnapshot> *posed)
 {
     std::vector<const InstanceSnapshot *> snapshots;
     snapshots.reserve(plate.affected_instance_ids.size());
@@ -376,21 +367,22 @@ const char *plate_refusal_of(const PlateInput &plate, const std::vector<Instance
                 break;
             }
         if (snapshot == nullptr)
-            return "instance_missing";
+            return Reason::instance_missing;
         snapshots.push_back(snapshot);
     }
     for (const InstanceSnapshot *snapshot : snapshots) {
         const ModelObject   *object   = object_of_instance(plate.model, snapshot->id);
         const BoundingBoxf3  hull_box = posed_hull_box(plate.model, *snapshot);
         if (object == nullptr || ! hull_box.defined)
-            return "instance_missing";
-        if (const char *refusal = plate_refusal(plate.printable_regions, plate.exclusions, plate.printable_height_mm,
-                                               posed_footprint(*object, snapshot->matrix), hull_box))
+            return Reason::instance_missing;
+        if (const std::optional<Reason> refusal = plate_refusal(plate.printable_regions, plate.exclusions,
+                                                               plate.printable_height_mm,
+                                                               posed_footprint(*object, snapshot->matrix), hull_box))
             return refusal;
         if (posed != nullptr)
             posed->push_back(*snapshot);
     }
-    return nullptr;
+    return std::nullopt;
 }
 
 } // namespace
@@ -399,7 +391,7 @@ bool pose_admissible(const EvaluationInput &input, const Pose &pose)
 {
     const std::vector<InstanceSnapshot> all_posed = posed_instances(input, pose);
     for (const PlateInput &plate : input.plates)
-        if (plate_refusal_of(plate, all_posed, nullptr) != nullptr)
+        if (plate_refusal_of(plate, all_posed, nullptr))
             return false;
     return true;
 }
@@ -471,7 +463,7 @@ PoseEvaluation GeneratedEvaluator::evaluate(const Pose &pose, const StopPredicat
 
     if (this->stopped(stop)) {
         out.status = PoseEvaluation::Status::Canceled;
-        add_reason(out, "canceled");
+        add_reason(out.reason_codes, Reason::canceled);
         return out;
     }
 
@@ -484,7 +476,7 @@ PoseEvaluation GeneratedEvaluator::evaluate(const Pose &pose, const StopPredicat
         const PlateInput &plate = m_input.plates[p];
         if (this->stopped(stop)) {
             out.status = PoseEvaluation::Status::Canceled;
-            add_reason(out, "canceled");
+            add_reason(out.reason_codes, Reason::canceled);
             return out;
         }
 
@@ -493,10 +485,10 @@ PoseEvaluation GeneratedEvaluator::evaluate(const Pose &pose, const StopPredicat
         // into an exclusion is not a candidate. plate_refusal_of is the one rule, so the pre-pass and
         // the GUI application read the same answer through pose_admissible.
         std::vector<InstanceSnapshot> posed;
-        if (const char *code = plate_refusal_of(plate, all_posed, &posed)) {
-            out.status = worse(out.status, std::strcmp(code, "instance_missing") == 0 ? PoseEvaluation::Status::Unknown :
-                                                                                       PoseEvaluation::Status::Invalid);
-            add_reason(out, code);
+        if (const std::optional<Reason> code = plate_refusal_of(plate, all_posed, &posed)) {
+            out.status = worse(out.status, *code == Reason::instance_missing ? PoseEvaluation::Status::Unknown :
+                                                                              PoseEvaluation::Status::Invalid);
+            add_reason(out.reason_codes, *code);
             continue;
         }
 
@@ -522,7 +514,7 @@ PoseEvaluation GeneratedEvaluator::evaluate(const Pose &pose, const StopPredicat
         Print &print = *m_prints[p];
         if (print.objects().empty()) {
             out.status = worse(out.status, PoseEvaluation::Status::Unknown);
-            add_reason(out, "apply_produced_no_object");
+            add_reason(out.reason_codes, Reason::apply_produced_no_object);
             continue;
         }
 
@@ -532,7 +524,7 @@ PoseEvaluation GeneratedEvaluator::evaluate(const Pose &pose, const StopPredicat
         std::vector<StringObjectException> warnings;
         if (! print.validate(&warnings).string.empty()) {
             out.status = worse(out.status, PoseEvaluation::Status::Invalid);
-            add_reason(out, "validate_rejected");
+            add_reason(out.reason_codes, Reason::validate_rejected);
             continue;
         }
 
@@ -545,13 +537,13 @@ PoseEvaluation GeneratedEvaluator::evaluate(const Pose &pose, const StopPredicat
             const PrintObject *object = print_object_of_instance(print, instance.id, index);
             if (object == nullptr) {
                 out.status = worse(out.status, PoseEvaluation::Status::Unknown);
-                add_reason(out, "apply_produced_no_object");
+                add_reason(out.reason_codes, Reason::apply_produced_no_object);
                 unsupported = true;
                 break;
             }
             if (support_generator_of(*object) != SupportGenerator::Legacy) {
                 out.status = worse(out.status, PoseEvaluation::Status::Unknown);
-                add_reason(out, "organic_or_non_tree_support");
+                add_reason(out.reason_codes, Reason::organic_or_non_tree_support);
                 unsupported = true;
                 break;
             }
@@ -580,7 +572,7 @@ PoseEvaluation GeneratedEvaluator::evaluate(const Pose &pose, const StopPredicat
         }
         if (canceled || this->stopped(stop)) {
             out.status = PoseEvaluation::Status::Canceled;
-            add_reason(out, "canceled");
+            add_reason(out.reason_codes, Reason::canceled);
             return out;
         }
 
@@ -593,7 +585,7 @@ PoseEvaluation GeneratedEvaluator::evaluate(const Pose &pose, const StopPredicat
                 object == nullptr ? nullptr : object->support_analysis();
             if (measured == nullptr) {
                 out.status = worse(out.status, PoseEvaluation::Status::Unknown);
-                add_reason(out, "analysis_missing");
+                add_reason(out.reason_codes, Reason::analysis_missing);
                 continue;
             }
             // The ground this copy stands on, taken again now that the print has laid its brim: the
@@ -611,16 +603,16 @@ PoseEvaluation GeneratedEvaluator::evaluate(const Pose &pose, const StopPredicat
             case SupportAnalysis::Report::Status::Complete:
                 if (! report.missing_anchor_ids.empty()) {
                     out.status = worse(out.status, PoseEvaluation::Status::UnresolvedCoverage);
-                    add_reason(out, "required_region_unsupported");
+                    add_reason(out.reason_codes, Reason::required_region_unsupported);
                 }
                 break;
             case SupportAnalysis::Report::Status::UnresolvedCoverage:
                 out.status = worse(out.status, PoseEvaluation::Status::UnresolvedCoverage);
-                add_reason(out, "required_region_unsupported");
+                add_reason(out.reason_codes, Reason::required_region_unsupported);
                 break;
             case SupportAnalysis::Report::Status::Unknown:
                 out.status = worse(out.status, PoseEvaluation::Status::Unknown);
-                add_reason(out, "analysis_incomplete");
+                add_reason(out.reason_codes, Reason::analysis_incomplete);
                 break;
             }
         }
@@ -628,7 +620,7 @@ PoseEvaluation GeneratedEvaluator::evaluate(const Pose &pose, const StopPredicat
 
     if (out.instances.empty() && out.status == PoseEvaluation::Status::Complete) {
         out.status = PoseEvaluation::Status::Unknown;
-        add_reason(out, "nothing_measured");
+        add_reason(out.reason_codes, Reason::nothing_measured);
     }
     return out;
 }

@@ -5,6 +5,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <vector>
 
 #include "libslic3r/AutoTilt.hpp"
@@ -91,16 +92,16 @@ BoundingBoxf3 posed_hull_box(const Model &model, const InstanceSnapshot &snapsho
 // printable ground, which need not be a rectangle, so a box would not do.
 Polygon posed_footprint(const ModelObject &object, const Transform3d &matrix);
 
-// Which constraint of one plate a posed instance breaks, or nullptr where it fits:
-// "outside_printable_region" where the footprint leaves a non-empty printable_regions or the hull box
-// rises above printable_height_mm, "exclusion_area" where the hull box intersects an exclusion.
-// Checked in that order.
-const char *plate_refusal(const ExPolygons &printable_regions, const std::vector<BoundingBoxf3> &exclusions,
-                          double printable_height_mm, const Polygon &footprint, const BoundingBoxf3 &hull_box);
+// Which constraint of one plate a posed instance breaks, or no value where it fits:
+// Reason::outside_printable_region where the footprint leaves a non-empty printable_regions or the
+// hull box rises above printable_height_mm, Reason::exclusion_area where the hull box intersects an
+// exclusion. Checked in that order.
+std::optional<Reason> plate_refusal(const ExPolygons &printable_regions, const std::vector<BoundingBoxf3> &exclusions,
+                                    double printable_height_mm, const Polygon &footprint, const BoundingBoxf3 &hull_box);
 
 // Whether every affected instance of every captured plate fits its plate under pose: each affected id
-// resolves to an instance the plate's model carries with a defined hull box, and plate_refusal is
-// nullptr for all of them.
+// resolves to an instance the plate's model carries with a defined hull box, and plate_refusal
+// refuses none of them.
 bool pose_admissible(const EvaluationInput &input, const Pose &pose);
 
 // Which support generator the affected instances of a captured input would actually run. Resolved
