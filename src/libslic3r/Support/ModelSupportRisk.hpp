@@ -112,9 +112,13 @@ bool local_width(const ExPolygon &solid, const Point &query, double *width_mm);
 // geometrically unknown sample. Nonfinite or inverted slab bounds return Invalid.
 Field build(const std::vector<Slice> &slices, double extrusion_width_mm, const std::function<bool()> &stop);
 
-// What the model under `query` on `layer` is worth carrying a contact on. Unknown wherever the field
-// is not Complete, the query lies in no solid, the local width cannot be measured, or no path over
-// the model's own solids reaches the object's first slab, which the plate or a raft carries.
+// What the model under `query` on `layer` is worth carrying a contact on. A query no solid on the
+// layer contains still stands on the nearest one whose boundary is within half the field's extrusion
+// width, whether it sits outside an outline or inside a hole, and reads the width of the medial
+// sample it hangs off rather than a clearance it does not have. Unknown wherever the field is not
+// Complete, the query lies further than that from every solid on the layer, the local width cannot
+// be measured, or no path over the model's own solids reaches the object's first slab, which the
+// plate or a raft carries.
 Sample sample(const Field &field, size_t layer, const Point &query);
 
 // The dimensionless weight `(w / max(t, w)) * (1 + L / max(n, w))`: w the resolved support extrusion

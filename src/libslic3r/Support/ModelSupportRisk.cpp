@@ -415,14 +415,30 @@ Sample sample(const Field &field, size_t layer, const Point &query)
             island = i;
             break;
         }
+    // A contact placed on the model's own outline lands just off the slice that holds it often
+    // enough that reading it as nothing loses most of a miniature's contacts. A query within half an
+    // extrusion width of an island's boundary stands on that island instead - outside the outline or
+    // inside a hole alike, since both are the same distance from the same material.
+    bool attached = false;
     if (island == slice.solids.size()) {
-        result.missing = Sample::Missing::OutsideSolids;
-        return result;
+        double nearest_mm = std::numeric_limits<double>::max();
+        for (size_t i = 0; i < slice.solids.size(); ++ i) {
+            const double d = (slice.solids[i].point_projection(query) - query).cast<double>().norm() * SCALING_FACTOR;
+            if (d < nearest_mm) {
+                nearest_mm = d;
+                island     = i;
+            }
+        }
+        if (! (nearest_mm <= 0.5 * field.extrusion_width_mm)) {
+            result.missing = Sample::Missing::OutsideSolids;
+            return result;
+        }
+        attached = true;
     }
 
     const size_t flat = field.island_base[layer] + island;
     double       local = 0.;
-    if (! measured_width(slice.solids[island], field.island_medial[flat], query, &local)) {
+    if (! attached && ! measured_width(slice.solids[island], field.island_medial[flat], query, &local)) {
         result.missing = Sample::Missing::WidthUnmeasured;
         return result;
     }
@@ -442,6 +458,16 @@ Sample sample(const Field &field, size_t layer, const Point &query)
         if (d < attach_d) {
             attach_d = d;
             attach   = node;
+        }
+    }
+    // An attached query has no clearance of its own for measured_width to work from - that cap is
+    // twice the clearance, and a query outside the solid has none - so it reads the width of the
+    // medial sample it hangs off, the same sample the path leaves the island by.
+    if (attached) {
+        local = field.nodes[attach].width_mm;
+        if (! std::isfinite(local) || local <= 0.) {
+            result.missing = Sample::Missing::WidthUnmeasured;
+            return result;
         }
     }
 

@@ -243,6 +243,62 @@ TEST_CASE("The risk weight rises with thinner material or a narrower neck or a l
 
 namespace {
 
+// A 20 x 4 mm strip on the bed, a 2 mm thick rectangular frame over it, and a slab with nothing on
+// it at all. The strip is the ground the frame's path ends on, and the frame's hole gives a query a
+// rim to sit just inside of.
+std::vector<ModelSupportRisk::Slice> strip_and_frame()
+{
+    ExPolygon frame = rect_mm(0., 0., 20., 12.);
+    frame.holes.push_back(rect_mm(2., 2., 18., 10.).contour);
+    frame.holes.front().reverse();
+    return { slab(0., { rect_mm(0., 0., 20., 4.) }), slab(1., { frame }), slab(2., {}) };
+}
+
+} // namespace
+
+TEST_CASE("A query within half an extrusion width of a solid reads that solid and not an absence", "[ModelSupportRisk]")
+{
+    const auto never_stop = []() { return false; };
+    // At a 0.42 mm extrusion the rule reaches 0.21 mm off the boundary.
+    const ModelSupportRisk::Field field = ModelSupportRisk::build(strip_and_frame(), 0.42, never_stop);
+    REQUIRE(field.status == ModelSupportRisk::Field::Status::Complete);
+    // The frame kept its hole through the union, so the rim query below really sits in a void.
+    REQUIRE(field.slices[1].solids.size() == 1);
+    REQUIRE(field.slices[1].solids.front().holes.size() == 1);
+    REQUIRE(field.slices[2].solids.empty());
+
+    // Mid-strip, well inside it: the reading the tree already gives, and the width every query below
+    // is measured against.
+    const ModelSupportRisk::Sample inside = ModelSupportRisk::sample(field, 0, pt_mm(10., 2.));
+    REQUIRE(inside.status == ModelSupportRisk::Sample::Status::Known);
+    CHECK_THAT(inside.local_width_mm, WithinAbs(4.0, 0.05));
+
+    // 0.05 mm off the strip's long edge: inside the bound, so it stands on the strip and reads the
+    // strip's own width rather than nothing.
+    const ModelSupportRisk::Sample near_edge = ModelSupportRisk::sample(field, 0, pt_mm(10., -0.05));
+    CHECK(near_edge.status == ModelSupportRisk::Sample::Status::Known);
+    CHECK_THAT(near_edge.local_width_mm, WithinAbs(4.0, 0.05));
+    CHECK(near_edge.risk_per_mm2 > 0.);
+
+    // 0.30 mm off the same edge: past the bound, and still no measurement.
+    const ModelSupportRisk::Sample far_edge = ModelSupportRisk::sample(field, 0, pt_mm(10., -0.30));
+    CHECK(far_edge.status == ModelSupportRisk::Sample::Status::Unknown);
+    CHECK(far_edge.missing == ModelSupportRisk::Sample::Missing::OutsideSolids);
+
+    // 0.05 mm inside the frame's hole: a void is the same distance as a void outside the outline,
+    // and the 2 mm wall the query hangs off is what it reads.
+    const ModelSupportRisk::Sample in_hole = ModelSupportRisk::sample(field, 1, pt_mm(10., 9.95));
+    CHECK(in_hole.status == ModelSupportRisk::Sample::Status::Known);
+    CHECK_THAT(in_hole.local_width_mm, WithinAbs(2.0, 0.05));
+
+    // A slab with no islands has nothing to attach to, however near the query is to a solid one
+    // layer down.
+    CHECK(ModelSupportRisk::sample(field, 2, pt_mm(10., -0.05)).status == ModelSupportRisk::Sample::Status::Unknown);
+    CHECK(ModelSupportRisk::sample(field, 2, pt_mm(10., 2.)).missing == ModelSupportRisk::Sample::Missing::OutsideSolids);
+}
+
+namespace {
+
 // Two 4 x 20 mm ends held off a 6 x 20 mm trunk by necks 6 mm long, 0.8 mm on the left and 2.0 mm on
 // the right. Only the trunk stands on the bed, so both ends hang off their own neck and differ in
 // nothing else. `left_neck_mm` is the left neck's thickness, so the pair can be made identical.
