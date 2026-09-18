@@ -121,6 +121,7 @@ enum TreeSupportStage {
     STAGE_SELECT_CONTACTS,
     STAGE_MEASURE,
     STAGE_BUILD_REGIONS,
+    STAGE_BUILD_CONTACT_SEEDS,
     STAGE_total,
     NUM_STAGES
 };
@@ -186,7 +187,8 @@ public:
             << "; STAGE_RISK_FIELD: " << stage_durations[STAGE_RISK_FIELD]
             << "; STAGE_SELECT_CONTACTS: " << stage_durations[STAGE_SELECT_CONTACTS]
             << "; STAGE_MEASURE: " << stage_durations[STAGE_MEASURE]
-            << "; STAGE_BUILD_REGIONS: " << stage_durations[STAGE_BUILD_REGIONS];
+            << "; STAGE_BUILD_REGIONS: " << stage_durations[STAGE_BUILD_REGIONS]
+            << "; STAGE_BUILD_CONTACT_SEEDS: " << stage_durations[STAGE_BUILD_CONTACT_SEEDS];
 
         return ss.str();
     }
@@ -2072,10 +2074,13 @@ void TreeSupport::build_required_regions()
 
 void TreeSupport::build_contact_seeds()
 {
+    profiler.stage_start(STAGE_BUILD_CONTACT_SEEDS);
     m_problem.seeds.clear();
     const size_t region_count = m_problem.regions.size();
-    if (region_count == 0)
+    if (region_count == 0) {
+        profiler.stage_finish(STAGE_BUILD_CONTACT_SEEDS);
         return;
+    }
 
     std::vector<std::vector<size_t>> regions_by_layer(size_t(m_object->layer_count()));
     for (const MiniatureSupport::RequiredRegion &region : m_problem.regions)
@@ -2257,6 +2262,7 @@ void TreeSupport::build_contact_seeds()
     for (const MiniatureSupport::ContactSeed &seed : m_problem.seeds)
         if (seed.critical)
             m_problem.regions[size_t(seed.region_id)].critical = true;
+    profiler.stage_finish(STAGE_BUILD_CONTACT_SEEDS);
 }
 
 coordf_t TreeSupport::calc_branch_radius(coordf_t base_radius, size_t layers_to_top, size_t tip_layers, double diameter_angle_scale_factor)
