@@ -125,15 +125,27 @@ once before reading a lone failure there as a regression.
 `SupportAnalysis::Report::missing_anchor_ids` lists every seed whose region never reached printed material through
 that seed, so the seeds `MiniatureSupport::select_contacts` decimates by design are in it: plate 3 of `elf_test.3mf`
 reads 1638 `missing_critical_anchors` in the harness row while the slice log's `Support contact layout for` line
-counts 2 critical printable regions without material. `AutoTiltEvaluation` reads a non-empty list as
-`required_region_unsupported`, and `validate_demonstrations`' `NO_WORSE_METRICS` still bounds the metric; a gate
-that wants the region count reads `SupportAnalysis::support_unresolved` or the log line (2026-09-10).
+counts 2 critical printable regions without material. `validate_demonstrations`' `NO_WORSE_METRICS` still bounds
+the metric; a gate that wants the region count reads `SupportAnalysis::support_unresolved` or the log line
+(2026-09-10). `AutoTiltEvaluation` used to read a non-empty list as `required_region_unsupported`; since
+`b0683c21f0` its `Status::Complete` arm calls `SupportAnalysis::support_unresolved`, so a pose whose only
+complaint is a decimated seed reads `Complete` (2026-09-18).
 Plate 3 baselines for a perf or density reading (`--debug 3 --slice 3`, Release, one slice at a time, 2026-09-10):
 main `f3a07a0b37` 13.5 s wall, interface E 1.21 mm on 45 layers and 81 clusters, stable over three runs; the
 miniature-contacts branch 43.1 s, 1.31 to 1.32 mm on 47 layers and 80 to 81 clusters, drifting
 between runs of one binary. The branch's extra 29.6 s sits in `STAGE_RISK_FIELD` 9.3 s, `STAGE_MEASURE` 7.3 s,
-the serial region-merge double loop in `TreeSupport::build_contact_seeds` 4.7 s (wrapped by no stage),
-`STAGE_SELECT_CONTACTS` 4.0 s and `remove_floating_toolpaths` 3.7 s.
+`TreeSupport::build_contact_seeds` 4.7 s, `STAGE_SELECT_CONTACTS` 4.0 s and `remove_floating_toolpaths` 3.7 s.
+That 4.7 s is the function's, not its region-merge loop's: a `steady_clock` probe around the merge on plate 3
+measured dilate 4 ms plus union 11 ms over 2169 regions, 15 ms in total, inside an 8917 ms
+`STAGE_BUILD_CONTACT_SEEDS`, so an optimization aimed at that loop has nothing to win. `build_contact_seeds` is
+wrapped by its own profiler stage since `088312fe6f` and no longer has to be timed by hand;
+`STAGE_BUILD_CONTACT_SEEDS` read 9.1 to 10.0 s across seven runs and `STAGE_SELECT_CONTACTS` fell from
+5313/5356 ms to 4119/4053 ms at `b1492fe957` (2026-09-18).
+Plate-3 contact counts are not run-to-run reproducible either: one Release binary reads either
+`candidates 3737 / kept 2426 / retained 2429` with support 974.385 mm3, or
+`candidates 3738 / kept 2427 / retained 2430` with 977.213 mm3, `restored 3` either way; four runs of one
+unmodified binary read 3738, 3738, 3738, 3737. An oracle that pins a plate-3 contact count to one number fails
+on unchanged code; compare against the two-value set (2026-09-18).
 
 ## Documentation
 
