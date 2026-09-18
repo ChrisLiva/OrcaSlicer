@@ -100,7 +100,9 @@ The non-support features are not byte-identical either: three `--slice 3` runs o
 and travel of one layer (z 1.82) while every wall extrusion vertex matched; an oracle for "support code left the
 walls alone" compares wall vertices or excludes `WIPE_START..WIPE_END` and travel, never the move count (2026-09-10).
 The CLI's `--debug 3` prints about five lines to stderr; the `tree support time` and `Support contact layout for` lines
-land only in the file `--logfile <path>` names (2026-09-10).
+land only in the file `--logfile <path>` names (2026-09-10). `--debug 3` is `info`, so it also filters out every
+`BOOST_LOG_TRIVIAL(debug)` line: a throwaway probe logged at debug level and grepped out of a `--debug 3` run reads as
+zero hits rather than as a probe that never fired. `--debug 4` is the first level that carries it (2026-09-18).
 `init_print` in `tests/fff_print/test_helpers.cpp` arranges against `InfiniteBed{}` and leaves the instance at the
 origin, so the stock 0..200 mm `m_machine_border` clips any support branch that walks across x 0 in
 `TreeSupport::draw_circles` (`intersection_ex(base_areas, m_machine_border)`): a fixture centred on the origin whose
@@ -146,6 +148,11 @@ the serial region-merge double loop in `TreeSupport::build_contact_seeds` 4.7 s 
 - `#pragma once` for headers. Smart pointers and RAII preferred
 - Parallelization via TBB — be mindful of shared state
 - Always use `SetSizerAndFit(sizer)` instead of `SetSizer(sizer)` on top level window. Unless `SetSizer` must be called before the full layout is built, call `sizer->SetSizeHints(window)` afterwards in this case.
+- `ExPolygon::contains(point)` takes `border_result = true`, and `Slic3r::contains` returns that for Clipper's
+  on-boundary `-1`, so a point exactly on a contour or a hole rim counts as inside. `closest_point`, inherited from
+  `MultiPoint`, returns the nearest *vertex*, not the nearest point on the boundary: for an axis-aligned rectangle a
+  query beside the middle of a long edge measures metres away. `ExPolygon::point_projection` is the nearest boundary
+  point, holes included (2026-09-18).
 - In code comments, cite another site by its symbol or by quoting the statement, never by `file:line`: every insertion above a cited line moves it, and a `TreeSupport.cpp:3530`-style citation pointed at unrelated code three commits after it was written.
 - `.clang-format` sets `ColumnLimit: 140`, but no script under `scripts/` and no CMake target runs clang-format, and the tree ignores the limit: 568 lines under `tests/` and 695 under `src/libslic3r/Support/` already exceed 140 (`awk 'length>140'`, 2026-09-07). Match the width of the file you are editing rather than reformatting to the config's number.
 
