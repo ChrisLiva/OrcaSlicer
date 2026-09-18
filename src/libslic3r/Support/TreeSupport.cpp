@@ -2201,11 +2201,14 @@ void TreeSupport::build_contact_seeds()
         for (size_t i = 0; i < region_count; ++ i)
             for (size_t j = i + 1; j < region_count &&
                                    m_problem.regions[j].object_layer <= m_problem.regions[i].object_layer + layer_window; ++ j) {
-                const size_t ri = components.find(i), rj = components.find(j);
-                if (ri == rj)
-                    continue;
+                // The bbox reject first: a pair that fails it never joined, and `find`'s path halving
+                // moves no root, so the partition and every representative stand. `build_components`
+                // in SupportAnalysis rejects in this order already.
                 // j sits on the same layer as i or above it, so j's own dilation is the one that counts.
                 if (! dilated_bbox[j].overlap(bbox[i]))
+                    continue;
+                const size_t ri = components.find(i), rj = components.find(j);
+                if (ri == rj)
                     continue;
                 if (intersection_ex(dilated[j], ExPolygons{ m_problem.regions[i].polygon }).empty())
                     continue;
