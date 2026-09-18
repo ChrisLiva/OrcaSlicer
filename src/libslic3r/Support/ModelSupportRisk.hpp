@@ -116,6 +116,8 @@ Field build(const std::vector<Slice> &slices, double extrusion_width_mm, const s
 // Complete, the query lies further than that from every solid on the layer, the local width cannot
 // be measured, or no path over the model's own solids reaches the object's first slab, which the
 // plate or a raft carries.
+// A pure query: it reads the const field, keeps no state across calls and no reading depends on any
+// other, so a caller measuring many points may run them in parallel, one output slot each.
 Sample sample(const Field &field, size_t layer, const Point &query);
 
 // The dimensionless weight `(w / max(t, w)) * (1 + L / max(n, w))`: w the resolved support extrusion

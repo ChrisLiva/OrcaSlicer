@@ -17,10 +17,16 @@ namespace Slic3r { namespace GUI {
 
 class Plater;
 
-// Searches the tilt/lean grid for a pose that cuts tree-support contact on one object, then applies
-// the winner. Only ids, matrices and value copies cross the worker boundary; finalize() re-resolves
-// the live model tree by ObjectID on the main thread and re-checks every precondition before it
-// touches anything.
+// Searches the tilt/lean grid for a better pose for one object's tree support, then applies the
+// winner. What "better" means is the generator's: on the legacy path `AutoTilt::search_verified`
+// ranks each verified pose lexicographically through `compare_objectives`, over the removal damage
+// `SupportAnalysis::compare_damage` reads and only then over generated support plus raft volume,
+// while `LegacyShortlistScorer`'s cheap contact estimate does nothing but order the shortlist those
+// poses are drawn from. Organic has no measurement to rank, so `AutoTilt::search` decides it on that
+// contact estimate alone and every Organic result the job pushes says so.
+// Only ids, matrices and value copies cross the worker boundary; finalize() re-resolves the live
+// model tree by ObjectID on the main thread and re-checks every precondition before it touches
+// anything.
 class AutoTiltJob : public Job
 {
 public:

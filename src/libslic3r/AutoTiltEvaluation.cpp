@@ -144,8 +144,8 @@ private:
     Print      *&m_slot;
 };
 
-// `ids` sorted, so an instance list or affected list the UI reordered reads the same both times.
-// Volumes are the exception: volumes_unchanged compares them in list order.
+// The affected-id list sorted, so an order the UI changed is not a change. Its one caller is
+// `plate_shell_unchanged`.
 std::vector<ObjectID> sorted_ids(std::vector<ObjectID> ids)
 {
     std::sort(ids.begin(), ids.end());

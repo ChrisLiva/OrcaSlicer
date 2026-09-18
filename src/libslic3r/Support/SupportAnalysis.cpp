@@ -475,10 +475,8 @@ void measure_contact_risk(Report &report, const PrintObject &object, const Minia
     if (field.status != ModelSupportRisk::Field::Status::Complete)
         return;
 
-    // One reading per seed, and each is a search over the whole field from a point no other reading
-    // depends on. The field is const here and the sampler keeps no state across calls, so the seeds
-    // are measured together, one output slot each; what the report counts and how it is ordered is
-    // decided afterwards, serially, off the filled slots.
+    // One slot per seed, filled in parallel on `ModelSupportRisk::sample`'s own terms. What the
+    // report counts and how it is ordered is decided afterwards, serially, off the filled slots.
     report.contact_risk.resize(problem.seeds.size());
     tbb::parallel_for(tbb::blocked_range<size_t>(0, problem.seeds.size()),
         [&](const tbb::blocked_range<size_t> &range) {

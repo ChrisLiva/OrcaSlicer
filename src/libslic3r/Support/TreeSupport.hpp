@@ -394,8 +394,10 @@ public:
     void detect_overhangs(bool check_support_necessity = false);
 
     // Asks this generation to measure itself: build the frozen problem, carry contact provenance
-    // through routing, record what it emitted and report on it. Read-only with respect to the
-    // geometry, and off unless a caller asks for it or the miniature contact mode is on.
+    // through routing, record what it emitted and report on it. Off unless a caller asks for it or
+    // the miniature contact mode is on. It adds one pass that changes the output,
+    // `remove_floating_toolpaths`, which deletes the support extrusions the connectivity rule counts
+    // as resting on nothing; everything else it does is measurement.
     void request_analysis(bool on) { m_analysis_requested = on; }
 
     SupportNode* create_node(const Point  position,
@@ -459,12 +461,13 @@ private:
     coordf_t base_radius                        = 0.0;
     const coordf_t MAX_BRANCH_RADIUS = 10.0;
     const coordf_t MIN_BRANCH_RADIUS = 0.4;
-    coordf_t contact_radius_floor = MIN_BRANCH_RADIUS; // lower bound of a contact's radius at placement; the branch floor above stays the branch floor
+    coordf_t contact_radius_floor = MIN_BRANCH_RADIUS; // lower bound of a contact's radius at placement; MIN_BRANCH_RADIUS stays the floor a branch's own radius is held to
     double m_threshold_rad = 0.; // support_threshold_angle + 1 deg, capped at 89, in radians: the detector's overhang threshold, also the required-region band-gap angle
     const coordf_t MAX_BRANCH_RADIUS_FIRST_LAYER = 12.0;
     const coordf_t MIN_BRANCH_RADIUS_FIRST_LAYER = 2.0;
     double diameter_angle_scale_factor = tan(5.0*M_PI/180.0);
-    // minimum roof area (1 mm^2), area smaller than this value will not have interface
+    // Minimum roof area: an overhang smaller than this gets no interface. The default is a flat
+    // 1 mm^2; the miniature-contact constructor rescales it to the resolved support line width.
     double minimum_roof_area{SQ(scaled<double>(1.))};
     // Dilation applied to enforced overhangs so support tips land on them (STUDIO-7538).
     // FIXME this is a fudge constant! 0.8 mm was the support tree tip diameter it was tuned on.

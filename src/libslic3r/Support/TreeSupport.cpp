@@ -801,7 +801,10 @@ TreeSupport::TreeSupport(PrintObject& object, const SlicingParameters &slicing_p
         // support_line_width option, whose default is an absolute 0.
         const coordf_t w         = toolpath_support_width(m_support_params, *m_print_config, *m_object_config);
         contact_radius_floor     = w;
-        minimum_roof_area        = SQ(scaled<double>(2.38 * w)); // 0.42 * 2.38 = 1.0: today's 1 mm2 at the width it was tuned on
+        // 2.38 reproduces the historical flat 1 mm2 threshold at the 0.42 mm line width it was
+        // tuned on, and scales with the width from there. Not a round number to be corrected:
+        // 0.42 * 2.38 is 0.9996 mm.
+        minimum_roof_area        = SQ(scaled<double>(2.38 * w));
         enforcer_overhang_offset = scaled<double>(2. * w);
     }
     // by default tree support needs no infill, unless it's tree hybrid which contains normal nodes.
@@ -2118,7 +2121,10 @@ void TreeSupport::build_contact_seeds()
             // one layer (a detected overhang and the sharp tail under it) stay two regions and keep
             // their own contacts. Hybrid's big-overhang path splits the polygon before placing the
             // node, so a node whose polygon is nobody's falls back to the region containing it, then
-            // to the nearest one. Ties keep the lower region id: never iteration order, never an address.
+            // to the region whose contour has the nearest vertex - `MultiPoint::closest_point` is a
+            // vertex query, so a position beside the middle of a long edge measures to that edge's
+            // ends; `ExPolygon::point_projection` is the boundary-exact reading if this rule is ever
+            // meant to be one. Ties keep the lower region id: never iteration order, never an address.
             size_t            best      = layer_regions.front();
             bool              matched   = false;
             const BoundingBox node_bbox = get_extents(node->overhang);
@@ -2221,9 +2227,8 @@ void TreeSupport::build_contact_seeds()
     for (size_t r = 0; r < region_count; ++ r)
         m_problem.regions[r].component = components.find(r);
 
-    // One reading per seed, and each is a search over the whole field from a point no other reading
-    // depends on. The field is const here and the sampler keeps no state across calls, so the necks are
-    // measured together, one output slot each, and the serial pass below reads the slots in seed order.
+    // One slot per seed, filled in parallel on `ModelSupportRisk::sample`'s own terms. The serial
+    // pass below reads the slots back in seed order.
     std::vector<char> critical_by_neck(m_problem.seeds.size(), 0);
     if (m_risk.status == ModelSupportRisk::Field::Status::Complete)
         tbb::parallel_for(tbb::blocked_range<size_t>(0, m_problem.seeds.size()),

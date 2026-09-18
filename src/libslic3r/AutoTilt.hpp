@@ -53,8 +53,8 @@ const char *reason_code_name(Reason);
 // a set of conditions rather than as a tally of instances.
 void add_reason(std::vector<Reason> &codes, Reason code);
 
-// Every bound, step and threshold the search uses. Passed into grid(), search()
-// and fragility_weight() so no loop bakes a number in.
+// Every bound, step and threshold the search uses, passed in wherever it is read so no loop bakes a
+// number in.
 struct Constants
 {
     std::vector<double> tilts_deg {0, -2, -4, -6, -8, -10, -12, -14, -16, -18, -20};

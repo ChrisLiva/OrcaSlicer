@@ -129,7 +129,7 @@ void relocate_contacts(const Problem &problem, const ModelSupportRisk::Field &ri
                 wanted.push_back(k);
 
         // What standing still is worth for each contact, and the model reading at each position it
-        // may move onto: independent searches over a const field, so they are all taken here, before
+        // may move onto, all taken here in parallel on `ModelSupportRisk::sample`'s own terms, before
         // any decision is made. Only the readings change hands - the loop below still runs region by
         // region and, inside a region, in source id order, and a contact still takes a position out
         // from under the contacts that follow it.
