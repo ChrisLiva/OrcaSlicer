@@ -7,6 +7,8 @@
 #include "../Layer.hpp"
 #include "../Print.hpp"
 
+#include <boost/log/trivial.hpp>
+
 #include <tbb/blocked_range.h>
 #include <tbb/parallel_for.h>
 
@@ -14,8 +16,10 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <map>
 #include <queue>
 #include <set>
+#include <sstream>
 
 namespace Slic3r {
 namespace SupportAnalysis {
@@ -553,6 +557,11 @@ void measure_damage(Report &report, const PrintObject &object, const MiniatureSu
     }
     const AABBMesh mesh(model);
 
+    // What the access probe answered, over every group it probed: a count per outcome, and per reason
+    // where it could not answer. Logged once below, because 1400 contacts nothing can answer for and
+    // 1400 contacts a tool can reach are the same number in the damage tuple.
+    size_t probed_clear = 0, probed_blocked = 0, probed_unknown = 0;
+    std::map<std::string, size_t> access_missing;
     for (size_t g = 0; g < support.count; ++ g) {
         // Support the router carried no contact into holds nothing off the model: there is no removal
         // to estimate the damage of.
@@ -589,11 +598,17 @@ void measure_damage(Report &report, const PrintObject &object, const MiniatureSu
             const ModelSupportRisk::Access access =
                 ModelSupportRisk::assess_access(mesh, others, slab_tops, where, 0.5 * width);
             if (access.status == ModelSupportRisk::Access::Status::Clear) {
+                ++ probed_clear;
                 reached = true;
                 break;
             }
-            if (access.status == ModelSupportRisk::Access::Status::Unknown)
+            if (access.status == ModelSupportRisk::Access::Status::Unknown) {
                 ++ unknown;
+                ++ probed_unknown;
+                ++ access_missing[ModelSupportRisk::missing_name(access.missing)];
+            } else {
+                ++ probed_blocked;
+            }
         }
         if (reached)
             continue;
@@ -603,6 +618,14 @@ void measure_damage(Report &report, const PrintObject &object, const MiniatureSu
             damage.unknown_contacts += unknown;
         else
             ++ damage.inaccessible_groups;
+    }
+    {
+        std::ostringstream reasons;
+        for (const std::pair<const std::string, size_t> &entry : access_missing)
+            reasons << " " << entry.first << " " << entry.second;
+        BOOST_LOG_TRIVIAL(info) << "support analysis removal access: " << probed_clear << " clear, " << probed_blocked
+                                << " blocked, " << probed_unknown << " unknown of " << problem.seeds.size()
+                                << " seeds in " << support.count << " groups, unknown by reason:" << reasons.str();
     }
     damage.available = true;
 }
@@ -633,9 +656,26 @@ void measure_contact_risk(Report &report, const PrintObject &object, const Minia
                 report.contact_risk[i].sample = ModelSupportRisk::sample(field, layer, seed.position);
             }
         });
+    size_t known = 0, below_width = 0, unknown = 0;
+    std::map<std::string, size_t> sample_missing;
     for (const ContactRisk &entry : report.contact_risk)
-        if (entry.sample.status == ModelSupportRisk::Sample::Status::Unknown)
+        switch (entry.sample.status) {
+        case ModelSupportRisk::Sample::Status::Known:               ++ known; break;
+        case ModelSupportRisk::Sample::Status::BelowPrintableWidth: ++ below_width; break;
+        case ModelSupportRisk::Sample::Status::Unknown:
+            ++ unknown;
             ++ report.damage.unknown_contacts;
+            ++ sample_missing[ModelSupportRisk::missing_name(entry.sample.missing)];
+            break;
+        }
+    {
+        std::ostringstream reasons;
+        for (const std::pair<const std::string, size_t> &entry : sample_missing)
+            reasons << " " << entry.first << " " << entry.second;
+        BOOST_LOG_TRIVIAL(info) << "support analysis contact risk: " << known << " known, " << below_width
+                                << " below printable width, " << unknown << " unknown of " << problem.seeds.size()
+                                << " seeds, unknown by reason:" << reasons.str();
+    }
     std::sort(report.contact_risk.begin(), report.contact_risk.end(),
               [](const ContactRisk &a, const ContactRisk &b) { return a.seed_id < b.seed_id; });
     report.contact_risk_available = true;

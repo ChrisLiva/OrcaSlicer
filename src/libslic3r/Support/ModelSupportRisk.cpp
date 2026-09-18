@@ -400,8 +400,14 @@ Field build(const std::vector<Slice> &slices, double extrusion_width_mm, const s
 Sample sample(const Field &field, size_t layer, const Point &query)
 {
     Sample result;
-    if (field.status != Field::Status::Complete || layer >= field.slices.size())
+    if (field.status != Field::Status::Complete) {
+        result.missing = Sample::Missing::FieldIncomplete;
         return result;
+    }
+    if (layer >= field.slices.size()) {
+        result.missing = Sample::Missing::LayerOutOfRange;
+        return result;
+    }
     const Slice &slice  = field.slices[layer];
     size_t       island = slice.solids.size();
     for (size_t i = 0; i < slice.solids.size(); ++ i)
@@ -409,16 +415,22 @@ Sample sample(const Field &field, size_t layer, const Point &query)
             island = i;
             break;
         }
-    if (island == slice.solids.size())
+    if (island == slice.solids.size()) {
+        result.missing = Sample::Missing::OutsideSolids;
         return result;
+    }
 
     const size_t flat = field.island_base[layer] + island;
     double       local = 0.;
-    if (! measured_width(slice.solids[island], field.island_medial[flat], query, &local))
+    if (! measured_width(slice.solids[island], field.island_medial[flat], query, &local)) {
+        result.missing = Sample::Missing::WidthUnmeasured;
         return result;
+    }
     const std::vector<size_t> &samples = field.island_nodes[flat];
-    if (samples.empty())
+    if (samples.empty()) {
+        result.missing = Sample::Missing::NoMedialNodes;
         return result;
+    }
 
     // The query joins the graph at its island's nearest medial sample. The connecting run is a
     // candidate bottleneck like any other, so a query out on a thin tip is not credited with the
@@ -507,12 +519,16 @@ Sample sample(const Field &field, size_t layer, const Point &query)
             }
         }
     }
-    if (! rooted)
+    if (! rooted) {
+        result.missing = Sample::Missing::NoRootPath;
         return result;
+    }
 
     const double weight = risk_weight(field.extrusion_width_mm, local, neck, lever);
-    if (! std::isfinite(weight))
+    if (! std::isfinite(weight)) {
+        result.missing = Sample::Missing::WidthUnmeasured;
         return result;
+    }
     result.local_width_mm = local;
     result.neck_width_mm  = neck;
     result.lever_mm       = lever;
@@ -776,15 +792,23 @@ Access assess_access(const AABBMesh &model, const std::vector<ExPolygons> &suppo
 {
     Access out;
     const indexed_triangle_set *its = model.get_triangle_mesh();
-    if (its == nullptr || its->indices.empty() || its->vertices.empty())
-        return out;   // no mesh to test against: unknown, and never a way out
-    if (! contact.allFinite() || ! std::isfinite(clearance_mm) || clearance_mm <= 0.)
+    if (its == nullptr || its->indices.empty() || its->vertices.empty()) {
+        out.missing = Access::Missing::NoMesh;   // no mesh to test against: unknown, and never a way out
         return out;
-    if (support_by_layer.size() != layer_z_mm.size())
+    }
+    if (! contact.allFinite() || ! std::isfinite(clearance_mm) || clearance_mm <= 0.) {
+        out.missing = Access::Missing::BadContact;
         return out;
+    }
+    if (support_by_layer.size() != layer_z_mm.size()) {
+        out.missing = Access::Missing::SlabMismatch;
+        return out;
+    }
     for (size_t i = 0; i < layer_z_mm.size(); ++ i)
-        if (! std::isfinite(layer_z_mm[i]) || (i > 0 && layer_z_mm[i] < layer_z_mm[i - 1]))
+        if (! std::isfinite(layer_z_mm[i]) || (i > 0 && layer_z_mm[i] < layer_z_mm[i - 1])) {
+            out.missing = Access::Missing::SlabOrder;
             return out;
+        }
 
     const double r = clearance_mm;
     std::vector<AccessSlab> slabs;
@@ -809,11 +833,15 @@ Access assess_access(const AABBMesh &model, const std::vector<ExPolygons> &suppo
             bounds.merge(Vec3d(unscale<double>(extents.min.x()), unscale<double>(extents.min.y()), slab.bottom));
             bounds.merge(Vec3d(unscale<double>(extents.max.x()), unscale<double>(extents.max.y()), slab.top));
         }
-    if (! bounds.defined || ! bounds.min.allFinite() || ! bounds.max.allFinite())
+    if (! bounds.defined || ! bounds.min.allFinite() || ! bounds.max.allFinite()) {
+        out.missing = Access::Missing::BadBounds;
         return out;
+    }
     const double span = 2. * (bounds.max - bounds.min).norm();
-    if (! std::isfinite(span) || span <= 0.)
+    if (! std::isfinite(span) || span <= 0.) {
+        out.missing = Access::Missing::BadBounds;
         return out;
+    }
 
     size_t buried = 0;
     for (const Vec3d &direction : escape_directions()) {
@@ -850,10 +878,40 @@ Access assess_access(const AABBMesh &model, const std::vector<ExPolygons> &suppo
         out.direction = direction;
         return out;
     }
-    if (buried == escape_directions().size())
-        return out;   // a start that cannot leave the source patch
+    if (buried == escape_directions().size()) {
+        out.missing = Access::Missing::AllBuried;   // a start that cannot leave the source patch
+        return out;
+    }
     out.status = Access::Status::Blocked;
     return out;
+}
+
+const char *missing_name(Sample::Missing missing)
+{
+    switch (missing) {
+    case Sample::Missing::None:            return "none";
+    case Sample::Missing::FieldIncomplete: return "field_incomplete";
+    case Sample::Missing::LayerOutOfRange: return "layer_out_of_range";
+    case Sample::Missing::OutsideSolids:   return "outside_solids";
+    case Sample::Missing::WidthUnmeasured: return "width_unmeasured";
+    case Sample::Missing::NoMedialNodes:   return "no_medial_nodes";
+    case Sample::Missing::NoRootPath:      return "no_root_path";
+    }
+    return "none";
+}
+
+const char *missing_name(Access::Missing missing)
+{
+    switch (missing) {
+    case Access::Missing::None:         return "none";
+    case Access::Missing::NoMesh:       return "no_mesh";
+    case Access::Missing::BadContact:   return "bad_contact";
+    case Access::Missing::SlabMismatch: return "slab_mismatch";
+    case Access::Missing::SlabOrder:    return "slab_order";
+    case Access::Missing::BadBounds:    return "bad_bounds";
+    case Access::Missing::AllBuried:    return "all_buried";
+    }
+    return "none";
 }
 
 } // namespace ModelSupportRisk

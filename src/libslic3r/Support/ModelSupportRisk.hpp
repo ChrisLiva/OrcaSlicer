@@ -38,12 +38,21 @@ struct Sample
     // Unknown is the absence of a measurement, and its numbers mean nothing.
     enum class Status : uint8_t { Known, BelowPrintableWidth, Unknown };
 
-    Status status         = Status::Unknown;
-    double local_width_mm = 0.;
-    double neck_width_mm  = 0.;
-    double lever_mm       = 0.;
-    double risk_per_mm2   = 0.;
+    // Which step of the measurement did not answer, for a status of Unknown. Diagnostic only: no
+    // ranking reads it, and every reason means the same absence of a measurement. `sample` sets it
+    // where it gives up, so it cannot drift out of step with the branches it names.
+    enum class Missing : uint8_t { None, FieldIncomplete, LayerOutOfRange, OutsideSolids, WidthUnmeasured, NoMedialNodes, NoRootPath };
+
+    Status  status         = Status::Unknown;
+    Missing missing        = Missing::None;
+    double  local_width_mm = 0.;
+    double  neck_width_mm  = 0.;
+    double  lever_mm       = 0.;
+    double  risk_per_mm2   = 0.;
 };
+
+// The name of one Sample::Missing, for a log line.
+const char *missing_name(Sample::Missing missing);
 
 // The model's solid geometry and its connectivity, built once and queried many times. Immutable after
 // build() returns and owning every polygon it answers from, so it outlives the Print layers it was
@@ -122,10 +131,18 @@ struct Access
 {
     enum class Status : uint8_t { Clear, Blocked, Unknown };
 
-    Status status    = Status::Unknown;
+    // Which step did not answer, for a status of Unknown, on the same terms as Sample::Missing.
+    // AllBuried is the geometric one: every escape direction starts inside the model.
+    enum class Missing : uint8_t { None, NoMesh, BadContact, SlabMismatch, SlabOrder, BadBounds, AllBuried };
+
+    Status  status    = Status::Unknown;
+    Missing missing   = Missing::None;
     // The direction found clear, normalized. Zero for every other answer.
-    Vec3d  direction = Vec3d::Zero();
+    Vec3d   direction = Vec3d::Zero();
 };
+
+// The name of one Access::Missing, for a log line.
+const char *missing_name(Access::Missing missing);
 
 // Which way `contact` can be reached through the model and the support already printed around it, in
 // posed PrintObject coordinates and millimetres. The 26 directions with coordinates in {-1, 0, 1} bar
