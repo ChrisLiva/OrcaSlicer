@@ -517,6 +517,8 @@ TEST_CASE("A scaffold on the shelf fixture prints a solid pad and clear base wal
     const Point      origin    = get_extents(object.layers().front()->lslices).min;
     const FixtureBox bar_strip { origin, 6., 2.4, 12., 3.6 };
     const FixtureBox slab_box  { origin, 6., -3., 18., 9. };
+    // A head at the bar's 0.6 mm edge tilts, so its lower rings stand up to half a millimetre off the bar's side.
+    const FixtureBox bar_rings { origin, 6., 2.1, 12., 3.9 };
     // A disc's width is the diameter of the largest circle its outer contour inscribes; holes are ignored on purpose,
     // since a printed disc is a ring. The inscribed circle is one disc's whatever fused with it, and a tilted head's
     // slice, an ellipse along the tilt, inscribes its short axis, the sphere chord the grade sets. The contour is
@@ -564,8 +566,23 @@ TEST_CASE("A scaffold on the shelf fixture prints a solid pad and clear base wal
                 CHECK(graded > 0);
         }
     };
-    rings_under(4., bar_strip, nullptr, 1.8 * w, 2.2 * w);
+    rings_under(4., bar_rings, nullptr, 1.8 * w, 2.2 * w);
     rings_under(12., slab_box, &bar_strip, 3.4 * w, 4.2 * w);
+
+    // A bar tip within the xy distance of the column face is skipped, since its neck would be clipped there while
+    // its ring survived; the bar keeps the tips further out.
+    {
+        const SupportLayer &sl = *layers[top_layer_under(layers, 4.)];
+        size_t under_bar = 0;
+        for (const Disc &disc : discs(sl)) {
+            const double x = unscale<double>(disc.centroid.x() - origin.x());
+            INFO("interface centroid at fixture x " << x << " on print_z " << sl.print_z);
+            CHECK(x >= 6.35);
+            if (bar_strip.contains(disc.centroid))
+                ++ under_bar;
+        }
+        CHECK(under_bar > 0);
+    }
 
     // The interface fuses to the model but never enters it. What its extrusions cover reaches under 0.04 mm past
     // the drawn area.

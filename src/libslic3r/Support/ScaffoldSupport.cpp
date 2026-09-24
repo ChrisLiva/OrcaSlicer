@@ -23,6 +23,11 @@ namespace Slic3r::ScaffoldSupport {
 
 namespace {
 
+// The head's length between the pin's sphere and the pillar's radius. The cone meets the pillar this far under the
+// sphere: a tip's neck bottoms at about this plus one toolpath width under the tip for the small grade and three
+// for the large, and the wall test reads the shallower depth.
+constexpr double head_width_mm = 1.;
+
 uint32_t ms_since(const std::chrono::steady_clock::time_point &start)
 {
     return uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count());
@@ -38,7 +43,7 @@ sla::SupportTreeConfig tree_config(const Params &params)
     cfg.head_penetration_mm         = params.toolpath_width_mm;
     cfg.head_fallback_radius_mm     = params.toolpath_width_mm;
     cfg.head_back_radius_mm         = params.pillar_diameter_mm / 2.;
-    cfg.head_width_mm               = 1.;
+    cfg.head_width_mm               = head_width_mm;
     cfg.base_radius_mm              = params.pillar_diameter_mm;
     cfg.base_height_mm              = 0.5;
     cfg.object_elevation_mm         = 0.;
@@ -167,8 +172,55 @@ Output draw(const PrintObject &object, const std::vector<std::vector<SupportNode
             if (node->placement != SupportNode::Placement::Interior ||
                 (! node->overhang.empty() && ! offset_ex(node->overhang, -scale_(params.max_bridge_length_mm / 2.)).empty()))
                 nodes.push_back(node);
+
+    // A tip whose centre stands within the xy distance of the model at its neck's bottom is skipped, and so is a
+    // dropped contact the hold floor could restore there: the seam clips support inside that band, so the neck
+    // would be cut while its ring survived. Under a slope the head tilts along the underside's normal and the
+    // slope recedes at least its rise by that depth, so the neck clears the band; beside a wall it does not, and
+    // the wall anchors that band as it does under the legacy tree. A neck bottoming under the first layer stands
+    // by the pad and is kept.
+    const double neck_depth_mm = head_width_mm + params.toolpath_width_mm;
+    const auto   reference_layer = [&object, neck_depth_mm](const SupportNode *node) {
+        const double z = node->print_z - neck_depth_mm;
+        if (object.layer_count() == 0 || z <= object.get_layer(0)->bottom_z())
+            return -1;
+        const auto it = std::lower_bound(object.layers().begin(), object.layers().end(), z,
+                                         [](const Layer *layer, double z) { return layer->print_z < z; });
+        return it == object.layers().end() ? -1 : int(it - object.layers().begin());
+    };
+    std::vector<int> wall_layers;
+    for (const SupportNode *node : nodes)
+        if (const int l = reference_layer(node); l >= 0)
+            wall_layers.push_back(l);
+    for (const SupportNode *node : dropped)
+        if (const int l = reference_layer(node); l >= 0)
+            wall_layers.push_back(l);
+    std::sort(wall_layers.begin(), wall_layers.end());
+    wall_layers.erase(std::unique(wall_layers.begin(), wall_layers.end()), wall_layers.end());
+    std::vector<ExPolygons> wall_bands(wall_layers.size());
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, wall_layers.size()), [&](const tbb::blocked_range<size_t> &range) {
+        for (size_t i = range.begin(); i < range.end(); ++ i)
+            wall_bands[i] = offset_ex(object.get_layer(wall_layers[i])->lslices, scale_(params.xy_distance_mm));
+    });
+    const auto at_wall = [&](const SupportNode *node) {
+        const int l = reference_layer(node);
+        if (l < 0)
+            return false;
+        const ExPolygons &band = wall_bands[std::lower_bound(wall_layers.begin(), wall_layers.end(), l) - wall_layers.begin()];
+        if (std::none_of(band.begin(), band.end(), [node](const ExPolygon &expoly) { return expoly.contains(node->position); }))
+            return false;
+        const Vec2d xy = unscale(node->position);
+        BOOST_LOG_TRIVIAL(debug) << "scaffold tip skipped at (" << xy.x() << ", " << xy.y() << ", " << node->print_z << "): wall";
+        return true;
+    };
+    nodes.erase(std::remove_if(nodes.begin(), nodes.end(), at_wall), nodes.end());
+    std::vector<SupportNode *> spare;
+    for (SupportNode *node : dropped)
+        if (! at_wall(node))
+            spare.push_back(node);
+
     const auto islands_start      = std::chrono::steady_clock::now();
-    out.counts.islands_under_held = restore_hold_floor(object, nodes, dropped, params.pillar_diameter_mm);
+    out.counts.islands_under_held = restore_hold_floor(object, nodes, spare, params.pillar_diameter_mm);
     out.stage_ms.island_joins     = ms_since(islands_start);
 
     // A tip's grade is the width of the disc it fuses to the model with: two support lines, or four where the model
