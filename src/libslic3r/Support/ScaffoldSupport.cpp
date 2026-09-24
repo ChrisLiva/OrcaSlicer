@@ -26,7 +26,8 @@ uint32_t ms_since(const std::chrono::steady_clock::time_point &start)
 }
 
 // The SLA builder's config for a cage at zero elevation: tips as fine as one support line, pillars at the tree
-// branch diameter, bridges no longer than the scaffold bridge length, and nothing anchored on the model.
+// branch diameter, bridges and braces no longer than the scaffold bridge length, a brace on every pillar standing
+// more than the brace slenderness in diameters unbraced, and nothing anchored on the model.
 sla::SupportTreeConfig tree_config(const Params &params)
 {
     sla::SupportTreeConfig cfg;
@@ -46,7 +47,7 @@ sla::SupportTreeConfig tree_config(const Params &params)
     cfg.max_bridges_on_pillar       = 3;
     cfg.bridge_slope                = M_PI / 4.;
     cfg.safety_distance_mm          = params.xy_distance_mm;
-    cfg.pillar_link_slenderness     = 0.;
+    cfg.pillar_link_slenderness     = params.brace_slenderness;
     return cfg;
 }
 
@@ -201,6 +202,7 @@ Output draw(const PrintObject &object, const std::vector<std::vector<SupportNode
     builder.set_ctl(ctl);
     if (sla::SupportTreeBuildsteps::execute(builder, sm))
         throw_on_cancel();
+    out.counts.pillars_unbraced = builder.unbraced_pillars;
 
     // What became of each tip. A head the builder kept carries its point's index as its id; one it gave up on
     // lost the id and is found by the position it was built at; a point with no head was filtered out.

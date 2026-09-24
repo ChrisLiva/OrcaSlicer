@@ -80,6 +80,17 @@ TriangleMesh shelf_fixture()
     return column;
 }
 
+// A 6 x 6 x 30 mm column at x 0..6, y 0..6 carrying a 12 x 12 x 2 mm slab off its top at x 6..18, y -3..9, z 28..30:
+// pillars under the slab stand about 27 mm with no bridge, 23 diameters at 1.2 mm.
+TriangleMesh tall_shelf_fixture()
+{
+    TriangleMesh column = make_cube(6., 6., 30.);
+    TriangleMesh slab   = make_cube(12., 12., 2.);
+    slab.translate(6.f, -3.f, 28.f);
+    column.merge(slab);
+    return column;
+}
+
 // The config every scaffold journey slices under. The miniature checkbox and plate-only rooting are off, so what
 // the style forces on is the style's own doing. The printable area is centred because init_print leaves the
 // instance on the origin.
@@ -720,4 +731,46 @@ TEST_CASE("The hold floor restores dropped contacts under tall islands", "[Scaff
             spread_mm = std::max(spread_mm, unscale<double>((at_b[i] - at_b[j]).cast<double>().norm()));
     INFO("the interface polygons under B spread " << spread_mm << " mm");
     CHECK(spread_mm >= 1.2);
+}
+
+TEST_CASE("Slender scaffold pillars get braces and unreachable ones stand unbraced", "[ScaffoldSupport]")
+{
+    // Runs that share a bridge length share their pillars: the key also bounds head clustering and routing, and only
+    // the linking pass after routing reads the slenderness.
+    struct Reading { size_t unbraced = 0, floating = 0, mid_polygons = 0; double volume_mm3 = 0.; };
+    const auto read = [](const char *slenderness, const char *bridge_length) {
+        Print print;
+        init_and_process_print({ tall_shelf_fixture() }, print,
+                               scaffold_config({ { "scaffold_brace_slenderness", slenderness }, { "scaffold_bridge_length", bridge_length } }));
+        REQUIRE(print.objects().size() == 1);
+        const PrintObject &object = *print.objects().front();
+        REQUIRE(object.support_analysis() != nullptr);
+        const SupportAnalysis::Report &report = *object.support_analysis();
+        Reading r { report.pillars_unbraced, report.floating_pieces_removed, 0, report.support_volume_mm3 };
+        for (const SupportLayer *sl : object.support_layers())
+            if (sl->print_z > 5. && sl->print_z < 25.)
+                r.mid_polygons += role_footprint(*sl, erSupportMaterial).size();
+        INFO("slenderness " << slenderness << " bridge length " << bridge_length << ": unbraced " << r.unbraced << " floating removed "
+                            << r.floating << " support " << r.volume_mm3 << " mm3 tips placed " << report.tips_placed << " routed "
+                            << report.tips_routed << " dropped " << report.tips_dropped << " mid polygons " << r.mid_polygons);
+        CHECK(r.floating == 0);
+        return r;
+    };
+
+    // Every pillar is past 15 diameters, and a neighbour within 12 mm takes a chain whose slices sit between the pad
+    // and the slab.
+    const Reading a = read("15", "12");
+    const Reading c = read("40", "12");
+    INFO("mid polygons at 15: " << a.mid_polygons << ", at 40: " << c.mid_polygons);
+    CHECK(a.unbraced == 0);
+    CHECK(c.unbraced == 0);
+    CHECK(a.mid_polygons > c.mid_polygons);
+
+    // At a 3 mm reach a pillar with no neighbour that close stays up unbraced, and no pillar is taken away.
+    const Reading b = read("15", "3");
+    const Reading d = read("40", "3");
+    INFO("support at 3 mm reach: " << b.volume_mm3 << " mm3 at 15, " << d.volume_mm3 << " mm3 at 40");
+    CHECK(b.unbraced >= 1);
+    CHECK(d.unbraced == 0);
+    CHECK(b.volume_mm3 >= 0.98 * d.volume_mm3);
 }
