@@ -364,7 +364,8 @@ static t_config_enum_values s_keys_map_SupportMaterialStyle {
     { "organic",        smsTreeOrganic },
     { "tree_slim",      smsTreeSlim },
     { "tree_strong",    smsTreeStrong },
-    { "tree_hybrid",    smsTreeHybrid }
+    { "tree_hybrid",    smsTreeHybrid },
+    { "tree_scaffold",  smsTreeScaffold }
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SupportMaterialStyle)
 
@@ -6884,6 +6885,27 @@ void PrintConfigDef::init_fff_params()
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(1.));
 
+    def = this->add("scaffold_bridge_length", coFloat);
+    def->label    = L("Scaffold bridge length");
+    def->category = L("Support");
+    def->tooltip  = L("The longest horizontal span a Tree Scaffold bridge may cross between a support tip and its pillar.");
+    def->sidetext = L("mm");
+    def->min      = 3;
+    def->max      = 30;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(12.));
+
+    // A height-to-diameter ratio, so the field carries no unit.
+    def = this->add("scaffold_brace_slenderness", coFloat);
+    def->label    = L("Scaffold brace slenderness");
+    def->category = L("Support");
+    def->tooltip  = L("A Tree Scaffold pillar whose unbraced height exceeds this multiple of its diameter gets a zigzag brace "
+                      "to a neighbouring pillar.");
+    def->min      = 5;
+    def->max      = 40;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(15.));
+
     // BBS: change type to common float.
     // It may be rounded to mulitple layer height when independent_support_layer_height is false.
     def = this->add("support_top_z_distance", coFloat);
@@ -7124,6 +7146,7 @@ void PrintConfigDef::init_fff_params()
     def->enum_values.push_back("tree_slim");
     def->enum_values.push_back("tree_strong");
     def->enum_values.push_back("tree_hybrid");
+    def->enum_values.push_back("tree_scaffold");
     def->enum_labels.push_back(L("Default (Grid/Organic)"));
     def->enum_labels.push_back(L("Grid"));
     def->enum_labels.push_back(L("Snug"));
@@ -7131,6 +7154,7 @@ void PrintConfigDef::init_fff_params()
     def->enum_labels.push_back(L("Tree Slim"));
     def->enum_labels.push_back(L("Tree Strong"));
     def->enum_labels.push_back(L("Tree Hybrid"));
+    def->enum_labels.push_back(L("Tree Scaffold"));
 
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionEnum<SupportMaterialStyle>(smsDefault));

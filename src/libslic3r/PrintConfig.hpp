@@ -260,7 +260,7 @@ enum SupportMaterialPattern {
 };
 
 enum SupportMaterialStyle {
-    smsDefault, smsGrid, smsSnug, smsTreeOrganic, smsTreeSlim, smsTreeStrong, smsTreeHybrid,
+    smsDefault, smsGrid, smsSnug, smsTreeOrganic, smsTreeSlim, smsTreeStrong, smsTreeHybrid, smsTreeScaffold,
 };
 
 enum LongRectrationLevel
@@ -1145,6 +1145,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                support_remove_small_overhang))
     ((ConfigOptionBool,                support_miniature_contacts))
     ((ConfigOptionFloat,               support_contact_min_distance))
+    ((ConfigOptionFloat,               scaffold_bridge_length))
+    ((ConfigOptionFloat,               scaffold_brace_slenderness))
     ((ConfigOptionFloat,               support_top_z_distance))
     ((ConfigOptionFloat,               support_bottom_z_distance))
     ((ConfigOptionInt,                 enforce_support_layers))
