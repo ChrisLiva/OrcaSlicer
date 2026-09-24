@@ -676,3 +676,48 @@ TEST_CASE("Interior tips survive only where a bridge span fits", "[ScaffoldSuppo
     // No tip count is compared: the key also moves the contour tips and the interior grid step before the thinning.
     CHECK(narrow.max_depth_mm >= 2.0);
 }
+
+TEST_CASE("The hold floor restores dropped contacts under tall islands", "[ScaffoldSupport]")
+{
+    // At a 3.5 mm contact distance the decimation keeps one end of stick B's 3 mm underside. B and post C stand 5 mm
+    // from their birth at z 3 to the object's top without joining, and cube A 3 mm to its join at z 6, so each wants
+    // two tips a pillar diameter (1.2 mm) apart: B gets its other end back, and C, 0.8 mm across, cannot hold two.
+    Print print;
+    init_and_process_print({ islands_fixture() }, print, scaffold_config({ { "support_contact_min_distance", "3.5" } }));
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    REQUIRE(object.support_analysis() != nullptr);
+    const SupportAnalysis::Report &report = *object.support_analysis();
+    INFO("tips placed " << report.tips_placed << " routed " << report.tips_routed << " dropped " << report.tips_dropped
+                        << " floating removed " << report.floating_pieces_removed);
+    CHECK(report.islands_under_held == 1);
+
+    // The islands' undersides are at z 3, the top of a planned layer. The block's first layer places the fixture's
+    // (0, 0) in the object's centred frame. A head at the stick's end tilts, so its disc's centroid sits just past
+    // the end: the box under B reaches 0.3 mm past the stick on every side.
+    const auto   layers = object.support_layers();
+    const size_t top    = top_layer_under(layers, 3.);
+    REQUIRE(top != size_t(-1));
+    CHECK_THAT(layers[top]->print_z, WithinAbs(3., 1e-6));
+    const Point      origin = get_extents(object.layers().front()->lslices).min;
+    const FixtureBox under_a { origin, 14., 3., 18., 7. };
+    const FixtureBox under_b { origin, 21.7, 4.4, 25.3, 5.6 };
+    std::vector<Point> at_a, at_b;
+    for (const ExPolygon &poly : role_footprint(*layers[top], erSupportMaterialInterface)) {
+        const Point c = poly.contour.centroid();
+        const Vec2d q = (c - origin).cast<double>() * SCALING_FACTOR;
+        INFO("interface polygon centroid (" << q.x() << ", " << q.y() << ")");
+        if (under_a.contains(c))
+            at_a.push_back(c);
+        if (under_b.contains(c))
+            at_b.push_back(c);
+    }
+    CHECK(at_a.size() >= 2);
+    REQUIRE(at_b.size() >= 2);
+    double spread_mm = 0.;
+    for (size_t i = 0; i < at_b.size(); ++ i)
+        for (size_t j = i + 1; j < at_b.size(); ++ j)
+            spread_mm = std::max(spread_mm, unscale<double>((at_b[i] - at_b[j]).cast<double>().norm()));
+    INFO("the interface polygons under B spread " << spread_mm << " mm");
+    CHECK(spread_mm >= 1.2);
+}

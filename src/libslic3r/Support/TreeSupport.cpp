@@ -1972,14 +1972,20 @@ void TreeSupport::generate()
         // Erase the dropped pointers in place and move the kept ones onto the positions the pass chose.
         // Nothing is deleted: the nodes stay owned by TreeSupportData's pool, the outer vector keeps its
         // size and its layer_nr - 1 indexing, and a node the seed pass never gave a source id (a painted
-        // vertical enforcer point) is left alone, position included.
+        // vertical enforcer point) is left alone, position included. The scaffold keeps the dropped pointers
+        // as its hold floor's candidates.
+        if (m_scaffold)
+            m_dropped_contacts.clear();
         for (std::vector<SupportNode*> &layer : contact_nodes) {
             size_t out = 0;
             for (size_t i = 0; i < layer.size(); ++ i) {
                 SupportNode *node   = layer[i];
                 const bool   seeded = node->source_ids.size() == 1;
-                if (seeded && ! retained[size_t(node->source_ids.front())])
+                if (seeded && ! retained[size_t(node->source_ids.front())]) {
+                    if (m_scaffold)
+                        m_dropped_contacts.push_back(node);
                     continue;
+                }
                 if (seeded)
                     node->position = placed[size_t(node->source_ids.front())];
                 layer[out ++] = layer[i];

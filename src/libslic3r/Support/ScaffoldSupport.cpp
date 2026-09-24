@@ -2,12 +2,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
 
 #include "ClipperUtils.hpp"
 #include "Model.hpp"
 #include "Print.hpp"
 #include "TriangleMesh.hpp"
 #include "TriangleMeshSlicer.hpp"
+#include "SupportComponents.hpp"
 #include "libslic3r/SLA/SupportTreeBuilder.hpp"
 #include "libslic3r/SLA/SupportTreeBuildsteps.hpp"
 #include "libslic3r/SLA/SupportTreeMesher.hpp"
@@ -48,10 +50,101 @@ sla::SupportTreeConfig tree_config(const Params &params)
     return cfg;
 }
 
+// The seed a contact was placed for, or the largest id for a node the seed pass never named.
+uint64_t seed_id(const SupportNode &node) { return node.source_ids.empty() ? std::numeric_limits<uint64_t>::max() : node.source_ids.front(); }
+
+// The tips a model island needs for its unjoined height: one for a sliver, two up to 5 mm, three above. A slab z is
+// a sum of layer heights, so a band edge carries an epsilon.
+size_t hold_floor(double height_mm) { return height_mm <= 1. + EPSILON ? 1 : height_mm <= 5. + EPSILON ? 2 : 3; }
+
+// Adds the dropped contacts under each mid-air island of the model back to `tips` until the island is held by its
+// floor of tips a pillar diameter apart, and returns how many islands stay short of it. A tip belongs to the island
+// that owns the model piece over it, on the overhang's own layer, one above the node's.
+size_t restore_hold_floor(const PrintObject &object, std::vector<const SupportNode *> &tips, const std::vector<SupportNode *> &dropped,
+                          double pillar_diameter_mm)
+{
+    using namespace SupportAnalysis;
+    const std::vector<Slab> slabs = model_slabs_of(object);
+    if (slabs.empty())
+        return 0;
+    const IslandMap map = island_joins(slabs, slabs.front().bottom_z);
+    if (map.islands.empty())
+        return 0;
+    const auto island_of = [&](const SupportNode &node) {
+        const size_t s = size_t(node.obj_layer_nr + 1);
+        if (node.obj_layer_nr + 1 < 0 || s >= map.components.slab_range.size())
+            return size_t(-1);
+        for (size_t p = map.components.slab_range[s].first; p < map.components.slab_range[s].second; ++ p)
+            if (map.components.pieces[p].polygon.contains(node.position))
+                return map.island_of_piece[p];
+        return size_t(-1);
+    };
+    std::vector<std::vector<const SupportNode *>> kept(map.islands.size()), spare(map.islands.size());
+    for (const SupportNode *node : tips)
+        if (const size_t k = island_of(*node); k < kept.size())
+            kept[k].push_back(node);
+    for (const SupportNode *node : dropped)
+        if (const size_t k = island_of(*node); k < spare.size())
+            spare[k].push_back(node);
+
+    const double min_spacing = scale_(pillar_diameter_mm);
+    const auto   xy_distance = [](const SupportNode *a, const SupportNode *b) { return (a->position - b->position).cast<double>().norm(); };
+    size_t       under_held  = 0;
+    for (size_t k = 0; k < map.islands.size(); ++ k) {
+        const IslandJoin &join   = map.islands[k];
+        const double      height = (join.join_slab < slabs.size() ? slabs[join.join_slab].bottom_z : slabs.back().print_z) -
+                              slabs[join.birth_slab].bottom_z;
+        const size_t      floor  = hold_floor(height);
+        // Greedy, lowest first: a tip counts where it stands a pillar diameter from every tip counted before it.
+        std::vector<const SupportNode *> counted;
+        const auto count = [&](const SupportNode *node) {
+            if (std::all_of(counted.begin(), counted.end(), [&](const SupportNode *c) { return xy_distance(node, c) >= min_spacing; }))
+                counted.push_back(node);
+        };
+        std::sort(kept[k].begin(), kept[k].end(), [](const SupportNode *a, const SupportNode *b) {
+            return a->print_z != b->print_z ? a->print_z < b->print_z : seed_id(*a) < seed_id(*b);
+        });
+        for (const SupportNode *node : kept[k])
+            if (counted.size() < floor)
+                count(node);
+        // Short of the floor: the dropped contacts come back lowest first, among equals the one furthest from the
+        // tips the island already has.
+        std::vector<const SupportNode *> &candidates = spare[k];
+        std::sort(candidates.begin(), candidates.end(), [](const SupportNode *a, const SupportNode *b) { return a->print_z < b->print_z; });
+        size_t next = 0;
+        while (counted.size() < floor && next < candidates.size()) {
+            size_t tie_end = next;
+            while (tie_end < candidates.size() && candidates[tie_end]->print_z <= candidates[next]->print_z + EPSILON)
+                ++ tie_end;
+            const auto nearest_kept = [&](const SupportNode *node) {
+                double d = std::numeric_limits<double>::max();
+                for (const SupportNode *t : kept[k])
+                    d = std::min(d, xy_distance(node, t));
+                return d;
+            };
+            size_t best = next;
+            double best_d = nearest_kept(candidates[next]);
+            for (size_t i = next + 1; i < tie_end; ++ i)
+                if (const double d = nearest_kept(candidates[i]); d > best_d) {
+                    best   = i;
+                    best_d = d;
+                }
+            std::swap(candidates[next], candidates[best]);
+            const SupportNode *restored = candidates[next ++];
+            kept[k].push_back(restored);
+            tips.push_back(restored);
+            count(restored);
+        }
+        if (counted.size() < floor)
+            ++ under_held;
+    }
+    return under_held;
+}
+
 } // namespace
 
 Output draw(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts,
-            const std::vector<SupportNode *> & /* dropped */, const std::vector<LayerHeightData> &layer_heights,
+            const std::vector<SupportNode *> &dropped, const std::vector<LayerHeightData> &layer_heights,
             const ModelSupportRisk::Field &risk, const Params &params, const std::function<void()> &throw_on_cancel)
 {
     Output out;
@@ -62,27 +155,33 @@ Output draw(const PrintObject &object, const std::vector<std::vector<SupportNode
         ++ out.pad_layers;
     }
 
-    // One tip per contact. Its grade is the width of the disc it fuses to the model with: two support lines, or
-    // four where the model under it hangs off a neck at least eight lines wide. The pin is half the grade.
+    // One tip per contact. An interior tip is kept only where its overhang holds a disc as wide as the longest bridge:
+    // under a narrower overhang the tips on its rim already hold it.
+    std::vector<const SupportNode *> nodes;
+    for (size_t i = 0; i < std::min(contacts.size(), layer_heights.size()); ++ i)
+        for (const SupportNode *node : contacts[i])
+            if (node->placement != SupportNode::Placement::Interior ||
+                (! node->overhang.empty() && ! offset_ex(node->overhang, -scale_(params.max_bridge_length_mm / 2.)).empty()))
+                nodes.push_back(node);
+    const auto islands_start      = std::chrono::steady_clock::now();
+    out.counts.islands_under_held = restore_hold_floor(object, nodes, dropped, params.pillar_diameter_mm);
+    out.stage_ms.island_joins     = ms_since(islands_start);
+
+    // A tip's grade is the width of the disc it fuses to the model with: two support lines, or four where the model
+    // under it hangs off a neck at least eight lines wide. The pin is half the grade.
     const double w          = params.toolpath_width_mm;
     const bool   risk_known = risk.status == ModelSupportRisk::Field::Status::Complete;
     sla::SupportPoints points;
-    for (size_t i = 0; i < std::min(contacts.size(), layer_heights.size()); ++ i)
-        for (const SupportNode *node : contacts[i]) {
-            // An interior tip is kept only where its overhang holds a disc as wide as the longest bridge: under a
-            // narrower overhang the tips on its rim already hold it.
-            if (node->placement == SupportNode::Placement::Interior &&
-                (node->overhang.empty() || offset_ex(node->overhang, -scale_(params.max_bridge_length_mm / 2.)).empty()))
-                continue;
-            double grade = 2. * w;
-            if (risk_known) {
-                const ModelSupportRisk::Sample s = ModelSupportRisk::sample(risk, size_t(node->obj_layer_nr + 1), node->position);
-                if (s.status == ModelSupportRisk::Sample::Status::Known && s.neck_width_mm >= 8. * w)
-                    grade = 4. * w;
-            }
-            const Vec2d xy = unscale(node->position);
-            points.emplace_back(float(xy.x()), float(xy.y()), float(node->print_z - params.z_offset_mm), float(grade / 2.));
+    for (const SupportNode *node : nodes) {
+        double grade = 2. * w;
+        if (risk_known) {
+            const ModelSupportRisk::Sample s = ModelSupportRisk::sample(risk, size_t(node->obj_layer_nr + 1), node->position);
+            if (s.status == ModelSupportRisk::Sample::Status::Known && s.neck_width_mm >= 8. * w)
+                grade = 4. * w;
         }
+        const Vec2d xy = unscale(node->position);
+        points.emplace_back(float(xy.x()), float(xy.y()), float(node->print_z - params.z_offset_mm), float(grade / 2.));
+    }
     out.counts.tips_placed = points.size();
 
     // The object in the frame its slices are in: XY centred, bottom on z 0. The builder's mesh index points
