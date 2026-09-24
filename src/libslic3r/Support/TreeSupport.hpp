@@ -510,6 +510,10 @@ private:
      * \param contact_nodes The nodes to draw as support.
      */
     void draw_circles();
+    size_t brim_skirt_layer_count() const;
+    void finish_layer_areas(SupportLayer *ts_layer, size_t layer_nr, size_t brim_skirt_layers);
+    void normalize_interface_ids();
+    void erase_empty_support_layers();
 
     /*!
      * \brief Drops down the nodes of the tree support towards the build plate.

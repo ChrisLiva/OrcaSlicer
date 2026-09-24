@@ -2477,7 +2477,6 @@ void TreeSupport::draw_circles()
 {
     const PrintObjectConfig &config = m_object->config();
     const Print* print = m_object->print();
-    bool has_brim = print->has_brim();
     const coordf_t bottom_gap_height = m_slicing_params.gap_object_support;
     const coordf_t branch_radius = config.tree_support_branch_diameter.value / 2;
     const coordf_t branch_radius_scaled = scale_(branch_radius);
@@ -2500,14 +2499,7 @@ void TreeSupport::draw_circles()
         branch_circle.append(Point(cos(angle) * branch_radius_scaled, sin(angle) * branch_radius_scaled));
     }
 
-    // Performance optimization. Only generate lslices for brim and skirt.
-    size_t brim_skirt_layers = has_brim ? 1 : 0;
-    const PrintConfig& print_config = print->config();
-    for (const PrintObject* object : print->objects())
-    {
-        size_t skirt_layers = print->has_infinite_skirt() ? object->layer_count() : std::min(size_t(print_config.skirt_height.value), object->layer_count());
-        brim_skirt_layers = std::max(brim_skirt_layers, skirt_layers);
-    }
+    const size_t brim_skirt_layers = brim_skirt_layer_count();
 
     // generate areas
     const coordf_t layer_height = config.layer_height.value;
@@ -2913,64 +2905,11 @@ void TreeSupport::draw_circles()
                     area_groups.back().interface_as_base = top_base_interface_layers > 0;
                 }
 
-                for (auto &area_group : area_groups) {
-                    auto& expoly = area_group.area;
-                    expoly->holes.erase(std::remove_if(expoly->holes.begin(), expoly->holes.end(),
-                                                       [](auto &hole) {
-                                                           auto bbox_size = get_extents(hole).size();
-                                                           return bbox_size[0] < scale_(2) && bbox_size[1] < scale_(2);
-                                                       }),
-                                        expoly->holes.end());
-
-                    if (layer_nr < brim_skirt_layers)
-                        ts_layer->lslices.emplace_back(*expoly);
-                }
-
-                ts_layer->lslices = union_ex(ts_layer->lslices);
-                //Must update bounding box which is used in avoid crossing perimeter
-                ts_layer->lslices_bboxes.clear();
-                ts_layer->lslices_bboxes.reserve(ts_layer->lslices.size());
-
-                for (const ExPolygon& expoly : ts_layer->lslices)
-                    ts_layer->lslices_bboxes.emplace_back(get_extents(expoly));
-
-                ts_layer->backup_untyped_slices();
+                finish_layer_areas(ts_layer, layer_nr, brim_skirt_layers);
 
             }
         });
-        // ORCA: normalize interface_id sequencing to follow printed interface layers only.
-        const bool interlaced = m_object_config->support_interface_pattern == smipRectilinearInterlaced;
-        int roof_interface_id = 0;
-        int floor_interface_id = 0;
-        bool has_roof_interface;
-        bool has_floor_interface;
-
-        for (size_t layer_nr = 0; layer_nr < m_ts_data->layer_heights.size(); ++layer_nr) {
-            SupportLayer *ts_layer = m_object->get_support_layer(layer_nr + m_raft_layers);
-            if (ts_layer == nullptr)
-                continue;
-
-            has_roof_interface = false;
-            has_floor_interface = false;
-
-            for (auto &area_group : ts_layer->area_groups) {
-                if (area_group.type == SupportLayer::RoofType || area_group.type == SupportLayer::Roof1stLayer) {
-                    if (interlaced)
-                        area_group.interface_id = roof_interface_id;
-                    has_roof_interface = true;
-                } else if (area_group.type == SupportLayer::FloorType) {
-                    if (interlaced)
-                        area_group.interface_id = floor_interface_id;
-                    has_floor_interface = true;
-                }
-            }
-
-            if (has_roof_interface)
-                ++roof_interface_id;
-
-            if (has_floor_interface)
-                ++floor_interface_id;
-        }
+        normalize_interface_ids();
 
         if (with_lightning_infill)
         {
@@ -3185,6 +3124,90 @@ void TreeSupport::draw_circles()
         }
     }
 
+    erase_empty_support_layers();
+}
+
+size_t TreeSupport::brim_skirt_layer_count() const
+{
+    const Print* print = m_object->print();
+    bool has_brim = print->has_brim();
+    // Performance optimization. Only generate lslices for brim and skirt.
+    size_t brim_skirt_layers = has_brim ? 1 : 0;
+    const PrintConfig& print_config = print->config();
+    for (const PrintObject* object : print->objects())
+    {
+        size_t skirt_layers = print->has_infinite_skirt() ? object->layer_count() : std::min(size_t(print_config.skirt_height.value), object->layer_count());
+        brim_skirt_layers = std::max(brim_skirt_layers, skirt_layers);
+    }
+    return brim_skirt_layers;
+}
+
+void TreeSupport::finish_layer_areas(SupportLayer *ts_layer, size_t layer_nr, size_t brim_skirt_layers)
+{
+    auto &area_groups = ts_layer->area_groups;
+    for (auto &area_group : area_groups) {
+        auto& expoly = area_group.area;
+        expoly->holes.erase(std::remove_if(expoly->holes.begin(), expoly->holes.end(),
+                                           [](auto &hole) {
+                                               auto bbox_size = get_extents(hole).size();
+                                               return bbox_size[0] < scale_(2) && bbox_size[1] < scale_(2);
+                                           }),
+                            expoly->holes.end());
+
+        if (layer_nr < brim_skirt_layers)
+            ts_layer->lslices.emplace_back(*expoly);
+    }
+
+    ts_layer->lslices = union_ex(ts_layer->lslices);
+    //Must update bounding box which is used in avoid crossing perimeter
+    ts_layer->lslices_bboxes.clear();
+    ts_layer->lslices_bboxes.reserve(ts_layer->lslices.size());
+
+    for (const ExPolygon& expoly : ts_layer->lslices)
+        ts_layer->lslices_bboxes.emplace_back(get_extents(expoly));
+
+    ts_layer->backup_untyped_slices();
+}
+
+void TreeSupport::normalize_interface_ids()
+{
+    // ORCA: normalize interface_id sequencing to follow printed interface layers only.
+    const bool interlaced = m_object_config->support_interface_pattern == smipRectilinearInterlaced;
+    int roof_interface_id = 0;
+    int floor_interface_id = 0;
+    bool has_roof_interface;
+    bool has_floor_interface;
+
+    for (size_t layer_nr = 0; layer_nr < m_ts_data->layer_heights.size(); ++layer_nr) {
+        SupportLayer *ts_layer = m_object->get_support_layer(layer_nr + m_raft_layers);
+        if (ts_layer == nullptr)
+            continue;
+
+        has_roof_interface = false;
+        has_floor_interface = false;
+
+        for (auto &area_group : ts_layer->area_groups) {
+            if (area_group.type == SupportLayer::RoofType || area_group.type == SupportLayer::Roof1stLayer) {
+                if (interlaced)
+                    area_group.interface_id = roof_interface_id;
+                has_roof_interface = true;
+            } else if (area_group.type == SupportLayer::FloorType) {
+                if (interlaced)
+                    area_group.interface_id = floor_interface_id;
+                has_floor_interface = true;
+            }
+        }
+
+        if (has_roof_interface)
+            ++roof_interface_id;
+
+        if (has_floor_interface)
+            ++floor_interface_id;
+    }
+}
+
+void TreeSupport::erase_empty_support_layers()
+{
     SupportLayerPtrs& ts_layers = m_object->support_layers();
     auto iter = std::remove_if(ts_layers.begin(), ts_layers.end(), [](SupportLayer* ts_layer) { return ts_layer->height < EPSILON; });
     ts_layers.erase(iter, ts_layers.end());
