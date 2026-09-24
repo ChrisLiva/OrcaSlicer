@@ -1063,6 +1063,64 @@ void SupportTreeBuildsteps::routing_to_model()
 
 void SupportTreeBuildsteps::interconnect_pillars()
 {
+    // Under a slenderness ratio a pillar is braced only when its unbraced
+    // run, the longest z gap between its ends and the bridge endpoints on its
+    // axis, exceeds the ratio times its diameter. Such a pillar gets one
+    // chain to its nearest reachable neighbour; no cascade and no helper
+    // pillars. A pillar no neighbour can brace counts as unbraced.
+    if (m_cfg.pillar_link_slenderness > 0.) {
+        auto attach_z = [](const Pillar &p, const std::vector<Bridge> &brs,
+                           std::vector<double> &zs) {
+            Vec2d axis = p.endpt.head<2>();
+            for (const Bridge &br : brs)
+                for (const Vec3d &e : {br.startp, br.endp})
+                    if ((e.head<2>() - axis).norm() <= p.r)
+                        zs.emplace_back(e.z());
+        };
+
+        for (size_t pid = 0; pid < m_builder.pillarcount(); ++pid) {
+            const Pillar &pillar = m_builder.pillar(pid);
+
+            std::vector<double> zs = {pillar.endpt.z(),
+                                      pillar.startpoint().z()};
+            attach_z(pillar, m_builder.bridges(), zs);
+            attach_z(pillar, m_builder.crossbridges(), zs);
+            std::sort(zs.begin(), zs.end());
+
+            double run = 0.;
+            for (size_t i = 1; i < zs.size(); ++i)
+                run = std::max(run, zs[i] - zs[i - 1]);
+
+            if (run <= m_cfg.pillar_link_slenderness * 2. * pillar.r)
+                continue;
+
+            Vec3d qp = pillar.endpoint();
+            double max_d = m_cfg.max_pillar_link_distance_mm;
+            auto qres = m_pillar_index.query([qp, max_d](const PointIndexEl &e) {
+                return distance(e.first, qp) < max_d;
+            });
+
+            std::sort(qres.begin(), qres.end(),
+                      [qp](const PointIndexEl &e1, const PointIndexEl &e2) {
+                          return distance(e1.first, qp) <
+                                 distance(e2.first, qp);
+                      });
+
+            bool linked = false;
+            for (const PointIndexEl &re : qres) {
+                if (re.second == pid) continue;
+                if (interconnect(pillar, m_builder.pillar(re.second))) {
+                    linked = true;
+                    break;
+                }
+            }
+
+            if (!linked) ++m_builder.unbraced_pillars;
+        }
+
+        return;
+    }
+
     // Now comes the algorithm that connects pillars with each other.
     // Ideally every pillar should be connected with at least one of its
     // neighbors if that neighbor is within max_pillar_link_distance

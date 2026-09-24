@@ -250,6 +250,10 @@ class SupportTreeBuilder: public SupportTree {
     
 public:
     double ground_level = 0;
+
+    // Pillars whose unbraced run exceeded the slenderness ratio and that no
+    // neighbour could brace.
+    size_t unbraced_pillars = 0;
     
     SupportTreeBuilder() = default;
     SupportTreeBuilder(SupportTreeBuilder &&o);

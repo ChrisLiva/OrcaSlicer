@@ -62,6 +62,48 @@ sla::SupportTreeConfig blocked_lip_config()
 
 const sla::SupportPoints BLOCKED_LIP_POINTS = {sla::SupportPoint(Vec3f(20.f, 20.f, 12.f), 0.2f)};
 
+// A 10x10x1 plate at x 0..10, y 0..10, z 30..31, a 20x10x1 plate at
+// x 30..50, y 0..10, z 30..31 and a 2x2x1 foot at x 60..62, y 0..2, z 0..1
+// that pins the ground at z 0. TWO_PLATES_POINTS puts two points 5 mm apart
+// under the small plate and two 16 mm apart under the long one.
+indexed_triangle_set two_plates_mesh()
+{
+    auto box = [](double x, double y, double z, float dx, float dy, float dz) {
+        TriangleMesh m = make_cube(x, y, z);
+        m.translate(dx, dy, dz);
+        return m;
+    };
+
+    indexed_triangle_set its = box(10., 10., 1., 0.f, 0.f, 30.f).its;
+    its_merge(its, box(20., 10., 1., 30.f, 0.f, 30.f).its);
+    its_merge(its, box(2., 2., 1., 60.f, 0.f, 0.f).its);
+
+    return its;
+}
+
+sla::SupportTreeConfig two_plates_config(double slenderness)
+{
+    sla::SupportTreeConfig cfg;
+    cfg.object_elevation_mm         = 0.;
+    cfg.head_back_radius_mm         = 0.6;
+    cfg.base_radius_mm              = 1.2;
+    cfg.base_height_mm              = 0.5;
+    cfg.max_bridge_length_mm        = 12.;
+    cfg.max_pillar_link_distance_mm = 12.;
+    cfg.pillar_connection_mode      = sla::PillarConnectionMode::zigzag;
+    cfg.allow_model_anchors         = false;
+    cfg.pillar_link_slenderness     = slenderness;
+
+    return cfg;
+}
+
+const sla::SupportPoints TWO_PLATES_POINTS = {
+    sla::SupportPoint(Vec3f(2.5f, 5.f, 30.f), 0.2f),
+    sla::SupportPoint(Vec3f(7.5f, 5.f, 30.f), 0.2f),
+    sla::SupportPoint(Vec3f(32.f, 5.f, 30.f), 0.2f),
+    sla::SupportPoint(Vec3f(48.f, 5.f, 30.f), 0.2f),
+};
+
 } // namespace
 
 TEST_CASE("Pillar pairhash should be unique", "[SLASupportGeneration]") {
@@ -239,6 +281,23 @@ TEST_CASE("A stop condition halts the builder between steps", "[SLASupportGenera
     sla::SupportableMesh completed_sm{mesh, BLOCKED_LIP_POINTS, cfg};
     CHECK_FALSE(sla::SupportTreeBuildsteps::execute(completed, completed_sm));
     CHECK(completed.pillars().size() >= 1);
+}
+
+TEST_CASE("Slender pillars get one brace and no helper pillar", "[SLASupportGeneration]") {
+    indexed_triangle_set mesh = two_plates_mesh();
+
+    sla::SupportTreeBuilder braced;
+    sla::SupportableMesh braced_sm{mesh, TWO_PLATES_POINTS, two_plates_config(15.)};
+    REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(braced, braced_sm));
+    CHECK(braced.pillars().size() == 4);
+    CHECK(braced.crossbridges().size() >= 1);
+    CHECK(braced.unbraced_pillars == 2);
+
+    sla::SupportTreeBuilder cascaded;
+    sla::SupportableMesh cascaded_sm{mesh, TWO_PLATES_POINTS, two_plates_config(0.)};
+    REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(cascaded, cascaded_sm));
+    CHECK(cascaded.pillars().size() >= 6);
+    CHECK(cascaded.unbraced_pillars == 0);
 }
 
 TEST_CASE("InitializedRasterShouldBeNONEmpty", "[SLARasterOutput]") {

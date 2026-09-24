@@ -67,6 +67,7 @@ SupportTreeBuilder::SupportTreeBuilder(SupportTreeBuilder &&o)
     , m_meshcache_valid{o.m_meshcache_valid}
     , m_model_height{o.m_model_height}
     , ground_level{o.ground_level}
+    , unbraced_pillars{o.unbraced_pillars}
 {}
 
 SupportTreeBuilder::SupportTreeBuilder(const SupportTreeBuilder &o)
@@ -80,6 +81,7 @@ SupportTreeBuilder::SupportTreeBuilder(const SupportTreeBuilder &o)
     , m_meshcache_valid{o.m_meshcache_valid}
     , m_model_height{o.m_model_height}
     , ground_level{o.ground_level}
+    , unbraced_pillars{o.unbraced_pillars}
 {}
 
 SupportTreeBuilder &SupportTreeBuilder::operator=(SupportTreeBuilder &&o)
@@ -94,6 +96,7 @@ SupportTreeBuilder &SupportTreeBuilder::operator=(SupportTreeBuilder &&o)
     m_meshcache_valid = o.m_meshcache_valid;
     m_model_height = o.m_model_height;
     ground_level = o.ground_level;
+    unbraced_pillars = o.unbraced_pillars;
     return *this;
 }
 
@@ -109,6 +112,7 @@ SupportTreeBuilder &SupportTreeBuilder::operator=(const SupportTreeBuilder &o)
     m_meshcache_valid = o.m_meshcache_valid;
     m_model_height = o.m_model_height;
     ground_level = o.ground_level;
+    unbraced_pillars = o.unbraced_pillars;
     return *this;
 }
 
