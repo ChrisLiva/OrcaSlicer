@@ -68,6 +68,29 @@ TriangleMesh islands_fixture()
     return block;
 }
 
+// The islands fixture's block with a 4 x 4 x 4 mm cube at x 14..18, y 3..7, z 3.5..7.5 that a 6 x 2 x 1 mm bar at
+// x 9..15, y 4..6, z 3.5..4.5 joins to the block at the cube's first layer. Under the cube a 0.4 x 0.4 x 0.5 mm spike
+// at x 14..14.4, y 4.8..5.2, z 3..3.5 starts an island that joins the rooted body 0.6 mm up, too thin for a line, so
+// the front half seeds nothing under it; a 0.3 x 0.3 x 0.3 mm cube at x 35..35.3, y 5..5.3, z 7.2..7.5 never joins
+// and stands 0.8 mm under the object's top at z 8.
+TriangleMesh seeded_islands_fixture()
+{
+    TriangleMesh block = make_cube(10., 10., 8.);
+    TriangleMesh cube  = make_cube(4., 4., 4.);
+    cube.translate(14.f, 3.f, 3.5f);
+    TriangleMesh bar = make_cube(6., 2., 1.);
+    bar.translate(9.f, 4.f, 3.5f);
+    TriangleMesh spike = make_cube(0.4, 0.4, 0.5);
+    spike.translate(14.f, 4.8f, 3.f);
+    TriangleMesh debris = make_cube(0.3, 0.3, 0.3);
+    debris.translate(35.f, 5.f, 7.2f);
+    block.merge(cube);
+    block.merge(bar);
+    block.merge(spike);
+    block.merge(debris);
+    return block;
+}
+
 // A 6 x 6 x 14 mm column at x 0..6, y 0..6 carrying a 6 x 0.6 x 1 mm bar off its +x face at x 6..12, y 2.7..3.3,
 // z 4..5 (a 0.6 mm neck) and a 12 x 12 x 2 mm slab off its top at x 6..18, y -3..9, z 12..14 (a 6 mm neck where it
 // meets the column).
@@ -712,7 +735,8 @@ TEST_CASE("The hold floor restores dropped contacts under tall islands", "[Scaff
 {
     // At a 3.5 mm contact distance the decimation keeps one end of stick B's 3 mm underside. B and post C stand 5 mm
     // from their birth at z 3 to the object's top without joining, and cube A 3 mm to its join at z 6, so each wants
-    // two tips a pillar diameter (1.2 mm) apart: B gets its other end back, and C, 0.8 mm across, cannot hold two.
+    // two tips a pillar diameter (1.2 mm) apart: B gets its other end back, and C, 0.8 mm across, holds only one,
+    // which is all its footprint fits, so no island is under-held.
     Print print;
     init_and_process_print({ islands_fixture() }, print, scaffold_config({ { "support_contact_min_distance", "3.5" } }));
     REQUIRE(print.objects().size() == 1);
@@ -721,7 +745,7 @@ TEST_CASE("The hold floor restores dropped contacts under tall islands", "[Scaff
     const SupportAnalysis::Report &report = *object.support_analysis();
     INFO("tips placed " << report.tips_placed << " routed " << report.tips_routed << " dropped " << report.tips_dropped
                         << " floating removed " << report.floating_pieces_removed);
-    CHECK(report.islands_under_held == 1);
+    CHECK(report.islands_under_held == 0);
 
     // The islands' undersides are at z 3, the top of a planned layer. The block's first layer places the fixture's
     // (0, 0) in the object's centred frame. A head at the stick's end tilts, so its disc's centroid sits just past
@@ -751,6 +775,48 @@ TEST_CASE("The hold floor restores dropped contacts under tall islands", "[Scaff
             spread_mm = std::max(spread_mm, unscale<double>((at_b[i] - at_b[j]).cast<double>().norm()));
     INFO("the interface polygons under B spread " << spread_mm << " mm");
     CHECK(spread_mm >= 1.2);
+}
+
+TEST_CASE("Unseeded feature starts get a scaffold tip and floating debris gets none", "[ScaffoldSupport]")
+{
+    // The spike is too thin to extrude, so no overhang and no contact starts under it, and the cube's contacts stand
+    // on the body the bar roots. The spike's island joins 0.6 mm up and wants one tip, which the hold floor seeds at
+    // the spike's middle. The speck never joins and stands under 1 mm below the object's top: debris, left alone.
+    Print print;
+    init_and_process_print({ seeded_islands_fixture() }, print, scaffold_config({ { "support_remove_small_overhang", "1" } }));
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    REQUIRE(object.support_analysis() != nullptr);
+    const SupportAnalysis::Report &report = *object.support_analysis();
+    INFO("tips placed " << report.tips_placed << " routed " << report.tips_routed << " dropped " << report.tips_dropped
+                        << " floating removed " << report.floating_pieces_removed);
+    CHECK(report.islands_under_held == 0);
+    CHECK(report.floating_pieces_removed == 0);
+
+    // The seeded tip stands at the spike's bottom, z 3, and prints its disc on the highest planned layer whose top is
+    // at or under it. The block's first layer places the fixture's (0, 0) in the object's centred frame.
+    const auto   layers = object.support_layers();
+    const size_t top    = top_layer_under(layers, 3.);
+    REQUIRE(top != size_t(-1));
+    INFO("the layer under the spike prints at z " << layers[top]->print_z);
+    const Point      origin = get_extents(object.layers().front()->lslices).min;
+    const FixtureBox under_spike { origin, 13.7, 4.5, 14.7, 5.5 };
+    const FixtureBox under_debris { origin, 34.7, 4.7, 35.6, 5.6 };
+    size_t at_spike = 0;
+    for (const ExPolygon &poly : role_footprint(*layers[top], erSupportMaterialInterface)) {
+        const Point c = poly.contour.centroid();
+        const Vec2d q = (c - origin).cast<double>() * SCALING_FACTOR;
+        INFO("interface polygon centroid (" << q.x() << ", " << q.y() << ")");
+        if (under_spike.contains(c))
+            ++ at_spike;
+    }
+    CHECK(at_spike >= 1);
+    size_t at_debris = 0;
+    for (const SupportLayer *layer : layers)
+        for (const ExPolygon &poly : role_footprint(*layer, erSupportMaterialInterface))
+            if (under_debris.contains(poly.contour.centroid()))
+                ++ at_debris;
+    CHECK(at_debris == 0);
 }
 
 TEST_CASE("Slender scaffold pillars get braces and unreachable ones stand unbraced", "[ScaffoldSupport]")
