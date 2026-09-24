@@ -163,6 +163,19 @@ TriangleMesh blocked_lip_fixture()
     return block;
 }
 
+// A 40 x 12 x 1 mm slab at x 0..40, y 0..12, z 3..4 that touches nothing, and a 2 x 2 x 4 mm post at x 42..44,
+// y 0..2 that keeps the object on the plate. The slab's underside is an overhang island 12 mm wide, and 40 mm long so
+// the interior grid at a 7 mm step still lands candidates inside it.
+TriangleMesh floating_slab_fixture()
+{
+    TriangleMesh post = make_cube(2., 2., 4.);
+    post.translate(42.f, 0.f, 0.f);
+    TriangleMesh slab = make_cube(40., 12., 1.);
+    slab.translate(0.f, 0.f, 3.f);
+    post.merge(slab);
+    return post;
+}
+
 // A JSON config written to the OS temp directory and removed when the guard leaves scope.
 struct ScratchJson
 {
@@ -612,4 +625,54 @@ TEST_CASE("A tip with no path to the pad is dropped and counted", "[ScaffoldSupp
     CHECK(report.tips_dropped >= 1);
     CHECK(report.tips_placed == report.tips_routed + report.tips_dropped);
     CHECK(report.floating_pieces_removed == 0);
+}
+
+TEST_CASE("Interior tips survive only where a bridge span fits", "[ScaffoldSupport]")
+{
+    // A 12 mm wide slab holds no 14 mm disc, so at a 14 mm bridge length every tip under it stands on the rim; a 10 mm
+    // disc fits, so at 10 mm the interior grid keeps a tip well inside the rim.
+    struct Reading { size_t polygons = 0; double max_depth_mm = -1e9, min_depth_mm = 1e9; };
+    const auto read = [](const char *bridge_length) {
+        Print print;
+        init_and_process_print({ floating_slab_fixture() }, print, scaffold_config({ { "max_bridge_length", bridge_length } }));
+        REQUIRE(print.objects().size() == 1);
+        const PrintObject &object = *print.objects().front();
+        Reading r;
+
+        // The first layer holds only the post, which places the fixture's (0, 0) in the object's centred frame.
+        const Point      origin = get_extents(object.layers().front()->lslices).min - Point::new_scale(42., 0.);
+        const FixtureBox slab { origin, 0., 0., 40., 12. };
+        const FixtureBox near_slab { origin, -4., -4., 41.9, 16. };
+        const auto layers = object.support_layers();
+        const size_t top = top_layer_under(layers, 3.);
+        REQUIRE(top != size_t(-1));
+        INFO("bridge length " << bridge_length << " top interface print_z " << layers[top]->print_z);
+        // Tips closer than a disc print as one polygon, so each polygon's centroid is read, and its depth is the
+        // distance inside the slab's outline, negative outside it.
+        for (const ExPolygon &poly : role_footprint(*layers[top], erSupportMaterialInterface)) {
+            const Point c = poly.contour.centroid();
+            if (! near_slab.contains(c))
+                continue;
+            const Vec2d  q     = (c - origin).cast<double>() * SCALING_FACTOR;
+            const double dx    = std::max({ slab.x0 - q.x(), 0., q.x() - slab.x1 });
+            const double dy    = std::max({ slab.y0 - q.y(), 0., q.y() - slab.y1 });
+            const double depth = slab.contains(c) ? std::min({ q.x() - slab.x0, slab.x1 - q.x(), q.y() - slab.y0, slab.y1 - q.y() })
+                                                  : -std::hypot(dx, dy);
+            ++ r.polygons;
+            r.max_depth_mm = std::max(r.max_depth_mm, depth);
+            r.min_depth_mm = std::min(r.min_depth_mm, depth);
+        }
+        return r;
+    };
+
+    const Reading wide = read("14");
+    INFO("at 14: " << wide.polygons << " polygons, depth " << wide.min_depth_mm << " to " << wide.max_depth_mm << " mm");
+    REQUIRE(wide.polygons > 0);
+    CHECK(wide.max_depth_mm <= 1.0);
+    CHECK(wide.min_depth_mm >= -1.0);
+
+    const Reading narrow = read("10");
+    INFO("at 10: " << narrow.polygons << " polygons, depth " << narrow.min_depth_mm << " to " << narrow.max_depth_mm << " mm");
+    // No tip count is compared: the key also moves the contour tips and the interior grid step before the thinning.
+    CHECK(narrow.max_depth_mm >= 2.0);
 }

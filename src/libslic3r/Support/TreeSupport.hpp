@@ -128,6 +128,10 @@ struct SupportNode
     mutable double max_move_dist   = 0.0;
     TreeNodeType   type            = eCircle;
     bool           is_corner       = false;
+    // Which placement pass put this contact down: a sharp contour corner, a step along the contour, the interior
+    // grid, or a vertical enforcer point.
+    enum class Placement : uint8_t { Corner, Contour, Interior, Enforcer };
+    Placement      placement       = Placement::Contour;
     bool           is_processed    = false;
     bool           need_extra_wall = false;
     bool           is_sharp_tail   = false;

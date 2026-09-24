@@ -69,6 +69,11 @@ Output draw(const PrintObject &object, const std::vector<std::vector<SupportNode
     sla::SupportPoints points;
     for (size_t i = 0; i < std::min(contacts.size(), layer_heights.size()); ++ i)
         for (const SupportNode *node : contacts[i]) {
+            // An interior tip is kept only where its overhang holds a disc as wide as the longest bridge: under a
+            // narrower overhang the tips on its rim already hold it.
+            if (node->placement == SupportNode::Placement::Interior &&
+                (node->overhang.empty() || offset_ex(node->overhang, -scale_(params.max_bridge_length_mm / 2.)).empty()))
+                continue;
             double grade = 2. * w;
             if (risk_known) {
                 const ModelSupportRisk::Sample s = ModelSupportRisk::sample(risk, size_t(node->obj_layer_nr + 1), node->position);

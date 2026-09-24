@@ -4309,9 +4309,9 @@ void TreeSupport::generate_contact_points()
                         Vec2d v1 = (pt - points[(i - 1 + nSize) % nSize]).cast<double>().normalized();
                         Vec2d v2 = (pt - points[(i + 1) % nSize]).cast<double>().normalized();
                         if (v1.dot(v2) > -0.7) { // angle smaller than 135 degrees
-                            SupportNode *contact_node = insert_point(pt, overhang, radius, false, add_interface);
-                            if (contact_node) {
+                            if (SupportNode *contact_node = insert_point(pt, overhang, radius, false, add_interface)) {
                                 contact_node->is_corner = true;
+                                contact_node->placement = SupportNode::Placement::Corner;
                             }
                         }
                     }
@@ -4330,7 +4330,8 @@ void TreeSupport::generate_contact_points()
                         double distance = 0;
                         while (distance < 1) {
                             auto         pt           = i == 0 ? edge_cache.coords(distance) : edge_cache.coords(i - 1, distance);
-                            SupportNode *contact_node = insert_point(pt, overhang,radius, false, add_interface);
+                            if (SupportNode *contact_node = insert_point(pt, overhang, radius, false, add_interface))
+                                contact_node->placement = SupportNode::Placement::Contour;
                             distance += step;
                         }
                     }
@@ -4345,7 +4346,9 @@ void TreeSupport::generate_contact_points()
                         if (overhang_bounds.contains(candidate)) {
                             // BBS: move_inside_expoly shouldn't be used if candidate is already inside, as it moves point to boundary and the inside is not well supported!
                             bool is_inside = is_inside_ex(overhang_inner, candidate);
-                            if (is_inside) { SupportNode *contact_node = insert_point(candidate, overhang,radius, false, add_interface); }
+                            if (is_inside)
+                                if (SupportNode *contact_node = insert_point(candidate, overhang, radius, false, add_interface))
+                                    contact_node->placement = SupportNode::Placement::Interior;
                         }
                     }
                 }
@@ -4359,8 +4362,10 @@ void TreeSupport::generate_contact_points()
                 is_pinned = true;
                 auto vertical_enforcer_point= pt_and_normal.first;
                 auto node=insert_point(vertical_enforcer_point, ExPolygon(), false);
-                if (node)
+                if (node) {
                     node->skin_direction = pt_and_normal.second;
+                    node->placement      = SupportNode::Placement::Enforcer;
+                }
             }
             if (!curr_nodes.empty()) nonempty_layers++;
             for (auto node : curr_nodes) { all_nodes.emplace_back(node->position(0), node->position(1), scale_(node->print_z)); }
