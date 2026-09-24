@@ -104,6 +104,25 @@ std::vector<Slab> model_slabs_of(const PrintObject &object);
 std::vector<std::vector<bool>> floating_pieces(const std::vector<Slab> &support, const std::vector<Slab> &model,
                                                bool on_build_plate_only, double bottom_gap_mm);
 
+// Where a mid-air island of the model is born and where it first meets the rooted body.
+struct IslandJoin
+{
+    size_t birth_slab = 0;
+    size_t join_slab  = 0; // the slab count when the island never joins
+};
+
+struct IslandMap
+{
+    Components             components;      // build_components' pieces, slab_range and below lists
+    std::vector<size_t>    island_of_piece; // one per piece; size_t(-1) where no island owns it
+    std::vector<IslandJoin> islands;
+};
+
+// The islands of `model_slabs` walked bottom-up: each piece with nothing below it whose connected set is
+// not yet rooted at `ground_z` starts an island, which joins at the first slab whose overlaps connect it
+// to a rooted set. A piece belongs to the oldest island still open in its set at its own slab.
+IslandMap island_joins(const std::vector<Slab> &model_slabs, double ground_z);
+
 } // namespace SupportAnalysis
 } // namespace Slic3r
 

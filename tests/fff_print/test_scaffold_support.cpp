@@ -5,6 +5,7 @@
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Support/SupportComponents.hpp"
 #include "libslic3r/Support/SupportParameters.hpp"
 
 #include <algorithm>
@@ -31,6 +32,29 @@ TriangleMesh wall_bar_fixture()
     bar.translate(0.f, -0.3f, 2.2f);
     wall.merge(bar);
     return wall;
+}
+
+// A 10 x 10 x 8 mm block at x 0..10, y 0..10 standing on the plate, and three bodies that start in mid-air at z 3:
+// cube A, 4 x 4 x 4 at x 14..18, y 3..7, z 3..7; stick B, 3 x 0.6 x 2 at x 22..25, y 4.7..5.3, z 3..5; post C,
+// 0.8 x 0.8 x 2 at x 30..30.8, y 4.6..5.4, z 3..5. A 6 x 2 x 1 bar at x 9..15, y 4..6, z 6..7 reaches into the
+// block's +x face at x 10 and cube A's -x face at x 14, so A meets the rooted block through it at z 6; B and C
+// never meet it.
+TriangleMesh islands_fixture()
+{
+    TriangleMesh block = make_cube(10., 10., 8.);
+    TriangleMesh cube  = make_cube(4., 4., 4.);
+    cube.translate(14.f, 3.f, 3.f);
+    TriangleMesh bar = make_cube(6., 2., 1.);
+    bar.translate(9.f, 4.f, 6.f);
+    TriangleMesh stick = make_cube(3., 0.6, 2.);
+    stick.translate(22.f, 4.7f, 3.f);
+    TriangleMesh post = make_cube(0.8, 0.8, 2.);
+    post.translate(30.f, 4.6f, 3.f);
+    block.merge(cube);
+    block.merge(bar);
+    block.merge(stick);
+    block.merge(post);
+    return block;
 }
 
 // A JSON config written to the OS temp directory and removed when the guard leaves scope.
@@ -147,4 +171,63 @@ TEST_CASE("A config without the scaffold keys loads with their defaults", "[Scaf
     CHECK(config.opt_enum<SupportMaterialStyle>("support_style") == smsTreeSlim);
     CHECK_THAT(config.opt_float("scaffold_bridge_length"), WithinAbs(12., 1e-9));
     CHECK_THAT(config.opt_float("scaffold_brace_slenderness"), WithinAbs(15., 1e-9));
+}
+
+TEST_CASE("Island joins name the slab each mid-air island first meets the rooted body", "[ScaffoldSupport]")
+{
+    // 8 mm at fixture_config's 0.2 mm layers and 0.2 mm first layer: 40 slabs, the three islands born at z 3.0..3.2 (slab 15).
+    Print print;
+    init_and_process_print({ islands_fixture() }, print,
+                           fixture_config({ { "enable_support", "0" },
+                                            { "printable_area", "-100x-100,100x-100,100x100,-100x100" } }));
+    REQUIRE(print.objects().size() == 1);
+    const std::vector<SupportAnalysis::Slab> slabs = SupportAnalysis::model_slabs_of(*print.objects().front());
+    REQUIRE(slabs.size() == 40);
+    const SupportAnalysis::IslandMap map = SupportAnalysis::island_joins(slabs, slabs.front().bottom_z);
+    const SupportAnalysis::Components &components = map.components;
+    REQUIRE(map.island_of_piece.size() == components.pieces.size());
+    REQUIRE(map.islands.size() == 3);
+
+    // The birth piece of each island is the piece on its birth slab that the island owns.
+    std::vector<std::pair<double, size_t>> by_x;
+    for (size_t i = 0; i < map.islands.size(); ++ i) {
+        const size_t s = map.islands[i].birth_slab;
+        for (size_t p = components.slab_range[s].first; p < components.slab_range[s].second; ++ p)
+            if (map.island_of_piece[p] == i)
+                by_x.emplace_back(SupportAnalysis::piece_middle(components.pieces[p]).x(), i);
+    }
+    REQUIRE(by_x.size() == 3);
+    std::sort(by_x.begin(), by_x.end());
+    const size_t a = by_x[0].second, b = by_x[1].second, c = by_x[2].second;
+    CHECK(map.islands[a].birth_slab == 15);
+    CHECK(map.islands[a].join_slab == 30);
+    CHECK(map.islands[b].birth_slab == 15);
+    CHECK(map.islands[b].join_slab == slabs.size());
+    CHECK(map.islands[c].birth_slab == 15);
+    CHECK(map.islands[c].join_slab == slabs.size());
+
+    // The piece of slab `s` whose outline holds `point`, or npos.
+    const auto piece_holding = [&](size_t s, const Point &point) {
+        for (size_t p = components.slab_range[s].first; p < components.slab_range[s].second; ++ p)
+            if (components.pieces[p].polygon.contains(point))
+                return p;
+        return size_t(-1);
+    };
+    REQUIRE(components.slab_range[0].second - components.slab_range[0].first == 1);
+    const Point block_middle = components.pieces[components.slab_range[0].first].polygon.contour.centroid();
+    for (size_t s = 0; s < slabs.size(); ++ s) {
+        const size_t block = piece_holding(s, block_middle);
+        REQUIRE(block != size_t(-1));
+        CHECK(map.island_of_piece[block] == size_t(-1));
+    }
+    Point a_middle;
+    for (size_t p = components.slab_range[15].first; p < components.slab_range[15].second; ++ p)
+        if (map.island_of_piece[p] == a)
+            a_middle = components.pieces[p].polygon.contour.centroid();
+    const size_t a_on_20 = piece_holding(20, a_middle);
+    REQUIRE(a_on_20 != size_t(-1));
+    CHECK(map.island_of_piece[a_on_20] == a);
+    const size_t a_on_31 = piece_holding(31, a_middle);
+    REQUIRE(a_on_31 != size_t(-1));
+    CHECK(map.island_of_piece[a_on_31] == size_t(-1));
 }

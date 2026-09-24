@@ -163,5 +163,57 @@ std::vector<std::vector<bool>> floating_pieces(const std::vector<Slab> &support,
     return floating;
 }
 
+// Slabs join bottom-up, so a set's state at slab s is what the slabs up to s connect. An island is born at a piece
+// with no piece below it whose set is not rooted at `ground_z`; it joins at the first slab whose unions root its set,
+// and one that never joins reads the slab count.
+IslandMap island_joins(const std::vector<Slab> &model_slabs, double ground_z)
+{
+    constexpr size_t npos = size_t(-1);
+    IslandMap map;
+    map.components = build_components(model_slabs, ground_z);
+    const std::vector<Piece> &pieces = map.components.pieces;
+    map.island_of_piece.assign(pieces.size(), npos);
+
+    DisjointSets        sets(pieces.size());
+    std::vector<char>   rooted(pieces.size(), 0);      // per set root
+    std::vector<size_t> birth_piece;                   // per island
+    std::vector<size_t> open;                          // islands not yet joined, ascending id
+    std::vector<size_t> oldest_open(pieces.size(), npos); // per set root, filled for one slab at a time
+    for (size_t s = 0; s < model_slabs.size(); ++ s) {
+        const auto [first, last] = map.components.slab_range[s];
+        for (size_t p = first; p < last; ++ p) {
+            if (pieces[p].bottom_z <= ground_z + EPSILON)
+                rooted[sets.find(p)] = 1;
+            for (size_t q : pieces[p].below) {
+                const char rooted_any = rooted[sets.find(p)] | rooted[sets.find(q)];
+                sets.join(p, q);
+                rooted[sets.find(p)] = rooted_any;
+            }
+        }
+        for (size_t p = first; p < last; ++ p)
+            if (pieces[p].below.empty() && ! rooted[sets.find(p)] && pieces[p].bottom_z > ground_z + EPSILON) {
+                open.push_back(map.islands.size());
+                birth_piece.push_back(p);
+                map.islands.push_back({ s, model_slabs.size() });
+            }
+        open.erase(std::remove_if(open.begin(), open.end(), [&](size_t i) {
+                       if (! rooted[sets.find(birth_piece[i])])
+                           return false;
+                       map.islands[i].join_slab = s;
+                       return true;
+                   }), open.end());
+        for (size_t i : open) {
+            size_t &oldest = oldest_open[sets.find(birth_piece[i])];
+            if (oldest == npos)
+                oldest = i;
+        }
+        for (size_t p = first; p < last; ++ p)
+            map.island_of_piece[p] = oldest_open[sets.find(p)];
+        for (size_t i : open)
+            oldest_open[sets.find(birth_piece[i])] = npos;
+    }
+    return map;
+}
+
 } // namespace SupportAnalysis
 } // namespace Slic3r
