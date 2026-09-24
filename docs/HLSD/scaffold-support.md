@@ -82,27 +82,53 @@ run for every style alike.
 
 `src/libslic3r/Support/ScaffoldSupport.{hpp,cpp}` holds one function,
 `ScaffoldSupport::draw`, that turns the contact nodes into per-layer areas and
-counts what it did with them. It runs five steps.
+counts what it did with them. It runs seven steps.
 
 1. Tip selection. Every contact node becomes a tip, except an interior contact
    (`SupportNode::Placement::Interior`) whose overhang, shrunk by half of
    `max_bridge_length`, leaves nothing: under an overhang narrower than one
    bridge span the corner and contour tips on its rim already hold it.
-2. The island hold floor. `SupportAnalysis::island_joins` maps every mid-air
+2. The wall skip. The seam clips support inside the xy distance of the model,
+   so a head whose neck stood in that band would lose its neck while its ring
+   survived. The draw reads the object layer at the neck's bottom, one head
+   width plus one toolpath width under the tip, and skips a tip whose centre
+   lies within the xy distance of that layer's slices; the wall anchors that
+   band as it does under the legacy tree. The layer just under the overhang is
+   the wrong reference: on a sloped underside every contact sits a fraction of
+   a layer past it, while a slope has receded by the neck's bottom and a wall
+   has not. A skipped tip logs `scaffold tip skipped at (x, y, z): wall` at
+   debug level and counts as neither placed nor dropped. The same test applies
+   to the dropped contacts the hold floor may restore and to the tips it
+   seeds.
+3. The island hold floor. `SupportAnalysis::island_joins` maps every mid-air
    island of the model to the slab where it first meets the rooted body. An
    island needs one tip when its unjoined height is at most 1 mm, two up to
    5 mm and three above, counted greedily from the lowest tip and only where
-   a tip stands a pillar diameter from every tip counted before it. Short of
-   the floor, the draw restores dropped contacts under the island, lowest
-   first and among equals the one furthest from the island's tips. An island
-   still short after that counts as under-held. A tip belongs to the island
-   that owns the model piece over it on the overhang's own layer, one above
-   the node's layer.
-3. Grading. A tip's head fuses to the model with a disc two support lines
+   a tip stands a pillar diameter from every tip counted before it. A
+   never-joining island's height runs to the object's top, and one whose
+   height is at most 1 mm is mesh debris: it gets no floor, no tip and no
+   count. An island with no tip and no dropped contact under it gets one tip
+   seeded at the deepest point of its birth piece, at that piece's bottom, in
+   the small grade. Short of the floor, the draw restores dropped contacts
+   under the island, lowest first and among equals the one furthest from the
+   island's tips. An island counts as under-held only when it holds fewer tips
+   than both its floor and the number its birth piece fits, the points of a
+   hexagonal grid at the pillar diameter inside the piece shrunk by half a
+   pillar diameter, never fewer than one. A tip belongs to the island that owns
+   the model piece over it on the overhang's own layer, one above the node's
+   layer.
+4. The alias merge. The front half can hand the same overhang spot on two
+   consecutive layers, and the builder keeps one point of each pair within
+   `sla::D_SP`. The draw visits the tips lowest first, among equals by seed
+   id, and merges a tip standing within `sla::D_SP` in 3-D of a tip already
+   kept into it, so no two tips it hands the builder are aliases. A merge logs
+   `scaffold tip merged at (x, y, z)` at debug level and counts as neither
+   placed nor dropped.
+5. Grading. A tip's head fuses to the model with a disc two support lines
    wide, or four where the risk field reads the model under it as known and
-   hanging off a neck at least eight lines wide. The head's pin radius is half
-   that width.
-4. The build. The draw hands the tips and the object mesh, in the frame the
+   hanging off a neck at least eight lines wide; a seeded tip keeps two. The
+   head's pin radius is half that width.
+6. The build. The draw hands the tips and the object mesh, in the frame the
    object's slices use, to `sla::SupportTreeBuildsteps::execute` with the
    configuration `tree_config` writes: head front, penetration and fallback
    radius at one toolpath width, pillar radius at half the pillar diameter,
@@ -115,7 +141,7 @@ counts what it did with them. It runs five steps.
    logs `scaffold tip dropped at (x, y, z): unrouted` or `filtered` at debug
    level. When anything routed, `SupportTreeBuilder::add_pad` adds a pad of
    the pad thickness with a 1.6 mm brim and no wall.
-5. Slicing. The draw slices cage and pad as one mesh at the middle of every
+7. Slicing. The draw slices cage and pad as one mesh at the middle of every
    planned layer into base areas. For each routed head it slices the head's
    own mesh at the tops of its top interface layer, the highest planned layer
    at or under the tip, and of the layers under it up to the interface count;
@@ -160,12 +186,16 @@ tolerates.
 
 ## Emission and removal contract
 
-The pad prints solid. `remove_floating_toolpaths` and the stability
-measurement read printed footprints, not drawn areas, so a pad with an empty
-interior would leave every pillar foot standing on nothing printed and the pass
-would strip the pillar. Every pad layer therefore takes the sheath path the
-legacy tree uses on the bed layer: rectilinear at `raft_first_layer_density`,
-with the first-layer flow on layer 0 and the support flow above.
+The pad prints infill, not hollow walls. `remove_floating_toolpaths` and the
+stability measurement read printed footprints, not drawn areas, so a pad with
+an empty interior would leave every pillar foot standing on nothing printed
+and the pass would strip the pillar. Every pad layer therefore takes the
+sheath path the legacy tree uses on the bed layer. Layer 0 prints it
+rectilinear at `raft_first_layer_density` with the first-layer flow, so the
+bed holds the pad; the pad's top layer, `TreeSupport::m_pad_layers` layers up,
+prints it at the same density with the support flow, so every foot lands on
+printed material; the pad layers between only carry the top and print it at
+half that density.
 
 Above the pad, pillars, bridges and braces print exactly as the legacy tree's
 base: walls around each area with no infill, laid by
@@ -215,10 +245,12 @@ scaffold's corpus rows carry `harness = "scaffold_support"` and go to the file
 
 `tests/fff_print/test_scaffold_support.cpp` holds the `[ScaffoldSupport]`
 cases. They cover the style and its keys in the config, the island map, the
-result row, the solid pad and wall-only base on a shelf fixture with nothing
-floating, cancellation during the build, rings printing as base without
-interface layers, a tip with no route being dropped and counted, interior tip
-thinning, the hold floor restoring contacts under tall islands, and braces on
+result row, the pad's densities and the wall-only base on a shelf fixture with
+nothing floating and no tip beside the column's wall, cancellation during the
+build, rings printing as base without interface layers, a tip with no route
+being dropped and counted, interior tip thinning, the hold floor restoring
+contacts under tall islands and capped by what a birth piece fits, a tip
+seeded under an unseeded feature start with none under debris, and braces on
 slender pillars. The SLA builder changes are covered in
 `tests/sla_print/sla_print_tests.cpp`.
 
@@ -228,6 +260,6 @@ directory holding `elf_test.3mf`. It slices plate 3's object under tree slim
 and tree scaffold, first in the stored pose and then upright, times each
 `Print::process()` and one `island_joins` call, writes one row per slice, and
 requires of each scaffold slice: dropped tips at most a tenth of those placed,
-no floating piece removed, a process time at most 1.25 times the tree-slim
-slice's, `island_joins` within 2 s and a support volume at most twice the
+no floating piece removed, a process time at most 1.5 times the tree-slim
+slice's, `island_joins` within 2 s and a support volume at most 2.5 times the
 tree-slim slice's; the upright pose also requires no under-held island.
