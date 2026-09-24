@@ -12,8 +12,11 @@
 #include "libslic3r/Support/SupportParameters.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <map>
 #include <set>
 #include <sstream>
@@ -773,4 +776,123 @@ TEST_CASE("Slender scaffold pillars get braces and unreachable ones stand unbrac
     CHECK(b.unbraced >= 1);
     CHECK(d.unbraced == 0);
     CHECK(b.volume_mm3 >= 0.98 * d.volume_mm3);
+}
+
+// Hidden ([.]): four full Print::process() passes over a 993k-facet miniature at 0.06 mm layers, minutes in
+// total, and the model lives outside the repo under $ORCA_MINIATURE_CORPUS (docs/miniature_support_validation.md).
+// It gates the style on plate 3 of the corpus against a tree-slim slice measured in the same run.
+TEST_CASE("Scaffold support over corpus plate 3 in two poses", "[ScaffoldSupport][.]")
+{
+    SupportValidation::use_os_temporary_dir();
+
+    const char *env = std::getenv("ORCA_MINIATURE_CORPUS");
+    if (env == nullptr || *env == '\0') {
+        std::cout << "corpus dir not set" << std::endl;
+        return;
+    }
+
+    SupportValidation::Manifest m;
+    m.version    = 1;
+    m.model_root = env;
+    SupportValidation::ManifestCase c;
+    c.id            = "plate3";
+    c.model         = "elf_test.3mf";
+    c.sha256        = "0252d6ebf9fa9ff0fc006404920cd41d17a2d1b3b51f6b3a08049b35fd627ed7";
+    c.selectors     = { "name:10_Dark Elves 3_test.stl" };
+    c.styles        = { "tree_slim", "tree_scaffold" };
+    c.feature_modes = { "on" };
+    c.repeats       = 1;
+
+    const char   *results = std::getenv("ORCA_SCAFFOLD_RESULTS");
+    std::ofstream file;
+    if (results != nullptr && *results != '\0') {
+        file.open(results);
+        REQUIRE(file.good());
+    }
+    std::ostream &rows = file.is_open() ? static_cast<std::ostream &>(file) : std::cout;
+
+    struct Reading { SupportValidation::Metrics metrics; double elapsed_s = 0.; double island_joins_s = 0.; };
+    std::map<std::string, std::map<std::string, Reading>> readings; // pose, then style
+    for (const std::string pose : { "stored", "upright" })
+        for (const std::string &style : c.styles) {
+            SupportValidation::CorpusObject object = SupportValidation::case_object(m, c, fixture_config({ { "support_top_z_distance", "0.2" } }), style, "on");
+            // The project's own settings carry 0.06 mm layers; the base's 0.2 means the file's config never loaded.
+            REQUIRE_THAT(object.config.opt_float("layer_height"), WithinAbs(0.06, 1e-9));
+            if (pose == "upright") {
+                for (ModelObject *mo : object.model.objects)
+                    for (ModelInstance *instance : mo->instances)
+                        instance->set_rotation(Vec3d::Zero());
+                object.model.center_instances_around_point(unscale(BoundingBox(get_bed_shape(object.config)).center()));
+                for (ModelObject *mo : object.model.objects)
+                    mo->ensure_on_bed();
+            }
+
+            Print print;
+            print.set_status_silent();
+            print.apply(object.model, object.config);
+            print.request_legacy_support_analysis();
+            const auto start = std::chrono::steady_clock::now();
+            print.process();
+            Reading &r  = readings[pose][style];
+            r.elapsed_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+
+            SupportValidation::CaseResult row;
+            row.harness      = "scaffold_support";
+            row.case_id      = c.id;
+            row.style        = style;
+            row.feature_mode = pose;
+            row.elapsed_s    = r.elapsed_s;
+            SupportValidation::read_print_analyses(print, row);
+            r.metrics = row.metrics;
+
+            if (style == "tree_scaffold") {
+                // Zero here means accumulate_metrics dropped the count on its way into the row.
+                REQUIRE(row.metrics.tips_placed > 0);
+                const auto slabs      = SupportAnalysis::model_slabs_of(*print.objects().front());
+                const auto join_start = std::chrono::steady_clock::now();
+                SupportAnalysis::island_joins(slabs, slabs.front().bottom_z);
+                r.island_joins_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - join_start).count();
+            }
+            SupportValidation::write_result(row, rows);
+            std::cout << pose << " " << style << ": tips placed " << r.metrics.tips_placed << " / routed " << r.metrics.tips_routed
+                      << " / dropped " << r.metrics.tips_dropped << ", floating removed " << r.metrics.floating_pieces_removed
+                      << ", islands under-held " << r.metrics.islands_under_held << ", pillars unbraced " << r.metrics.pillars_unbraced
+                      << ", support " << r.metrics.support_volume_mm3 << " mm3, process " << r.elapsed_s << " s, island_joins "
+                      << r.island_joins_s << " s" << std::endl;
+        }
+    if (file.is_open()) {
+        file.close();
+        REQUIRE(file.good());
+    }
+
+    // Every slice is written before any cap is read, so a failing pose still leaves all four rows behind.
+    for (const std::string pose : { "stored", "upright" }) {
+        const Reading &slim     = readings[pose]["tree_slim"];
+        const Reading &scaffold = readings[pose]["tree_scaffold"];
+        INFO("pose " << pose);
+        {
+            INFO("tips dropped " << scaffold.metrics.tips_dropped << " of " << scaffold.metrics.tips_placed << " placed");
+            REQUIRE(scaffold.metrics.tips_dropped <= scaffold.metrics.tips_placed / 10);
+        }
+        {
+            INFO("floating pieces removed " << scaffold.metrics.floating_pieces_removed << " (tree slim " << slim.metrics.floating_pieces_removed << ")");
+            REQUIRE(scaffold.metrics.floating_pieces_removed == 0);
+        }
+        {
+            INFO("process wall " << scaffold.elapsed_s << " s against tree slim " << slim.elapsed_s << " s");
+            REQUIRE(scaffold.elapsed_s <= 1.25 * slim.elapsed_s);
+        }
+        {
+            INFO("island_joins " << scaffold.island_joins_s << " s against a 2.0 s cap");
+            REQUIRE(scaffold.island_joins_s <= 2.0);
+        }
+        {
+            INFO("support " << scaffold.metrics.support_volume_mm3 << " mm3 against tree slim " << slim.metrics.support_volume_mm3 << " mm3");
+            REQUIRE(scaffold.metrics.support_volume_mm3 <= 2.0 * slim.metrics.support_volume_mm3);
+        }
+        if (pose == "upright") {
+            INFO("islands under-held " << scaffold.metrics.islands_under_held);
+            REQUIRE(scaffold.metrics.islands_under_held == 0);
+        }
+    }
 }
