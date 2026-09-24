@@ -2122,6 +2122,17 @@ TEST_CASE("The affected instances resolve one support generator or report a mixe
         const AutoTilt::EvaluationInput input = plate_input(model, fixture_config({ { "support_style", "tree_slim" } }), affected);
         REQUIRE(AutoTilt::affected_support_generator(input) == AutoTilt::SupportGenerator::Legacy);
     }
+    SECTION("a scaffold style resolves to Scaffold") {
+        const AutoTilt::EvaluationInput input = plate_input(model, fixture_config({ { "support_style", "tree_scaffold" } }), affected);
+        REQUIRE(AutoTilt::affected_support_generator(input) == AutoTilt::SupportGenerator::Scaffold);
+    }
+    SECTION("a scaffold copy beside a legacy copy is a mixed operation") {
+        AutoTilt::EvaluationInput input = plate_input(model, fixture_config({ { "support_style", "tree_scaffold" } }), affected);
+        input.plates.push_back(input.plates.front());
+        input.plates.back().plate_index = 1;
+        input.plates.back().full_config = fixture_config({ { "support_style", "tree_slim" } });
+        REQUIRE(AutoTilt::affected_support_generator(input) == AutoTilt::SupportGenerator::Mixed);
+    }
     SECTION("an object override outranks the plate config") {
         Slic3r::Model overridden = model;
         overridden.objects.front()->config.set_key_value("support_style", new ConfigOptionEnum<SupportMaterialStyle>(smsTreeOrganic));

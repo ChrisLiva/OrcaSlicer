@@ -64,7 +64,10 @@ SupportGenerator support_generator_of(const PrintObject &object)
     if (! object.config().enable_support.value || ! is_tree(object.config().support_type.value) ||
         object.num_printing_regions() == 0)
         return SupportGenerator::Unknown;
-    return SupportParameters(object).support_style == smsTreeOrganic ? SupportGenerator::Organic : SupportGenerator::Legacy;
+    const SupportMaterialStyle style = SupportParameters(object).support_style;
+    if (style == smsTreeOrganic)
+        return SupportGenerator::Organic;
+    return style == smsTreeScaffold ? SupportGenerator::Scaffold : SupportGenerator::Legacy;
 }
 
 // The print object one posed instance ended up in, and which of that object's copies it is. Matched

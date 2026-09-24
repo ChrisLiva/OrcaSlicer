@@ -110,8 +110,9 @@ bool pose_admissible(const EvaluationInput &input, const Pose &pose);
 // affected instances disagree, and an operation whose instances disagree is one no single search
 // answers for: a verified legacy answer cannot be claimed for the Organic ones, and rotating only
 // some of them is not an option because one pose moves every instance of the object at once. Unknown
-// says at least one affected instance runs no tree support at all, or could not be resolved.
-enum class SupportGenerator { Legacy, Organic, Mixed, Unknown };
+// says at least one affected instance runs no tree support at all, or could not be resolved. Scaffold
+// is a tree style the evaluation does not run.
+enum class SupportGenerator { Legacy, Organic, Mixed, Unknown, Scaffold };
 
 // Main thread: this applies each captured plate to a throwaway Print, which hands out ObjectIDs.
 SupportGenerator affected_support_generator(const EvaluationInput &input);

@@ -464,6 +464,10 @@ bool AutoTiltJob::prepare(Plater &plater)
         push_result(_u8L("Auto-tilt needs tree supports to be enabled."));
         return false;
     }
+    if (m_generator == AutoTilt::SupportGenerator::Scaffold) {
+        push_result(_u8L("Auto-tilt cannot verify this object: Tree Scaffold support is not evaluated."));
+        return false;
+    }
 
     const std::vector<AutoTilt::Pose> all = AutoTilt::grid(m_k);
     m_total_poses                         = all.size();

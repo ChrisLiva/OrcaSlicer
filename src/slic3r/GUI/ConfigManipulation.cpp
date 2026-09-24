@@ -568,7 +568,7 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
         auto   support_type = config->opt_enum<SupportType>("support_type");
         auto   support_style = config->opt_enum<SupportMaterialStyle>("support_style");
         std::set<int> enum_set_normal = { smsDefault, smsGrid, smsSnug };
-        std::set<int> enum_set_tree   = { smsDefault, smsTreeSlim, smsTreeStrong, smsTreeHybrid, smsTreeOrganic };
+        std::set<int> enum_set_tree   = { smsDefault, smsTreeSlim, smsTreeStrong, smsTreeHybrid, smsTreeOrganic, smsTreeScaffold };
         auto &           set             = is_tree(support_type) ? enum_set_tree : enum_set_normal;
         if (set.find(support_style) == set.end()) {
             DynamicPrintConfig new_conf = *config;
@@ -944,13 +944,17 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
 
     bool support_is_tree = config->opt_bool("enable_support") && is_tree(support_type);
     bool support_is_organic = support_is_tree && (support_style == smsTreeOrganic || support_style == smsDefault);
-    bool support_is_normal_tree = support_is_tree && !support_is_organic;
+    bool support_is_scaffold = support_is_tree && support_style == smsTreeScaffold;
+    bool support_is_normal_tree = support_is_tree && !support_is_organic && !support_is_scaffold;
 
     // hide settings that are not used by tree supports
     toggle_line("support_threshold_overlap", !support_is_tree); // ORCA: tree supports do not use Threshold Overlap
     // settings specific to normal trees
-    for (auto el : {"tree_support_branch_angle", "tree_support_branch_distance", "tree_support_branch_diameter", "tree_support_auto_brim", "tree_support_brim_width"})
+    for (auto el : {"tree_support_branch_angle", "tree_support_branch_distance", "tree_support_auto_brim", "tree_support_brim_width"})
         toggle_line(el, support_is_normal_tree);
+    toggle_line("tree_support_branch_diameter", support_is_normal_tree || support_is_scaffold);
+    for (auto el : {"scaffold_bridge_length", "scaffold_brace_slenderness"})
+        toggle_line(el, support_is_scaffold);
     // settings specific to organic trees
     for (auto el : {"tree_support_branch_angle_organic", "tree_support_branch_distance_organic", "tree_support_branch_diameter_organic", "tree_support_angle_slow", "tree_support_tip_diameter", "tree_support_top_rate", "tree_support_branch_diameter_angle"})
         toggle_line(el, support_is_organic);
@@ -963,9 +967,13 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
     toggle_line("max_bridge_length", support_is_tree);
     toggle_line("bridge_no_support", !support_is_tree);
     toggle_line("support_critical_regions_only", is_auto(support_type) && support_is_tree);
-    toggle_line("support_miniature_contacts", is_auto(support_type) && support_is_normal_tree);
-    toggle_line("support_contact_min_distance", is_auto(support_type) && support_is_normal_tree);
-    toggle_field("support_contact_min_distance", have_support_material && config->opt_bool("support_miniature_contacts"));
+    toggle_line("support_miniature_contacts", is_auto(support_type) && (support_is_normal_tree || support_is_scaffold));
+    toggle_line("support_contact_min_distance", is_auto(support_type) && (support_is_normal_tree || support_is_scaffold));
+    // Scaffold overrides follow the blanket have_support_material loop above so they win over it.
+    toggle_field("support_miniature_contacts", have_support_material && !support_is_scaffold);
+    toggle_field("support_contact_min_distance", have_support_material && (config->opt_bool("support_miniature_contacts") || support_is_scaffold));
+    toggle_field("support_top_z_distance", have_support_material && !support_is_scaffold);
+    toggle_field("support_on_build_plate_only", have_support_material && !support_is_scaffold);
 
     for (auto el : { "support_interface_filament",
         "support_interface_loop_pattern", "support_bottom_interface_spacing" })
