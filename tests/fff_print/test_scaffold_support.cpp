@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
 
@@ -103,6 +104,63 @@ void collect_entities(const ExtrusionEntityCollection &collection, std::vector<c
             collect_entities(*static_cast<const ExtrusionEntityCollection *>(e), out);
         else
             out.push_back(e);
+}
+
+// What a support layer's extrusions of `role` cover, as one union.
+ExPolygons role_footprint(const SupportLayer &sl, ExtrusionRole role)
+{
+    std::vector<const ExtrusionEntity *> entities;
+    collect_entities(sl.support_fills, entities);
+    Polygons covered;
+    for (const ExtrusionEntity *e : entities)
+        if (e->role() == role)
+            e->polygons_covered_by_width(covered, 0.f);
+    return union_ex(covered);
+}
+
+// The highest support layer whose top is at or under `z`, or npos.
+template<class Layers> size_t top_layer_under(const Layers &layers, double z)
+{
+    size_t found = size_t(-1);
+    for (size_t i = 0; i < layers.size(); ++ i)
+        if (layers[i]->print_z <= z + EPSILON)
+            found = i;
+    return found;
+}
+
+// A rectangle given in the fixture's own mm, placed in the object's centred frame. `origin` is where the fixture's
+// point (0, 0) landed.
+struct FixtureBox
+{
+    Point  origin;
+    double x0, y0, x1, y1;
+
+    bool contains(const Point &p) const
+    {
+        const Vec2d q = (p - origin).cast<double>() * SCALING_FACTOR;
+        return q.x() >= x0 && q.x() <= x1 && q.y() >= y0 && q.y() <= y1;
+    }
+    Polygon polygon() const
+    {
+        Polygon poly({ Point::new_scale(x0, y0), Point::new_scale(x1, y0), Point::new_scale(x1, y1), Point::new_scale(x0, y1) });
+        poly.translate(origin);
+        return poly;
+    }
+};
+
+// A 40 x 40 x 4 mm block, a 4 x 4 x 10 mm post on it at x 18..22, y 0..4, z 4..14, and a 4 x 40 x 2 mm lip off the
+// post's top at x 18..22, y 0..40, z 12..14: the lip's underside hangs 8 mm over the block, which reaches 18 mm past
+// it on both x sides, so a tip under the lip's middle has no ground within the 12 mm scaffold bridge length.
+TriangleMesh blocked_lip_fixture()
+{
+    TriangleMesh block = make_cube(40., 40., 4.);
+    TriangleMesh post  = make_cube(4., 4., 10.);
+    post.translate(18.f, 0.f, 4.f);
+    TriangleMesh lip = make_cube(4., 40., 2.);
+    lip.translate(18.f, 0.f, 12.f);
+    block.merge(post);
+    block.merge(lip);
+    return block;
 }
 
 // A JSON config written to the OS temp directory and removed when the guard leaves scope.
@@ -335,18 +393,18 @@ TEST_CASE("A scaffold on the shelf fixture prints a solid pad and clear base wal
     CHECK(report.seeds_candidate > 0);
     CHECK_THAT(object.emitted_support()->top_gap_mm, WithinAbs(0., 1e-9));
 
-    // Every support extrusion is base material, and the pad's first layer joins the slices the skirt reads.
+    // Every support extrusion is base or interface material, and the pad's first layer joins the slices the skirt reads.
     const auto layers = object.support_layers();
     REQUIRE(layers.size() > 0);
     CHECK_FALSE(layers.front()->lslices.empty());
+    std::set<ExtrusionRole> roles;
     for (const SupportLayer *sl : layers) {
         std::vector<const ExtrusionEntity *> entities;
         collect_entities(sl->support_fills, entities);
-        for (const ExtrusionEntity *e : entities) {
-            INFO("print_z " << sl->print_z);
-            CHECK(e->role() == erSupportMaterial);
-        }
+        for (const ExtrusionEntity *e : entities)
+            roles.insert(e->role());
     }
+    CHECK(roles == std::set<ExtrusionRole>{ erSupportMaterial, erSupportMaterialInterface });
 
     // What each support layer's extrusions cover.
     const auto footprint = [](const SupportLayer &sl) { return union_ex(sl.support_fills.polygons_covered_by_width(0.f)); };
@@ -383,7 +441,8 @@ TEST_CASE("A scaffold on the shelf fixture prints a solid pad and clear base wal
     CHECK(box_top.max.x() - box_above.max.x() >= scale_(1.4));
     CHECK(box_top.max.y() - box_above.max.y() >= scale_(1.4));
 
-    // Nothing printed comes within the xy distance of the model at its own height, and all of it is on the bed.
+    // No base comes within the xy distance of the model at its own height, and all of it is on the bed. The
+    // interface fuses to the model and is held to not entering it further down.
     const Point shift = object.instances().front().shift;
     for (const SupportLayer *sl : layers) {
         ExPolygons model;
@@ -392,7 +451,7 @@ TEST_CASE("A scaffold on the shelf fixture prints a solid pad and clear base wal
                 append(model, layer->lslices);
         const ExPolygons printed = footprint(*sl);
         INFO("print_z " << sl->print_z);
-        CHECK(intersection_ex(printed, offset_ex(union_ex(model), scale_(0.35 - 0.02))).empty());
+        CHECK(intersection_ex(role_footprint(*sl, erSupportMaterial), offset_ex(union_ex(model), scale_(0.35 - 0.02))).empty());
         for (const ExPolygon &poly : printed) {
             BoundingBox box = get_extents(poly);
             box.translate(shift);
@@ -424,6 +483,74 @@ TEST_CASE("A scaffold on the shelf fixture prints a solid pad and clear base wal
     }
     CHECK(reaches_inside(*layers[1]) > 0);
 
+    // Each tip fuses to its overhang through a ring of interface on the three layers under it: the highest layer
+    // whose top reaches the tip and the two below, and the layer under those carries none. A tip on the bar's 0.6 mm
+    // neck reads the small grade, two lines across, and a tip on the slab's 6 mm neck the large one, four lines.
+    // The column's first layer places the fixture in the object's centred frame.
+    const Point      origin    = get_extents(object.layers().front()->lslices).min;
+    const FixtureBox bar_strip { origin, 6., 2.4, 12., 3.6 };
+    const FixtureBox slab_box  { origin, 6., -3., 18., 9. };
+    // A disc's width is the diameter of the largest circle its outer contour inscribes; holes are ignored on purpose,
+    // since a printed disc is a ring. The inscribed circle is one disc's whatever fused with it, and a tilted head's
+    // slice, an ellipse along the tilt, inscribes its short axis, the sphere chord the grade sets. The contour is
+    // closed by half a line width first: the line ends notch it, and a notch shrinks the circle a whole disc holds.
+    struct Disc { double width_mm, box_min_mm, box_max_mm; Point centroid; };
+    const auto discs = [w](const SupportLayer &sl) {
+        std::vector<Disc> out;
+        for (const ExPolygon &poly : role_footprint(sl, erSupportMaterialInterface)) {
+            const BoundingBox box    = get_extents(poly.contour);
+            const Polygons    closed = offset(offset(poly.contour, scale_(0.5 * w)), -scale_(0.5 * w));
+            double lo = 0., hi = 0.5 * unscale<double>(std::max(box.size().x(), box.size().y()));
+            for (int i = 0; i < 24; ++ i) {
+                const double mid = 0.5 * (lo + hi);
+                (offset(closed, -scale_(mid)).empty() ? hi : lo) = mid;
+            }
+            out.push_back({ 2. * lo, unscale<double>(std::min(box.size().x(), box.size().y())),
+                            unscale<double>(std::max(box.size().x(), box.size().y())), poly.contour.centroid() });
+        }
+        return out;
+    };
+    const auto rings_under = [&](double tip_z, const FixtureBox &region, const FixtureBox *excluded, double min_w, double max_w) {
+        const size_t top = top_layer_under(layers, tip_z);
+        REQUIRE(top != size_t(-1));
+        REQUIRE(top >= 3);
+        for (size_t k = 0; k < 4; ++ k) {
+            const SupportLayer &sl = *layers[top - k];
+            INFO("tip z " << tip_z << " layer " << k << " under the tip, print_z " << sl.print_z);
+            size_t in_region = 0, graded = 0;
+            for (const Disc &disc : discs(sl)) {
+                INFO("disc inscribes " << disc.width_mm << " mm, bounding box " << disc.box_min_mm << " x " << disc.box_max_mm << " mm");
+                if (! region.contains(disc.centroid))
+                    continue;
+                ++ in_region;
+                if (k == 0 && ! (excluded != nullptr && excluded->contains(disc.centroid))) {
+                    ++ graded;
+                    CHECK(disc.width_mm >= min_w);
+                    CHECK(disc.width_mm <= max_w);
+                }
+            }
+            if (k < 3)
+                CHECK(in_region > 0);
+            else
+                CHECK(in_region == 0);
+            if (k == 0)
+                CHECK(graded > 0);
+        }
+    };
+    rings_under(4., bar_strip, nullptr, 1.8 * w, 2.2 * w);
+    rings_under(12., slab_box, &bar_strip, 3.4 * w, 4.2 * w);
+
+    // The interface fuses to the model but never enters it. What its extrusions cover reaches under 0.04 mm past
+    // the drawn area.
+    for (const SupportLayer *sl : layers) {
+        ExPolygons model;
+        for (const Layer *layer : object.layers())
+            if (std::min(layer->print_z, sl->print_z) - std::max(layer->bottom_z(), sl->print_z - sl->height) > EPSILON)
+                append(model, layer->lslices);
+        INFO("print_z " << sl->print_z);
+        CHECK(intersection_ex(role_footprint(*sl, erSupportMaterialInterface), offset_ex(union_ex(model), -scale_(0.05))).empty());
+    }
+
     // The cage roots on the plate and the floating pass finds nothing to take out of it.
     CHECK(report.floating_pieces_removed == 0);
     CHECK(report.stability.unsupported_paths == 0);
@@ -453,4 +580,36 @@ TEST_CASE("A cancel during the scaffold build throws and leaves no support layer
     });
     REQUIRE_THROWS_AS(print.process(), CanceledException);
     REQUIRE(print.objects().front()->support_layers().empty());
+}
+
+TEST_CASE("With no interface layers the tip layers print as base", "[ScaffoldSupport]")
+{
+    Print print;
+    init_and_process_print({ shelf_fixture() }, print, scaffold_config({ { "support_interface_top_layers", "0" } }));
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    const auto         layers = object.support_layers();
+    REQUIRE(layers.size() > 0);
+    for (const SupportLayer *sl : layers) {
+        INFO("print_z " << sl->print_z);
+        CHECK(role_footprint(*sl, erSupportMaterialInterface).empty());
+    }
+    const size_t top = top_layer_under(layers, 4.);
+    REQUIRE(top != size_t(-1));
+    const FixtureBox bar_strip { get_extents(object.layers().front()->lslices).min, 6., 2.4, 12., 3.6 };
+    CHECK_FALSE(intersection_ex(role_footprint(*layers[top], erSupportMaterial), ExPolygons{ ExPolygon(bar_strip.polygon()) }).empty());
+}
+
+TEST_CASE("A tip with no path to the pad is dropped and counted", "[ScaffoldSupport]")
+{
+    Print print;
+    init_and_process_print({ blocked_lip_fixture() }, print, scaffold_config());
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    REQUIRE(object.support_analysis() != nullptr);
+    const SupportAnalysis::Report &report = *object.support_analysis();
+    INFO("tips placed " << report.tips_placed << " routed " << report.tips_routed << " dropped " << report.tips_dropped);
+    CHECK(report.tips_dropped >= 1);
+    CHECK(report.tips_placed == report.tips_routed + report.tips_dropped);
+    CHECK(report.floating_pieces_removed == 0);
 }
