@@ -470,6 +470,8 @@ set(lisbslic3r_sources
     Support/SupportCommon.hpp
     Support/SupportComponents.cpp
     Support/SupportComponents.hpp
+    Support/ScaffoldSupport.cpp
+    Support/ScaffoldSupport.hpp
     Support/SupportLayer.hpp
     Support/SupportMaterial.cpp
     Support/SupportMaterial.hpp

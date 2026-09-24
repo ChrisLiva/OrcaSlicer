@@ -15,6 +15,7 @@
 #include "SVG.hpp"
 #include "TreeSupportCommon.hpp"
 #include "TreeSupport.hpp"
+#include "ScaffoldSupport.hpp"
 #include "DisjointSets.hpp"
 #include "TreeSupport3D.hpp"
 #include <libnest2d/backends/libslic3r/geometries.hpp>
@@ -122,6 +123,9 @@ enum TreeSupportStage {
     STAGE_MEASURE,
     STAGE_BUILD_REGIONS,
     STAGE_BUILD_CONTACT_SEEDS,
+    STAGE_ISLAND_JOINS,
+    STAGE_SCAFFOLD_BUILD,
+    STAGE_SCAFFOLD_SLICE,
     STAGE_total,
     NUM_STAGES
 };
@@ -188,7 +192,10 @@ public:
             << "; STAGE_SELECT_CONTACTS: " << stage_durations[STAGE_SELECT_CONTACTS]
             << "; STAGE_MEASURE: " << stage_durations[STAGE_MEASURE]
             << "; STAGE_BUILD_REGIONS: " << stage_durations[STAGE_BUILD_REGIONS]
-            << "; STAGE_BUILD_CONTACT_SEEDS: " << stage_durations[STAGE_BUILD_CONTACT_SEEDS];
+            << "; STAGE_BUILD_CONTACT_SEEDS: " << stage_durations[STAGE_BUILD_CONTACT_SEEDS]
+            << "; STAGE_ISLAND_JOINS: " << stage_durations[STAGE_ISLAND_JOINS]
+            << "; STAGE_SCAFFOLD_BUILD: " << stage_durations[STAGE_SCAFFOLD_BUILD]
+            << "; STAGE_SCAFFOLD_SLICE: " << stage_durations[STAGE_SCAFFOLD_SLICE];
 
         return ss.str();
     }
@@ -691,7 +698,7 @@ std::vector<ExPolygons> TreeSupport::remove_floating_toolpaths()
         slab_layer.push_back(i);
     }
     const std::vector<std::vector<bool>> floating = SupportAnalysis::floating_pieces(
-        slabs, SupportAnalysis::model_slabs_of(*m_object), m_object_config->support_on_build_plate_only.value,
+        slabs, SupportAnalysis::model_slabs_of(*m_object), m_scaffold || m_object_config->support_on_build_plate_only.value,
         std::max(0., m_object_config->support_bottom_z_distance.value));
 
     for (size_t s = 0; s < slabs.size(); ++ s) {
@@ -785,10 +792,14 @@ TreeSupport::TreeSupport(PrintObject& object, const SlicingParameters &slicing_p
     diameter_angle_scale_factor              = std::clamp<double>(m_object_config->tree_support_branch_diameter_angle * M_PI / 180., 0., 0.5 * M_PI - EPSILON);
     is_slim                                  = is_tree_slim(support_type, m_support_params.support_style);
     is_strong = is_tree(support_type) && m_support_params.support_style == smsTreeStrong;
+    m_scaffold                               = m_support_params.support_style == smsTreeScaffold;
     base_radius                              = std::max(MIN_BRANCH_RADIUS, m_object_config->tree_support_branch_diameter.value / 2);
     // Legacy tree styles only: the organic generator reaches detect_overhangs() too, and the mode
     // must not shift organic geometry.
     miniature_contacts                       = m_object_config->support_miniature_contacts.value && m_support_params.support_style != smsTreeOrganic;
+    // The scaffold runs the miniature front half whatever the checkbox says.
+    if (m_scaffold)
+        miniature_contacts = true;
     // The detector's overhang threshold, hoisted out of detect_overhangs so the required regions can
     // reuse it as the band-gap angle. Assigned unconditionally: detect_overhangs runs with the mode off too,
     // and a 0 here would divide lower_layer_offset by tan(0.).
@@ -817,6 +828,9 @@ TreeSupport::TreeSupport(PrintObject& object, const SlicingParameters &slicing_p
     m_machine_border.translate(Point(scale_(plate_offset(0)), scale_(plate_offset(1))) - m_object->instances().front().shift);
     top_z_distance                            = m_object_config->support_top_z_distance.value;
     if (top_z_distance > EPSILON) top_z_distance = std::max(top_z_distance, float(m_slicing_params.min_layer_height));
+    // A scaffold tip fuses to the model: no gap under the overhang.
+    if (m_scaffold)
+        top_z_distance = 0.f;
 #ifdef SUPPORT_TREE_DEBUG_TO_SVG
     SVG svg(debug_out_path("machine_boarder.svg"), m_object->bounding_box());
     if (svg.is_opened()) svg.draw(m_machine_border, "yellow");
@@ -1752,17 +1766,20 @@ void TreeSupport::generate_toolpaths()
                     else {
                         // base_areas
                         bool support_base_on_bed = (layer_id == 0 && m_raft_layers == 0);
+                        // A scaffold pad layer prints solid like the bed layer, or the pillar feet standing on it
+                        // would overlap nothing printed.
+                        const bool solid_base = support_base_on_bed || area_group.pad;
                         Flow flow = support_base_on_bed ? m_support_params.first_layer_flow : support_flow;
                         bool need_infill = with_infill;
                         if(m_object_config->support_base_pattern==smpDefault)
                             need_infill &= area_group.need_infill;
                         // Orca: Use rectilinear for support base on the bed
-                        const InfillPattern base_fill_pattern = support_base_on_bed ? ipRectilinear : m_support_params.base_fill_pattern;
+                        const InfillPattern base_fill_pattern = solid_base ? ipRectilinear : m_support_params.base_fill_pattern;
                         std::shared_ptr<Fill> filler_support = std::shared_ptr<Fill>(Fill::new_from_type(base_fill_pattern));
                         filler_support->set_bounding_box(bbox_object);
 
                         filler_support->spacing =
-                            support_base_on_bed ?
+                            solid_base ?
                             flow.spacing() : // Orca: On the bed-contacting support base layer, use first-layer flow spacing directly.
                             support_spacing * support_density; // constant spacing to align support infill lines
                         filler_support->angle = Geometry::deg2rad(object_config.support_angle.value);
@@ -1772,7 +1789,7 @@ void TreeSupport::generate_toolpaths()
                         std::unique_ptr<ExtrusionEntityCollection> base_eec = std::make_unique<ExtrusionEntityCollection>();
                         base_eec->no_sort = true;
                         ExtrusionEntitiesPtr &base_dst = base_eec->entities;
-                        if (layer_id == 0) {
+                        if (layer_id == 0 || area_group.pad) {
                             float density = float(m_object_config->raft_first_layer_density.value * 0.01);
                             fill_expolygons_with_sheath_generate_paths(base_dst, loops, filler_support.get(), density, erSupportMaterial, flow,
                                                                        m_support_params, true, false);
@@ -1978,19 +1995,109 @@ void TreeSupport::generate()
 
     m_ts_data->layer_heights = plan_layer_heights();
 
-    //Drop nodes to lower layers.
-    profiler.stage_start(STAGE_DROP_DOWN_NODES);
-    m_object->print()->set_status(60, _u8L("Generating support"));
-    drop_nodes();
-    profiler.stage_finish(STAGE_DROP_DOWN_NODES);
+    // What the scaffold did with its tips, for the report below. Zero under every other style.
+    ScaffoldSupport::Counts scaffold_counts;
+    if (m_scaffold) {
+        // The scaffold's body is the SLA support tree built on the object mesh and sliced into the planned
+        // layers; drop_nodes, smooth_nodes and draw_circles do not run.
+        const std::vector<LayerHeightData> &plan = m_ts_data->layer_heights;
+        ScaffoldSupport::Params params;
+        params.toolpath_width_mm    = toolpath_support_width(m_support_params, *m_print_config, *m_object_config);
+        params.pillar_diameter_mm   = m_object_config->tree_support_branch_diameter.value;
+        params.xy_distance_mm       = m_ts_data->m_xy_distance;
+        params.bridge_length_mm     = m_object_config->scaffold_bridge_length.value;
+        params.brace_slenderness    = m_object_config->scaffold_brace_slenderness.value;
+        params.max_bridge_length_mm = m_object_config->max_bridge_length.value;
+        // 0.6 mm rounded up to whole planned layers.
+        params.pad_thickness_mm     = plan.empty() ? 0. : plan.back().print_z;
+        for (const LayerHeightData &layer : plan)
+            if (layer.print_z >= 0.6 - EPSILON) {
+                params.pad_thickness_mm = layer.print_z;
+                break;
+            }
+        params.z_offset_mm          = m_slicing_params.object_print_z_min;
+        params.interface_layers     = m_support_params.num_top_interface_layers;
 
-    smooth_nodes();// , tree_support_3d_config);
+        m_object->print()->set_status(60, _u8L("Generating support"));
+        const ScaffoldSupport::Output out = ScaffoldSupport::draw(*m_object, contact_nodes, m_dropped_contacts, plan, m_risk, params,
+                                                                  throw_on_cancel);
+        profiler.stage_durations[STAGE_ISLAND_JOINS]   = out.stage_ms.island_joins;
+        profiler.stage_durations[STAGE_SCAFFOLD_BUILD] = out.stage_ms.build;
+        profiler.stage_durations[STAGE_SCAFFOLD_SLICE] = out.stage_ms.slice;
+        scaffold_counts = out.counts;
 
-    //Generate support areas.
-    profiler.stage_start(STAGE_DRAW_CIRCLES);
-    m_object->print()->set_status(65, _u8L("Generating support"));
-    draw_circles();
-    profiler.stage_finish(STAGE_DRAW_CIRCLES);
+        const size_t      brim_skirt_layers = brim_skirt_layer_count();
+        std::vector<char> filled(plan.size(), 0);
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, plan.size()), [&](const tbb::blocked_range<size_t> &range) {
+            for (size_t i = range.begin(); i < range.end(); ++ i) {
+                SupportLayer  *ts_layer = m_object->get_support_layer(int(i + m_raft_layers));
+                const coordf_t print_z  = plan[i].print_z;
+                const coordf_t bottom_z = plan[i].print_z - plan[i].height;
+                ts_layer->print_z = print_z;
+                ts_layer->height  = plan[i].height;
+                // The model over the layer's whole height, clearance first, then the bottom gap and the bed.
+                ExPolygons model;
+                for (const Layer *layer : m_object->layers())
+                    if (std::min(layer->print_z, print_z) - std::max(layer->bottom_z(), bottom_z) > EPSILON)
+                        append(model, layer->lslices);
+                model = union_ex(model);
+                ExPolygons base = diff_ex(out.layers[i].base, offset_ex(model, scale_(m_ts_data->m_xy_distance)));
+                base = intersection_ex(diff_ex(base, get_trim_support_regions(*m_object, ts_layer, 0., m_slicing_params.gap_object_support, 0)),
+                                       m_machine_border);
+                ExPolygons interface_ = diff_ex(out.layers[i].interface_, model);
+                base = diff_ex(base, interface_);
+                if (base.empty() && interface_.empty()) {
+                    ts_layer->print_z = 0.;
+                    ts_layer->height  = 0.;
+                    continue;
+                }
+                ts_layer->base_areas     = std::move(base);
+                ts_layer->roof_1st_layer = std::move(interface_);
+                auto &area_groups = ts_layer->area_groups;
+                for (ExPolygon &expoly : ts_layer->base_areas) {
+                    area_groups.emplace_back(&expoly, SupportLayer::BaseType, 10000);
+                    area_groups.back().need_infill = false;
+                    area_groups.back().pad         = i < out.pad_layers;
+                }
+                for (ExPolygon &expoly : ts_layer->roof_1st_layer) {
+                    area_groups.emplace_back(&expoly, SupportLayer::Roof1stLayer, 0);
+                    area_groups.back().interface_as_base = false;
+                }
+                finish_layer_areas(ts_layer, i, brim_skirt_layers);
+                filled[i] = 1;
+            }
+        });
+        normalize_interface_ids();
+
+        // The layers the measurement reads the printed footprints of. The scaffold attributes no area to a seed.
+        m_emitted.layers.clear();
+        m_emitted.top_gap_mm          = 0.;
+        m_emitted.max_layer_height_mm = 0.;
+        for (size_t i = 0; i < plan.size(); ++ i) {
+            m_emitted.max_layer_height_mm = std::max(m_emitted.max_layer_height_mm, double(plan[i].height));
+            if (! filled[i])
+                continue;
+            SupportAnalysis::EmittedLayer emitted_layer;
+            emitted_layer.print_z  = plan[i].print_z;
+            emitted_layer.bottom_z = plan[i].print_z - plan[i].height;
+            m_emitted.layers.emplace_back(std::move(emitted_layer));
+        }
+        erase_empty_support_layers();
+    } else {
+        //Drop nodes to lower layers.
+        profiler.stage_start(STAGE_DROP_DOWN_NODES);
+        m_object->print()->set_status(60, _u8L("Generating support"));
+        drop_nodes();
+        profiler.stage_finish(STAGE_DROP_DOWN_NODES);
+
+        smooth_nodes();// , tree_support_3d_config);
+
+        //Generate support areas.
+        profiler.stage_start(STAGE_DRAW_CIRCLES);
+        m_object->print()->set_status(65, _u8L("Generating support"));
+        draw_circles();
+        profiler.stage_finish(STAGE_DRAW_CIRCLES);
+    }
 
 
 
@@ -2030,6 +2137,19 @@ void TreeSupport::generate()
         report.seeds_restored  = seeds_restored;
         report.seeds_retained  = seeds_retained;
         report.floating_pieces_removed = m_floating_pieces_removed;
+        if (m_scaffold) {
+            // The scaffold files no attributed areas, so the coverage the measurement derived from them is
+            // not a reading of anything: every seed would read missing and the report Complete.
+            report.status             = SupportAnalysis::Report::Status::Unknown;
+            report.coverage_available = false;
+            report.coverage.clear();
+            report.missing_anchor_ids.clear();
+            report.tips_placed        = scaffold_counts.tips_placed;
+            report.tips_routed        = scaffold_counts.tips_routed;
+            report.tips_dropped       = scaffold_counts.tips_dropped;
+            report.islands_under_held = scaffold_counts.islands_under_held;
+            report.pillars_unbraced   = scaffold_counts.pillars_unbraced;
+        }
         m_object->set_support_analysis(std::make_shared<const SupportAnalysis::Report>(std::move(report)));
     }
     profiler.stage_finish(STAGE_MEASURE);

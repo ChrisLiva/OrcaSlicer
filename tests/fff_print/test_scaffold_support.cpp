@@ -1,5 +1,7 @@
 #include <catch2/catch_all.hpp>
 
+#include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Preset.hpp"
@@ -60,6 +62,47 @@ TriangleMesh islands_fixture()
     block.merge(stick);
     block.merge(post);
     return block;
+}
+
+// A 6 x 6 x 14 mm column at x 0..6, y 0..6 carrying a 6 x 0.6 x 1 mm bar off its +x face at x 6..12, y 2.7..3.3,
+// z 4..5 (a 0.6 mm neck) and a 12 x 12 x 2 mm slab off its top at x 6..18, y -3..9, z 12..14 (a 6 mm neck where it
+// meets the column).
+TriangleMesh shelf_fixture()
+{
+    TriangleMesh column = make_cube(6., 6., 14.);
+    TriangleMesh bar    = make_cube(6., 0.6, 1.);
+    bar.translate(6.f, 2.7f, 4.f);
+    TriangleMesh slab = make_cube(12., 12., 2.);
+    slab.translate(6.f, -3.f, 12.f);
+    column.merge(bar);
+    column.merge(slab);
+    return column;
+}
+
+// The config every scaffold journey slices under. The miniature checkbox and plate-only rooting are off, so what
+// the style forces on is the style's own doing. The printable area is centred because init_print leaves the
+// instance on the origin.
+DynamicPrintConfig scaffold_config(std::initializer_list<ConfigBase::SetDeserializeItem> extra = {})
+{
+    DynamicPrintConfig config = fixture_config({ { "support_style", "tree_scaffold" },
+                                                 { "printable_area", "-100x-100,100x-100,100x100,-100x100" },
+                                                 { "tree_support_branch_diameter", "1.2" },
+                                                 { "support_remove_small_overhang", "0" },
+                                                 { "support_miniature_contacts", "0" },
+                                                 { "support_on_build_plate_only", "0" },
+                                                 { "support_top_z_distance", "0.2" } });
+    config.set_deserialize_strict(extra);
+    return config;
+}
+
+// Every extrusion in `collection` and the collections nested in it.
+void collect_entities(const ExtrusionEntityCollection &collection, std::vector<const ExtrusionEntity *> &out)
+{
+    for (const ExtrusionEntity *e : collection.entities)
+        if (e->is_collection())
+            collect_entities(*static_cast<const ExtrusionEntityCollection *>(e), out);
+        else
+            out.push_back(e);
 }
 
 // A JSON config written to the OS temp directory and removed when the guard leaves scope.
@@ -276,4 +319,138 @@ TEST_CASE("A result row carries the scaffold counts", "[ScaffoldSupport]")
     CHECK(metrics.value("islands_under_held", size_t(0)) == 1);
     CHECK(metrics.value("pillars_unbraced", size_t(0)) == 3);
     CHECK(metrics.value("floating_pieces_removed", size_t(0)) == 4);
+}
+
+TEST_CASE("A scaffold on the shelf fixture prints a solid pad and clear base walls and nothing floating", "[ScaffoldSupport]")
+{
+    Print print;
+    init_and_process_print({ shelf_fixture() }, print, scaffold_config());
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    REQUIRE(object.support_analysis() != nullptr);
+    REQUIRE(object.emitted_support() != nullptr);
+    const SupportAnalysis::Report &report = *object.support_analysis();
+
+    // The style runs the miniature front half with a zero gap although the checkbox is off.
+    CHECK(report.seeds_candidate > 0);
+    CHECK_THAT(object.emitted_support()->top_gap_mm, WithinAbs(0., 1e-9));
+
+    // Every support extrusion is base material, and the pad's first layer joins the slices the skirt reads.
+    const auto layers = object.support_layers();
+    REQUIRE(layers.size() > 0);
+    CHECK_FALSE(layers.front()->lslices.empty());
+    for (const SupportLayer *sl : layers) {
+        std::vector<const ExtrusionEntity *> entities;
+        collect_entities(sl->support_fills, entities);
+        for (const ExtrusionEntity *e : entities) {
+            INFO("print_z " << sl->print_z);
+            CHECK(e->role() == erSupportMaterial);
+        }
+    }
+
+    // What each support layer's extrusions cover.
+    const auto footprint = [](const SupportLayer &sl) { return union_ex(sl.support_fills.polygons_covered_by_width(0.f)); };
+    const auto area_mm2 = [](const ExPolygons &polys) {
+        double a = 0.;
+        for (const ExPolygon &p : polys)
+            a += p.area() * SCALING_FACTOR * SCALING_FACTOR;
+        return a;
+    };
+
+    // The pad is 0.6 mm rounded up to whole planned layers: the layers up to the first whose top reaches 0.6 mm.
+    // The tree plans its own support layer heights, so that is three layers here, and the layer above it holds
+    // only the pillar feet. Every foot stands on the pad, and the 1.6 mm brim reaches past the feet at the pad's top
+    // face: the pad's sides slope at 45 degrees, so its first layer is narrower by nearly the pad's thickness.
+    const double w = 0.42;
+    size_t pad_top = 0;
+    while (pad_top < layers.size() && layers[pad_top]->print_z < 0.6 - EPSILON)
+        ++ pad_top;
+    REQUIRE(pad_top + 1 < layers.size());
+    CHECK(pad_top == 2);
+    const ExPolygons f0 = footprint(*layers[0]), f_above = footprint(*layers[pad_top + 1]);
+    REQUIRE_FALSE(f0.empty());
+    REQUIRE_FALSE(f_above.empty());
+    const double a0 = area_mm2(f0);
+    for (size_t i = 1; i <= pad_top; ++ i) {
+        INFO("pad layer " << i << " print_z " << layers[i]->print_z);
+        CHECK(area_mm2(footprint(*layers[i])) >= 0.5 * a0);
+    }
+    CHECK(area_mm2(f_above) < 0.5 * a0);
+    CHECK(diff_ex(f_above, offset_ex(f0, scale_(w))).empty());
+    const BoundingBox box_top = get_extents(footprint(*layers[pad_top])), box_above = get_extents(f_above);
+    CHECK(box_above.min.x() - box_top.min.x() >= scale_(1.4));
+    CHECK(box_above.min.y() - box_top.min.y() >= scale_(1.4));
+    CHECK(box_top.max.x() - box_above.max.x() >= scale_(1.4));
+    CHECK(box_top.max.y() - box_above.max.y() >= scale_(1.4));
+
+    // Nothing printed comes within the xy distance of the model at its own height, and all of it is on the bed.
+    const Point shift = object.instances().front().shift;
+    for (const SupportLayer *sl : layers) {
+        ExPolygons model;
+        for (const Layer *layer : object.layers())
+            if (std::min(layer->print_z, sl->print_z) - std::max(layer->bottom_z(), sl->print_z - sl->height) > EPSILON)
+                append(model, layer->lslices);
+        const ExPolygons printed = footprint(*sl);
+        INFO("print_z " << sl->print_z);
+        CHECK(intersection_ex(printed, offset_ex(union_ex(model), scale_(0.35 - 0.02))).empty());
+        for (const ExPolygon &poly : printed) {
+            BoundingBox box = get_extents(poly);
+            box.translate(shift);
+            CHECK(box.min.x() >= scale_(-100.));
+            CHECK(box.min.y() >= scale_(-100.));
+            CHECK(box.max.x() <= scale_(100.));
+            CHECK(box.max.y() <= scale_(100.));
+        }
+    }
+
+    // The pad prints solid through the sheath and the cage above it prints walls only: no extrusion above the pad
+    // reaches further into its layer's base area than a second wall would, while the pad's infill does.
+    const auto reaches_inside = [w](const SupportLayer &sl) {
+        const ExPolygons interior = offset_ex(sl.base_areas, -scale_(2.5 * w));
+        std::vector<const ExtrusionEntity *> entities;
+        collect_entities(sl.support_fills, entities);
+        size_t count = 0;
+        for (const ExtrusionEntity *e : entities) {
+            Polygons covered;
+            e->polygons_covered_by_width(covered, 0.f);
+            if (! intersection_ex(covered, interior).empty())
+                ++ count;
+        }
+        return count;
+    };
+    for (size_t i = pad_top + 1; i < layers.size(); ++ i) {
+        INFO("print_z " << layers[i]->print_z);
+        CHECK(reaches_inside(*layers[i]) == 0);
+    }
+    CHECK(reaches_inside(*layers[1]) > 0);
+
+    // The cage roots on the plate and the floating pass finds nothing to take out of it.
+    CHECK(report.floating_pieces_removed == 0);
+    CHECK(report.stability.unsupported_paths == 0);
+
+    // The report states what the scaffold did and claims no coverage it never measured.
+    INFO("tips placed " << report.tips_placed << " routed " << report.tips_routed << " dropped " << report.tips_dropped
+                        << " support " << report.support_volume_mm3 << " mm3");
+    CHECK(report.status == SupportAnalysis::Report::Status::Unknown);
+    CHECK_FALSE(report.coverage_available);
+    CHECK(report.coverage.empty());
+    CHECK(report.missing_anchor_ids.empty());
+    CHECK(report.tips_placed > 0);
+    CHECK(report.tips_routed > 0);
+    CHECK(report.tips_placed == report.tips_routed + report.tips_dropped);
+    CHECK(report.support_volume_mm3 > 0.);
+    CHECK(report.stability.available);
+}
+
+TEST_CASE("A cancel during the scaffold build throws and leaves no support layer", "[ScaffoldSupport]")
+{
+    Print print;
+    Model model;
+    init_print({ shelf_fixture() }, print, model, scaffold_config());
+    print.set_status_callback([&print](const PrintBase::SlicingStatus &s) {
+        if (s.percent == 60)
+            print.cancel();
+    });
+    REQUIRE_THROWS_AS(print.process(), CanceledException);
+    REQUIRE(print.objects().front()->support_layers().empty());
 }

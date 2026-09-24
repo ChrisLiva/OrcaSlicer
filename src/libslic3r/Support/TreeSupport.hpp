@@ -480,6 +480,10 @@ private:
     bool  with_infill                        = false;
     bool  m_analysis_requested               = false; // asked for by the caller, consumed by one generation
     bool  m_analyze                          = false; // this attempt carries provenance and measures itself
+    bool  m_scaffold                         = false; // support_style is smsTreeScaffold: ScaffoldSupport::draw builds the body
+    // The contacts select_contacts decimated away, the scaffold's hold floor candidates. Empty until
+    // something fills it.
+    std::vector<SupportNode*> m_dropped_contacts;
     // The problem this pass ran against, the model's own risk measured off the object's slices for it
     // (left Invalid where the pass would not consult it), and what it emitted.
     MiniatureSupport::Problem       m_problem;
