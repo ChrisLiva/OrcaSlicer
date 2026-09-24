@@ -523,8 +523,10 @@ bool SupportTreeBuildsteps::create_ground_pillar(const Vec3d &hjp,
         double tmax = std::min(m_cfg.max_bridge_length_mm, t);
         t = 0.;
 
+        // The walk descends t * cos(bridge_slope) per unit of length, so the drop
+        // over that cosine is the length at which it reaches the ground.
         double zd = endp.z() - jp_gnd;
-        double tmax2 = zd / std::sqrt(1 - m_cfg.bridge_slope * m_cfg.bridge_slope);
+        double tmax2 = zd / std::cos(m_cfg.bridge_slope);
         tmax = std::min(tmax, tmax2);
 
         Vec3d nexp = endp;
@@ -542,7 +544,7 @@ bool SupportTreeBuildsteps::create_ground_pillar(const Vec3d &hjp,
             eval_limits(can_add_base);
 
             zd = endp.z() - jp_gnd;
-            tmax2 = zd / std::sqrt(1 - m_cfg.bridge_slope * m_cfg.bridge_slope);
+            tmax2 = zd / std::cos(m_cfg.bridge_slope);
             tmax = std::min(tmax, tmax2);
 
             while (((dlast = std::sqrt(m_mesh.squared_distance(to_floor(nexp)))) < gap_dist ||

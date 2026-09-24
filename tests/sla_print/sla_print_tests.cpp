@@ -62,6 +62,27 @@ sla::SupportTreeConfig blocked_lip_config()
 
 const sla::SupportPoints BLOCKED_LIP_POINTS = {sla::SupportPoint(Vec3f(20.f, 20.f, 12.f), 0.2f)};
 
+// A 2x40x30 wall at x 0..2, y 0..40, z 0..30, a 0.2 mm ground plate at
+// x 4.5..plate_x_end, y 0..40, and a 6x6x2 slab at x 2..8, y 17..23, z h..h+2
+// off the wall's +x face. A point under the slab at (3, 20, h) walks toward +x
+// to reach the ground, and the plate's footprint sets how far that walk must
+// run before its floor point clears the pillar base gap, so the walk's length
+// is decided by the corrector cap rather than by the wall.
+indexed_triangle_set corrector_sweep_mesh(double h, double plate_x_end)
+{
+    auto box = [](double x, double y, double z, float dx, float dy, float dz) {
+        TriangleMesh m = make_cube(x, y, z);
+        m.translate(dx, dy, dz);
+        return m;
+    };
+
+    indexed_triangle_set its = box(2., 40., 30., 0.f, 0.f, 0.f).its;
+    its_merge(its, box(plate_x_end - 4.5, 40., 0.2, 4.5f, 0.f, 0.f).its);
+    its_merge(its, box(6., 6., 2., 2.f, 17.f, float(h)).its);
+
+    return its;
+}
+
 // A 10x10x1 plate at x 0..10, y 0..10, z 30..31, a 20x10x1 plate at
 // x 30..50, y 0..10, z 30..31 and a 2x2x1 foot at x 60..62, y 0..2, z 0..1
 // that pins the ground at z 0. TWO_PLATES_POINTS puts two points 5 mm apart
@@ -281,6 +302,50 @@ TEST_CASE("A stop condition halts the builder between steps", "[SLASupportGenera
     sla::SupportableMesh completed_sm{mesh, BLOCKED_LIP_POINTS, cfg};
     CHECK_FALSE(sla::SupportTreeBuildsteps::execute(completed, completed_sm));
     CHECK(completed.pillars().size() >= 1);
+}
+
+TEST_CASE("A zero-elevation corrector bridge walks no further than its drop allows", "[SLASupportGeneration]") {
+    // A corrector bridge is the walk create_ground_pillar lays at polar PI - bridge_slope: its XY moves and
+    // its descent is its length times cos(slope). Its length may pass the drop over cos(slope) by one walk
+    // step (the loop tests t < tmax and then adds the radius), never more. This fixture lays no corrector
+    // at pi/6 (measured 2026-09-24), so only pi/4 requires one.
+    const auto [slope, min_correctors] = GENERATE(table<double, size_t>({{M_PI / 4, 1}, {M_PI / 6, 0}}));
+    const double cs = std::cos(slope);
+
+    size_t correctors = 0;
+    for (int hi = 0; hi <= 8; ++hi) {
+        const double h  = 6. + 1. * hi;
+        const double zj = h - 1.3, jx = 3.5; // the junction under the point, read off the default head
+        for (int xi = 0; xi <= 12; ++xi) {
+            const double plate_x_end = jx + zj - 3. + 0.5 * xi;
+            indexed_triangle_set mesh = corrector_sweep_mesh(h, plate_x_end);
+            const sla::SupportPoints points = {sla::SupportPoint(Vec3f(3.f, 20.f, float(h)), 0.2f)};
+
+            sla::SupportTreeConfig cfg;
+            cfg.object_elevation_mm  = 0.;
+            cfg.max_bridge_length_mm = 30.;
+            cfg.allow_model_anchors  = false;
+            cfg.bridge_slope         = slope;
+
+            sla::SupportTreeBuilder builder;
+            sla::SupportableMesh sm{mesh, points, cfg};
+            sla::SupportTreeBuildsteps::execute(builder, sm);
+
+            for (const sla::Bridge &b : builder.bridges()) {
+                const double xy      = (b.endp.head<2>() - b.startp.head<2>()).norm();
+                const double descent = b.startp.z() - b.endp.z();
+                if (xy < 1e-6) continue;
+                if (std::abs(descent - b.get_length() * cs) > 1e-6) continue;
+                ++correctors;
+                const double bound = (b.startp.z() - builder.ground_level) / cs + b.r + 1e-6;
+                INFO("slope " << slope << " h " << h << " plate_x_end " << plate_x_end << " length "
+                     << b.get_length() << " bound " << bound);
+                CHECK(b.get_length() <= bound);
+            }
+        }
+    }
+    INFO("slope " << slope);
+    CHECK(correctors >= min_correctors);
 }
 
 TEST_CASE("Slender pillars get one brace and no helper pillar", "[SLASupportGeneration]") {
