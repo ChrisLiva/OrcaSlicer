@@ -4578,7 +4578,7 @@ void PrintObject::_generate_support_material()
     // What this object's support did with the problem it was generated for, in the slice log and,
     // where it left a requirement open, as a warning the user sees. Read off the measurement the
     // object holds, so it names the pass that ships.
-    if (m_config.support_miniature_contacts.value)
+    if (m_config.support_miniature_contacts.value || m_config.support_style.value == smsTreeScaffold)
         if (const std::shared_ptr<const SupportAnalysis::Report> report = this->support_analysis()) {
             size_t unreached = 0, printable_count = 0;
             for (const SupportAnalysis::RegionCoverage &region : report->coverage)
@@ -4596,7 +4596,10 @@ void PrintObject::_generate_support_material()
                                     << ": critical regions without material " << unreached << " of " << printable_count
                                     << " printable, " << stability << ", support " << report->support_volume_mm3 << " mm3, seeds candidates "
                                     << report->seeds_candidate << " / kept " << report->seeds_kept << " / restored "
-                                    << report->seeds_restored << " / retained " << report->seeds_retained;
+                                    << report->seeds_restored << " / retained " << report->seeds_retained << ", tips placed "
+                                    << report->tips_placed << " / routed " << report->tips_routed << " / dropped " << report->tips_dropped
+                                    << ", islands under-held " << report->islands_under_held << ", pillars unbraced "
+                                    << report->pillars_unbraced << ", floating removed " << report->floating_pieces_removed;
             // posSupportMaterial is still the active step here, which is what active_step_add_warning
             // needs, and the default notification id lets the message identify itself rather than
             // borrowing an id that means something else to the notification manager.

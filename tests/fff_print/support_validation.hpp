@@ -121,6 +121,12 @@ struct Metrics
     size_t inaccessible_groups     = 0;
     double max_group_risk          = 0.;
     double total_group_risk        = 0.;
+    size_t tips_placed             = 0;
+    size_t tips_routed             = 0;
+    size_t tips_dropped            = 0;
+    size_t islands_under_held      = 0;
+    size_t pillars_unbraced        = 0;
+    size_t floating_pieces_removed = 0;
     bool   coverage_available      = false;
     bool   stability_available     = false;
     bool   damage_available        = false;

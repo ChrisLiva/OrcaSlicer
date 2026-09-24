@@ -161,6 +161,13 @@ Metrics metrics_of(const SupportAnalysis::Report &report)
     m.max_group_risk      = report.damage.max_group_risk;
     m.total_group_risk    = report.damage.total_group_risk;
     m.damage_available    = report.damage.available;
+
+    m.tips_placed             = report.tips_placed;
+    m.tips_routed             = report.tips_routed;
+    m.tips_dropped            = report.tips_dropped;
+    m.islands_under_held      = report.islands_under_held;
+    m.pillars_unbraced        = report.pillars_unbraced;
+    m.floating_pieces_removed = report.floating_pieces_removed;
     return m;
 }
 
@@ -213,6 +220,12 @@ Metrics accumulate_metrics(const std::vector<const SupportAnalysis::Report *> &r
         m.missing_critical_anchors += one.missing_critical_anchors;
         m.invalid_paths            += one.invalid_paths;
         m.unrooted_groups          += one.unrooted_groups;
+        m.tips_placed              += one.tips_placed;
+        m.tips_routed              += one.tips_routed;
+        m.tips_dropped             += one.tips_dropped;
+        m.islands_under_held       += one.islands_under_held;
+        m.pillars_unbraced         += one.pillars_unbraced;
+        m.floating_pieces_removed  += one.floating_pieces_removed;
         m.unknown_contacts         += one.unknown_contacts;
         m.inaccessible_groups      += one.inaccessible_groups;
         m.max_group_risk            = std::max(m.max_group_risk, one.max_group_risk);
@@ -362,6 +375,12 @@ void write_result(const CaseResult &result, std::ostream &out)
     metrics["inaccessible_groups"]      = result.metrics.inaccessible_groups;
     metrics["max_group_risk"]           = result.metrics.max_group_risk;
     metrics["total_group_risk"]         = result.metrics.total_group_risk;
+    metrics["tips_placed"]              = result.metrics.tips_placed;
+    metrics["tips_routed"]              = result.metrics.tips_routed;
+    metrics["tips_dropped"]             = result.metrics.tips_dropped;
+    metrics["islands_under_held"]       = result.metrics.islands_under_held;
+    metrics["pillars_unbraced"]         = result.metrics.pillars_unbraced;
+    metrics["floating_pieces_removed"]  = result.metrics.floating_pieces_removed;
     metrics["coverage_available"]       = result.metrics.coverage_available;
     metrics["stability_available"]      = result.metrics.stability_available;
     metrics["damage_available"]         = result.metrics.damage_available;

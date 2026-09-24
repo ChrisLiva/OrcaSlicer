@@ -667,6 +667,7 @@ static void collect_support_footprints(const ExtrusionEntityCollection &collecti
 // the footprints a second time.
 std::vector<ExPolygons> TreeSupport::remove_floating_toolpaths()
 {
+    m_floating_pieces_removed = 0;
     const SupportLayerPtrs &layers = m_object->support_layers();
     std::vector<ExPolygons> printed(layers.size());
     tbb::parallel_for(tbb::blocked_range<size_t>(0, layers.size()), [&](const tbb::blocked_range<size_t> &range) {
@@ -704,6 +705,7 @@ std::vector<ExPolygons> TreeSupport::remove_floating_toolpaths()
                 kept_pieces.push_back(slabs[s].polygons[i]);
         if (pieces.empty())
             continue;
+        m_floating_pieces_removed += pieces.size();
         // The pieces are disjoint parts of the union of every footprint on the layer, so an extrusion's
         // footprint has area in exactly one of them: the one it is part of.
         const auto in_floating = [&pieces, &boxes](const ExtrusionEntity &entity) {
@@ -2027,6 +2029,7 @@ void TreeSupport::generate()
         report.seeds_kept      = seeds_kept;
         report.seeds_restored  = seeds_restored;
         report.seeds_retained  = seeds_retained;
+        report.floating_pieces_removed = m_floating_pieces_removed;
         m_object->set_support_analysis(std::make_shared<const SupportAnalysis::Report>(std::move(report)));
     }
     profiler.stage_finish(STAGE_MEASURE);

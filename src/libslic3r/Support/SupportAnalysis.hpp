@@ -213,6 +213,15 @@ struct Report
     size_t                      seeds_kept      = 0;
     size_t                      seeds_restored  = 0;
     size_t                      seeds_retained  = 0;
+    // What the Tree Scaffold pass did, counted where it did it: tips placed on the model, tips routed to
+    // a pillar, tips dropped for want of a route, islands the hold rule could not fully hold, pillars no
+    // neighbour braced; and the printed pieces the floating pass removed, under every style that runs it.
+    size_t                      tips_placed             = 0;
+    size_t                      tips_routed             = 0;
+    size_t                      tips_dropped            = 0;
+    size_t                      islands_under_held      = 0;
+    size_t                      pillars_unbraced        = 0;
+    size_t                      floating_pieces_removed = 0;
     Provenance                  provenance;
     std::vector<Reason>         reasons;
     bool has_reason(Reason reason) const;

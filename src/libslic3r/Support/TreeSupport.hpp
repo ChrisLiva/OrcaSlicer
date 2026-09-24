@@ -485,6 +485,7 @@ private:
     MiniatureSupport::Problem       m_problem;
     ModelSupportRisk::Field         m_risk;
     SupportAnalysis::EmittedSupport m_emitted;
+    size_t                          m_floating_pieces_removed = 0; // counted by remove_floating_toolpaths
 
 
 

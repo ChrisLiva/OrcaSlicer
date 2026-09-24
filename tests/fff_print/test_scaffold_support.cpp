@@ -5,6 +5,7 @@
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Support/SupportAnalysis.hpp"
 #include "libslic3r/Support/SupportComponents.hpp"
 #include "libslic3r/Support/SupportParameters.hpp"
 
@@ -12,8 +13,12 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <sstream>
 #include <string>
 
+#include <nlohmann/json.hpp>
+
+#include "support_validation.hpp"
 #include "test_helpers.hpp"
 
 using namespace Slic3r::Test;
@@ -230,4 +235,45 @@ TEST_CASE("Island joins name the slab each mid-air island first meets the rooted
     const size_t a_on_31 = piece_holding(31, a_middle);
     REQUIRE(a_on_31 != size_t(-1));
     CHECK(map.island_of_piece[a_on_31] == size_t(-1));
+}
+
+TEST_CASE("A result row carries the scaffold counts", "[ScaffoldSupport]")
+{
+    SupportAnalysis::Report r;
+    r.tips_placed             = 7;
+    r.tips_routed             = 5;
+    r.tips_dropped            = 2;
+    r.islands_under_held      = 1;
+    r.pillars_unbraced        = 3;
+    r.floating_pieces_removed = 4;
+
+    const SupportValidation::Metrics m = SupportValidation::metrics_of(r);
+    CHECK(m.tips_placed == 7);
+    CHECK(m.tips_routed == 5);
+    CHECK(m.tips_dropped == 2);
+    CHECK(m.islands_under_held == 1);
+    CHECK(m.pillars_unbraced == 3);
+    CHECK(m.floating_pieces_removed == 4);
+
+    SupportValidation::CaseResult row;
+    row.metrics = m;
+    std::ostringstream os;
+    SupportValidation::write_result(row, os);
+    const nlohmann::json j = nlohmann::json::parse(os.str());
+    REQUIRE(j.contains("metrics"));
+    const nlohmann::json &metrics = j.at("metrics");
+    for (const char *key : { "support_volume_mm3", "raft_volume_mm3", "missing_critical_anchors", "invalid_paths",
+                             "unrooted_groups", "min_bed_margin", "max_slenderness", "unknown_contacts", "inaccessible_groups",
+                             "max_group_risk", "total_group_risk", "coverage_available", "stability_available",
+                             "damage_available", "tips_placed", "tips_routed", "tips_dropped", "islands_under_held",
+                             "pillars_unbraced", "floating_pieces_removed" }) {
+        INFO(key);
+        CHECK(metrics.contains(key));
+    }
+    CHECK(metrics.value("tips_placed", size_t(0)) == 7);
+    CHECK(metrics.value("tips_routed", size_t(0)) == 5);
+    CHECK(metrics.value("tips_dropped", size_t(0)) == 2);
+    CHECK(metrics.value("islands_under_held", size_t(0)) == 1);
+    CHECK(metrics.value("pillars_unbraced", size_t(0)) == 3);
+    CHECK(metrics.value("floating_pieces_removed", size_t(0)) == 4);
 }

@@ -2549,6 +2549,8 @@ TEST_CASE("A branch roots on the model only where the settings allow it", "[Mini
     REQUIRE(volume_above(island_stock.object(), 7.) > 0.);
     REQUIRE(island_measured.report() != nullptr);
     CHECK_THAT(volume_above(island_measured.object(), 7.), WithinAbs(0., 1e-9));
+    CHECK(island_measured.report()->floating_pieces_removed > 0);
+    CHECK(island_measured.report()->stability.unsupported_paths == 0);
 
     // The box on a raft, measured so the floating pass runs: its floor is part of the object's first
     // layer, which the raft carries, so the branches resting on the floor stand and survive the pass.
