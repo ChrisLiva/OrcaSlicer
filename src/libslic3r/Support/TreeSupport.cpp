@@ -1766,8 +1766,8 @@ void TreeSupport::generate_toolpaths()
                     else {
                         // base_areas
                         bool support_base_on_bed = (layer_id == 0 && m_raft_layers == 0);
-                        // A scaffold pad layer prints solid like the bed layer, or the pillar feet standing on it
-                        // would overlap nothing printed.
+                        // A scaffold pad layer prints the bed layer's rectilinear sheath rather than hollow walls, or the
+                        // pillar feet standing on it would overlap nothing printed.
                         const bool solid_base = support_base_on_bed || area_group.pad;
                         Flow flow = support_base_on_bed ? m_support_params.first_layer_flow : support_flow;
                         bool need_infill = with_infill;
@@ -1791,6 +1791,10 @@ void TreeSupport::generate_toolpaths()
                         ExtrusionEntitiesPtr &base_dst = base_eec->entities;
                         if (layer_id == 0 || area_group.pad) {
                             float density = float(m_object_config->raft_first_layer_density.value * 0.01);
+                            // A scaffold pad keeps that density on the bed and on its top, where the pillar feet stand;
+                            // the layers between only carry the top and print half as dense.
+                            if (area_group.pad && layer_id != 0 && layer_id + 1 != m_pad_layers + m_raft_layers)
+                                density *= 0.5f;
                             fill_expolygons_with_sheath_generate_paths(base_dst, loops, filler_support.get(), density, erSupportMaterial, flow,
                                                                        m_support_params, true, false);
                         }
@@ -2031,6 +2035,7 @@ void TreeSupport::generate()
         profiler.stage_durations[STAGE_SCAFFOLD_BUILD] = out.stage_ms.build;
         profiler.stage_durations[STAGE_SCAFFOLD_SLICE] = out.stage_ms.slice;
         scaffold_counts = out.counts;
+        m_pad_layers    = out.pad_layers;
 
         const size_t      brim_skirt_layers = brim_skirt_layer_count();
         std::vector<char> filled(plan.size(), 0);

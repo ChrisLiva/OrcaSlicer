@@ -485,6 +485,7 @@ private:
     bool  m_analysis_requested               = false; // asked for by the caller, consumed by one generation
     bool  m_analyze                          = false; // this attempt carries provenance and measures itself
     bool  m_scaffold                         = false; // support_style is smsTreeScaffold: ScaffoldSupport::draw builds the body
+    size_t m_pad_layers                      = 0;     // the scaffold's leading planned layers that are pad; 0 under other styles
     // The contacts select_contacts decimated away, the scaffold's hold floor candidates. Empty until
     // something fills it.
     std::vector<SupportNode*> m_dropped_contacts;
