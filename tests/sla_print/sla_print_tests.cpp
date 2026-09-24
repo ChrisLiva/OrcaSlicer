@@ -30,6 +30,38 @@ const char *const SUPPORT_TEST_MODELS[] = {
     "extruder_idler.obj"
 };
 
+// A 40x40x4 block at x 0..40, y 0..40, z 0..4 with a 4x4x10 column at
+// x 18..22, y 0..4, z 4..14 carrying a 4x40x2 lip at x 18..22, y 0..40,
+// z 12..14. A point under the lip at (20, 20, 12) faces the block top and sits
+// 20 mm from every block edge, beyond a 10 mm bridge, so its head reaches
+// neither a pillar nor the ground.
+indexed_triangle_set blocked_lip_mesh()
+{
+    auto box = [](double x, double y, double z, float dx, float dy, float dz) {
+        TriangleMesh m = make_cube(x, y, z);
+        m.translate(dx, dy, dz);
+        return m;
+    };
+
+    indexed_triangle_set its = box(40., 40., 4., 0.f, 0.f, 0.f).its;
+    its_merge(its, box(4., 4., 10., 18.f, 0.f, 4.f).its);
+    its_merge(its, box(4., 40., 2., 18.f, 0.f, 12.f).its);
+
+    return its;
+}
+
+sla::SupportTreeConfig blocked_lip_config()
+{
+    sla::SupportTreeConfig cfg;
+    cfg.object_elevation_mm         = 0.;
+    cfg.max_bridge_length_mm        = 10.;
+    cfg.max_pillar_link_distance_mm = 10.;
+
+    return cfg;
+}
+
+const sla::SupportPoints BLOCKED_LIP_POINTS = {sla::SupportPoint(Vec3f(20.f, 20.f, 12.f), 0.2f)};
+
 } // namespace
 
 TEST_CASE("Pillar pairhash should be unique", "[SLASupportGeneration]") {
@@ -155,6 +187,58 @@ TEST_CASE("FloorSupportsDoNotPierceModel", "[SLASupportGeneration]") {
     
     for (auto fname : SUPPORT_TEST_MODELS)
         test_support_model_collision(fname, supportcfg);
+}
+
+TEST_CASE("A model-facing head is dropped when model anchors are forbidden", "[SLASupportGeneration]") {
+    using Catch::Matchers::WithinAbs;
+
+    REQUIRE_THAT(sla::SupportTreeConfig{}.safety_distance_mm, WithinAbs(0.5, 1e-12));
+    sla::SupportTreeConfig clearance;
+    clearance.safety_distance_mm = 1.0;
+    REQUIRE_THAT(clearance.safety_distance_mm, WithinAbs(1.0, 1e-12));
+
+    indexed_triangle_set mesh = blocked_lip_mesh();
+
+    sla::SupportTreeConfig forbidden = blocked_lip_config();
+    forbidden.allow_model_anchors = false;
+    sla::SupportTreeBuilder dropped;
+    sla::SupportableMesh dropped_sm{mesh, BLOCKED_LIP_POINTS, forbidden};
+    REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(dropped, dropped_sm));
+    REQUIRE(dropped.heads().size() == 1);
+    CHECK_FALSE(dropped.heads().front().is_valid());
+    CHECK(dropped.pillars().empty());
+
+    sla::SupportTreeConfig allowed = blocked_lip_config();
+    allowed.allow_model_anchors = true;
+    sla::SupportTreeBuilder anchored;
+    sla::SupportableMesh anchored_sm{mesh, BLOCKED_LIP_POINTS, allowed};
+    REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(anchored, anchored_sm));
+    REQUIRE(anchored.heads().size() == 1);
+    CHECK(anchored.heads().front().is_valid());
+    REQUIRE(anchored.pillars().size() >= 1);
+    for (const sla::Pillar &pillar : anchored.pillars()) {
+        CHECK(pillar.endpt.z() >= 3.9);
+        CHECK(pillar.endpt.z() <= 12.0);
+    }
+}
+
+TEST_CASE("A stop condition halts the builder between steps", "[SLASupportGeneration]") {
+    indexed_triangle_set mesh = blocked_lip_mesh();
+    sla::SupportTreeConfig cfg = blocked_lip_config();
+    cfg.allow_model_anchors = true;
+
+    sla::SupportTreeBuilder stopped;
+    sla::JobController ctl;
+    ctl.stopcondition = [] { return true; };
+    stopped.set_ctl(ctl);
+    sla::SupportableMesh stopped_sm{mesh, BLOCKED_LIP_POINTS, cfg};
+    CHECK(sla::SupportTreeBuildsteps::execute(stopped, stopped_sm));
+    CHECK(stopped.pillars().empty());
+
+    sla::SupportTreeBuilder completed;
+    sla::SupportableMesh completed_sm{mesh, BLOCKED_LIP_POINTS, cfg};
+    CHECK_FALSE(sla::SupportTreeBuildsteps::execute(completed, completed_sm));
+    CHECK(completed.pillars().size() >= 1);
 }
 
 TEST_CASE("InitializedRasterShouldBeNONEmpty", "[SLARasterOutput]") {

@@ -83,6 +83,17 @@ struct SupportTreeConfig
     double pillar_base_safety_distance_mm = 0.5;
     
     unsigned max_bridges_on_pillar = 3;
+
+    // Whether a head that reaches neither a pillar nor the ground may anchor
+    // to the model body as a last resort.
+    bool allow_model_anchors = true;
+
+    // The unbraced height-to-diameter ratio above which interconnect_pillars
+    // braces a pillar. 0 keeps the cascade linking.
+    double pillar_link_slenderness = 0.;
+
+    // The shortest distance of any support structure from the model surface
+    double safety_distance_mm = 0.5;
     
     double head_fullwidth() const {
         return 2 * head_front_radius_mm + head_width_mm +
@@ -95,9 +106,6 @@ struct SupportTreeConfig
 
     // The max Z angle for a normal at which it will get completely ignored.
     static const double constexpr normal_cutoff_angle = 150.0 * M_PI / 180.0;
-
-    // The shortest distance of any support structure from the model surface
-    static const double constexpr safety_distance_mm = 0.5;
 
     static const double constexpr max_solo_pillar_height_mm = 15.0;
     static const double constexpr max_dual_pillar_height_mm = 35.0;
@@ -165,6 +173,7 @@ public:
     void retrieve_full_mesh(indexed_triangle_set &outmesh) const;
     
     const JobController &ctl() const { return m_ctl; }
+    void set_ctl(const JobController &ctl) { m_ctl = ctl; }
 };
 
 }

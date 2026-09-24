@@ -1051,7 +1051,7 @@ void SupportTreeBuildsteps::routing_to_model()
         if (connect_to_ground(head)) { return; }
 
         // No route to the ground, so connect to the model body as a last resort
-        if (connect_to_model_body(head)) { return; }
+        if (m_cfg.allow_model_anchors && connect_to_model_body(head)) { return; }
 
         // We have failed to route this head.
         BOOST_LOG_TRIVIAL(warning)
