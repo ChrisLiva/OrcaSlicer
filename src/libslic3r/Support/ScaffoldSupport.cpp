@@ -1,8 +1,11 @@
 #include "ScaffoldSupport.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cmath>
 #include <limits>
+#include <unordered_map>
 
 #include "ClipperUtils.hpp"
 #include "Model.hpp"
@@ -14,6 +17,7 @@
 #include "libslic3r/SLA/SupportTreeBuildsteps.hpp"
 #include "libslic3r/SLA/SupportTreeMesher.hpp"
 
+#include <boost/functional/hash.hpp>
 #include <boost/log/trivial.hpp>
 
 #include <tbb/blocked_range.h>
@@ -150,6 +154,59 @@ size_t restore_hold_floor(const PrintObject &object, std::vector<const SupportNo
     return under_held;
 }
 
+// Merges the tips standing within the builder's alias distance `sla::D_SP` of each other in 3-D, xy from the node's
+// position and z its print z. The front half hands the same overhang spot on consecutive layers, and the builder's
+// `filter` keeps one point of each such pair, so the other read as a drop. Tips are visited lowest first, among
+// equals by seed id, and a tip within the distance of a tip already kept merges into it; a merged tip absorbs none.
+// A chain at the layer pitch therefore keeps every tip standing further than the distance from the kept tips under
+// it, and three tips all within the distance of each other keep one where the builder's pairs would keep two: no
+// two kept tips are aliases, so the builder filters none. The kept tips sit in a grid of cells the distance wide,
+// so a tip reads the 27 cells around its own. `tips` keeps its order.
+void merge_aliases(std::vector<const SupportNode *> &tips)
+{
+    using Cell = std::array<int64_t, 3>;
+    std::unordered_map<Cell, std::vector<Vec3d>, boost::hash<Cell>> kept;
+    const auto aliased = [&kept](const Vec3d &p, const Cell &c) {
+        const auto within = [&p](const Vec3d &q) { return (q - p).norm() <= sla::D_SP; };
+        for (int64_t dx = -1; dx <= 1; ++ dx)
+            for (int64_t dy = -1; dy <= 1; ++ dy)
+                for (int64_t dz = -1; dz <= 1; ++ dz)
+                    if (const auto it = kept.find(Cell{c[0] + dx, c[1] + dy, c[2] + dz});
+                        it != kept.end() && std::any_of(it->second.begin(), it->second.end(), within))
+                        return true;
+        return false;
+    };
+    std::vector<size_t> order(tips.size());
+    for (size_t i = 0; i < order.size(); ++ i)
+        order[i] = i;
+    std::sort(order.begin(), order.end(), [&tips](size_t a, size_t b) {
+        const SupportNode &na = *tips[a], &nb = *tips[b];
+        if (na.print_z != nb.print_z)
+            return na.print_z < nb.print_z;
+        if (seed_id(na) != seed_id(nb))
+            return seed_id(na) < seed_id(nb);
+        return na.position.x() != nb.position.x() ? na.position.x() < nb.position.x() : na.position.y() < nb.position.y();
+    });
+    std::vector<bool> keep(tips.size(), false);
+    for (const size_t i : order) {
+        const Vec2d xy = unscale(tips[i]->position);
+        const Vec3d p(xy.x(), xy.y(), tips[i]->print_z);
+        const Cell  c{int64_t(std::floor(p.x() / sla::D_SP)), int64_t(std::floor(p.y() / sla::D_SP)),
+                      int64_t(std::floor(p.z() / sla::D_SP))};
+        if (aliased(p, c)) {
+            BOOST_LOG_TRIVIAL(debug) << "scaffold tip merged at (" << p.x() << ", " << p.y() << ", " << p.z() << ")";
+            continue;
+        }
+        keep[i] = true;
+        kept[c].push_back(p);
+    }
+    size_t next = 0;
+    for (size_t i = 0; i < tips.size(); ++ i)
+        if (keep[i])
+            tips[next ++] = tips[i];
+    tips.resize(next);
+}
+
 } // namespace
 
 Output draw(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts,
@@ -222,6 +279,9 @@ Output draw(const PrintObject &object, const std::vector<std::vector<SupportNode
     const auto islands_start      = std::chrono::steady_clock::now();
     out.counts.islands_under_held = restore_hold_floor(object, nodes, spare, params.pillar_diameter_mm);
     out.stage_ms.island_joins     = ms_since(islands_start);
+    // The floor counted tips a pillar diameter apart, so no alias counted there twice; the merge comes after it so
+    // that a restored contact standing on a kept one merges too.
+    merge_aliases(nodes);
 
     // A tip's grade is the width of the disc it fuses to the model with: two support lines, or four where the model
     // under it hangs off a neck at least eight lines wide. The pin is half the grade.
