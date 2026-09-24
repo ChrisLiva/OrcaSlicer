@@ -16,6 +16,9 @@
 
 #include <boost/log/trivial.hpp>
 
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
+
 namespace Slic3r::ScaffoldSupport {
 
 namespace {
@@ -172,16 +175,20 @@ Output draw(const PrintObject &object, const std::vector<std::vector<SupportNode
     // under it hangs off a neck at least eight lines wide. The pin is half the grade.
     const double w          = params.toolpath_width_mm;
     const bool   risk_known = risk.status == ModelSupportRisk::Field::Status::Complete;
+    std::vector<double> grades(nodes.size(), 2. * w);
+    if (risk_known)
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, nodes.size()), [&](const tbb::blocked_range<size_t> &range) {
+            for (size_t i = range.begin(); i < range.end(); ++ i) {
+                const ModelSupportRisk::Sample s = ModelSupportRisk::sample(risk, size_t(nodes[i]->obj_layer_nr + 1), nodes[i]->position);
+                if (s.status == ModelSupportRisk::Sample::Status::Known && s.neck_width_mm >= 8. * w)
+                    grades[i] = 4. * w;
+            }
+        });
+    // A head's id is its point's index, so the points keep the order of `nodes`.
     sla::SupportPoints points;
-    for (const SupportNode *node : nodes) {
-        double grade = 2. * w;
-        if (risk_known) {
-            const ModelSupportRisk::Sample s = ModelSupportRisk::sample(risk, size_t(node->obj_layer_nr + 1), node->position);
-            if (s.status == ModelSupportRisk::Sample::Status::Known && s.neck_width_mm >= 8. * w)
-                grade = 4. * w;
-        }
-        const Vec2d xy = unscale(node->position);
-        points.emplace_back(float(xy.x()), float(xy.y()), float(node->print_z - params.z_offset_mm), float(grade / 2.));
+    for (size_t i = 0; i < nodes.size(); ++ i) {
+        const Vec2d xy = unscale(nodes[i]->position);
+        points.emplace_back(float(xy.x()), float(xy.y()), float(nodes[i]->print_z - params.z_offset_mm), float(grades[i] / 2.));
     }
     out.counts.tips_placed = points.size();
 
