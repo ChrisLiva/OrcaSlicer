@@ -82,6 +82,10 @@ TriangleMesh fin_fixture();
 // facets, and returns how many facets were painted.
 size_t paint_enforcers(ModelVolume &mv, const std::function<bool(const Vec3f &, const Vec3f &, const Vec3f &)> &pick);
 
+// Paints the first volume of `model`'s first object through `paint` once init_print has built `print` from `model` and
+// `config`, then applies the model again so the paint reaches the Print, and requires that apply to change it.
+void paint_and_reapply(Print &print, Model &model, const DynamicPrintConfig &config, const std::function<void(ModelVolume &)> &paint);
+
 // Every .stl and .3mf directly under `dir`, in name order; a missing directory yields nothing.
 std::vector<std::filesystem::path> corpus_files(const std::string &dir);
 

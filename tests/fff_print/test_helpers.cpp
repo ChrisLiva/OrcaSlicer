@@ -14,6 +14,7 @@
 #include <string>
 
 #include <boost/filesystem.hpp>
+#include <catch2/catch_all.hpp>
 #include <libslic3r/ModelArrange.hpp>
 
 #include "test_utils.hpp"
@@ -248,6 +249,19 @@ size_t paint_enforcers(ModelVolume &mv, const std::function<bool(const Vec3f &, 
     }
     mv.supported_facets.shrink_to_fit();
     return painted;
+}
+
+void paint_and_reapply(Print &print, Model &model, const DynamicPrintConfig &config, const std::function<void(ModelVolume &)> &paint)
+{
+    // init_print has already handed the model to the Print, and Print::apply keeps a copy of its
+    // own, so painting reaches the pipeline the way the GUI's painting does: paint the model,
+    // then apply it again. The config is rebuilt the way init_print built it, so this second
+    // apply differs from the first in the paint and in nothing else.
+    paint(*model.objects.front()->volumes.front());
+    DynamicPrintConfig full = DynamicPrintConfig::full_print_config();
+    full.apply(config);
+    full.set_key_value("gcode_comments", new ConfigOptionBool(true));
+    REQUIRE(print.apply(model, full) != Print::APPLY_STATUS_UNCHANGED);
 }
 
 // Every .stl and .3mf directly under `dir`, in name order, so two runs walk the same models in the
@@ -589,8 +603,6 @@ std::vector<std::string> role_sequence(const std::string &gcode, const std::vect
 }
 
 } } // namespace Slic3r::Test
-
-#include <catch2/catch_all.hpp>
 
 SCENARIO("init_print functionality", "[test_helpers]") {
 	GIVEN("A default config") {

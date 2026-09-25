@@ -419,17 +419,8 @@ void run_analysis(AnalysisRun &run, TriangleMesh &&shape, const DynamicPrintConf
     std::vector<TriangleMesh> meshes;
     meshes.emplace_back(std::move(shape));
     init_print(std::move(meshes), run.print, run.model, config);
-    if (paint) {
-        // init_print has already handed the model to the Print, and Print::apply keeps a copy of its
-        // own, so painting reaches the pipeline the way the GUI's painting does: paint the model,
-        // then apply it again. The config is rebuilt the way init_print built it, so this second
-        // apply differs from the first in the paint and in nothing else.
-        paint(*run.model.objects.front()->volumes.front());
-        DynamicPrintConfig full = DynamicPrintConfig::full_print_config();
-        full.apply(config);
-        full.set_key_value("gcode_comments", new ConfigOptionBool(true));
-        REQUIRE(run.print.apply(run.model, full) != Print::APPLY_STATUS_UNCHANGED);
-    }
+    if (paint)
+        paint_and_reapply(run.print, run.model, config, paint);
     if (request)
         run.print.request_legacy_support_analysis();
     run.print.process();
