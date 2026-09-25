@@ -521,6 +521,8 @@ size_t DrawContext::layers_under_tip(double mesh_z) const
                   layer_heights.begin());
 }
 
+// A point the build gave a valid head is left to the head. The result lists the points of `pts` that got a post,
+// ascending.
 std::vector<size_t> DrawContext::add_posts(sla::SupportTreeBuilder &builder, const sla::SupportPoints &pts) const
 {
     std::vector<char>   headed(pts.size(), 0);
@@ -967,8 +969,7 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
     // a straight pillar as wide as the tip's disc from the pad's top up to the tip, which the cage and the pad take in
     // like any other pillar. A post is no taller than a head pointing straight down over a pillar base. Its disc stays
     // out of the band on every layer under its rings and on every pad layer, where the seam would cut the post or the
-    // pad under it; the neck check reads the rings above the pad. A point the build gave a valid head is left to the
-    // head. The result lists the points of `pts` that got a post, ascending.
+    // pad under it; the neck check reads the rings above the pad.
     const double post_max_mm = cfg.head_width_mm + 2. * cfg.head_back_radius_mm + 2. * cfg.head_front_radius_mm -
                                cfg.head_penetration_mm + cfg.base_height_mm;
     std::vector<float> middles;
