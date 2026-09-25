@@ -122,6 +122,11 @@ alone and on the re-run, assertion not captured. Capture the failing assertion b
 failed its `split.stability.unsupported_paths > 0` leg once under `ctest -j5` (read `0 > 0`), then passed 12 of 12
 runs alone, 30 of 30 runs five at a time and the full gate re-run (2026-09-10, no raft, analysis requested); re-run
 once before reading a lone failure there as a regression.
+The hidden `[ScaffoldSupport][.]` case "Scaffold support over corpus plate 3 in two poses" fails its upright
+`floating_pieces_removed == 0` leg at `2 == 0` in about 2 of 5 runs of one binary: the SLA builder's routing on the
+upright pose varies between runs, and only the variant reading `routed 1373 / dropped 286` leaves two cage pieces of
+1.85 mm2 at z 2.84 and 2.96 near (10.4, -12.4), which the floating pass removes, while `1375 / 284` reads 0
+(2026-09-24). Re-run the case once before reading an upright count of 2 as a regression.
 `SupportAnalysis::Report::missing_anchor_ids` lists every seed whose region never reached printed material through
 that seed, so the seeds `MiniatureSupport::select_contacts` decimates by design are in it: plate 3 of `elf_test.3mf`
 reads 1638 `missing_critical_anchors` in the harness row while the slice log's `Support contact layout for` line
