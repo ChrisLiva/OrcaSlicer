@@ -2003,28 +2003,18 @@ void TreeSupport::generate()
     }
     profiler.stage_finish(STAGE_SELECT_CONTACTS);
 
-    m_ts_data->layer_heights = plan_layer_heights();
-
-    // What the scaffold did with its tips, for the report below. Zero under every other style.
-    ScaffoldSupport::Counts scaffold_counts;
+    // The scaffold chooses its tips before the layers are planned, and every tip's z tops a planned layer, so a tip
+    // standing where no contact does prints its top ring right under it as a contact's tip does.
+    ScaffoldSupport::Params params;
+    ScaffoldSupport::Tips   scaffold_tips;
+    std::vector<coordf_t>   tip_tops;
     if (m_scaffold) {
-        // The scaffold's body is the SLA support tree built on the object mesh and sliced into the planned
-        // layers; drop_nodes, smooth_nodes and draw_circles do not run.
-        const std::vector<LayerHeightData> &plan = m_ts_data->layer_heights;
-        ScaffoldSupport::Params params;
         params.toolpath_width_mm    = toolpath_support_width(m_support_params, *m_print_config, *m_object_config);
         params.pillar_diameter_mm   = m_object_config->tree_support_branch_diameter.value;
         params.xy_distance_mm       = m_ts_data->m_xy_distance;
         params.bridge_length_mm     = m_object_config->scaffold_bridge_length.value;
         params.brace_slenderness    = m_object_config->scaffold_brace_slenderness.value;
         params.max_bridge_length_mm = m_object_config->max_bridge_length.value;
-        // 0.6 mm rounded up to whole planned layers.
-        params.pad_thickness_mm     = plan.empty() ? 0. : plan.back().print_z;
-        for (const LayerHeightData &layer : plan)
-            if (layer.print_z >= 0.6 - EPSILON) {
-                params.pad_thickness_mm = layer.print_z;
-                break;
-            }
         params.z_offset_mm          = m_slicing_params.object_print_z_min;
         params.interface_width_mm   = support_material_interface_flow(m_object, float(m_slicing_params.layer_height)).width();
         // The base walls generate_toolpaths lays above the pad, through the same call; a base pattern with infill
@@ -2043,6 +2033,26 @@ void TreeSupport::generate()
             return cover;
         };
         params.interface_layers     = m_support_params.num_top_interface_layers;
+        scaffold_tips = ScaffoldSupport::choose_tips(*m_object, contact_nodes, m_dropped_contacts, params);
+        for (const ScaffoldSupport::TipSite &tip : scaffold_tips.sites)
+            tip_tops.push_back(tip.print_z);
+    }
+
+    m_ts_data->layer_heights = plan_layer_heights(tip_tops);
+
+    // What the scaffold did with its tips, for the report below. Zero under every other style.
+    ScaffoldSupport::Counts scaffold_counts;
+    if (m_scaffold) {
+        // The scaffold's body is the SLA support tree built on the object mesh and sliced into the planned
+        // layers; drop_nodes, smooth_nodes and draw_circles do not run.
+        const std::vector<LayerHeightData> &plan = m_ts_data->layer_heights;
+        // 0.6 mm rounded up to whole planned layers.
+        params.pad_thickness_mm = plan.empty() ? 0. : plan.back().print_z;
+        for (const LayerHeightData &layer : plan)
+            if (layer.print_z >= 0.6 - EPSILON) {
+                params.pad_thickness_mm = layer.print_z;
+                break;
+            }
 
         // The clip the seam runs on each planned layer, computed once, since draw's neck check applies it the same way:
         // base stays out of the model over the layer's whole height grown by the xy distance and out of the bottom
@@ -2067,8 +2077,7 @@ void TreeSupport::generate()
         });
 
         m_object->print()->set_status(60, _u8L("Generating support"));
-        const ScaffoldSupport::Output out = ScaffoldSupport::draw(*m_object, contact_nodes, m_dropped_contacts, plan, clips, m_risk,
-                                                                  params, throw_on_cancel);
+        const ScaffoldSupport::Output out = ScaffoldSupport::draw(*m_object, scaffold_tips, plan, clips, m_risk, params, throw_on_cancel);
         profiler.stage_durations[STAGE_ISLAND_JOINS]   = out.stage_ms.island_joins;
         profiler.stage_durations[STAGE_SCAFFOLD_BUILD] = out.stage_ms.build;
         profiler.stage_durations[STAGE_SCAFFOLD_SLICE] = out.stage_ms.slice;
@@ -4051,7 +4060,7 @@ void TreeSupport::smooth_nodes()
     }
 }
 
-std::vector<LayerHeightData> TreeSupport::plan_layer_heights()
+std::vector<LayerHeightData> TreeSupport::plan_layer_heights(const std::vector<coordf_t> &tip_tops)
 {
     std::vector<LayerHeightData> layer_heights;
     std::map<coordf_t, coordf_t> z_heights; // print_z:height
@@ -4084,6 +4093,11 @@ std::vector<LayerHeightData> TreeSupport::plan_layer_heights()
                 bounds.insert({std::max(min_print_z, print_z - height), 0}); // the bottom_z of the layer
             }
         }
+        // A scaffold tip the hold floor seeded or restored can stand where no contact does, and its top ring prints
+        // on the layer whose top is the tip's z. A tip stands at an object layer's bottom, where support layers that
+        // follow the object's layers already end one.
+        for (const coordf_t z : tip_tops)
+            bounds.insert({std::max(min_print_z, z), 0});
 
         auto it1 = bounds.begin();
         auto it2 = std::next(it1);

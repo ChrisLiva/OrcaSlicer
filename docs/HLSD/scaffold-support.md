@@ -4,7 +4,7 @@
 
 Tree Scaffold is a support style for miniatures and other fine models printed
 with a small nozzle. Its body is the SLA support tree: thin pillars standing on
-a solid pad, joined by bridges and braces, each pillar ending in a small head
+a pad, joined by bridges and braces, each pillar ending in a small head
 that fuses to the model. A print peels off the pad in one piece and the heads
 snap off the model at their necks, which leaves small marks rather than the
 broad scars a tree roof leaves on a figure's underside.
@@ -35,15 +35,16 @@ Two settings belong to the style and show only under it:
 `tree_support_branch_diameter` sets the pillar diameter, as it sets the branch
 diameter of the slim, strong and hybrid styles.
 
-Under Scaffold the constructor of `TreeSupport` forces three settings the style
-depends on, and the settings panel greys their fields out:
-`support_miniature_contacts` reads on, because the scaffold places one tip per
-contact the miniature selection keeps; `support_top_z_distance` reads zero,
-because a tip fuses to the model rather than printing under a gap; and the
-floating pass treats support as plate-only, because a pillar never stands on
-the model. Auto-tilt names the style as its own generator and refuses to
-evaluate an object that uses it, with the message "Auto-tilt cannot verify this
-object: Tree Scaffold support is not evaluated."
+Under Scaffold three settings the style depends on read fixed, and the
+settings panel greys their fields out. The constructor of `TreeSupport` forces
+two of them: `support_miniature_contacts` reads on, because the scaffold places
+one tip per contact the miniature selection keeps, and `support_top_z_distance`
+reads zero, because a tip fuses to the model rather than printing under a gap.
+`remove_floating_toolpaths` applies the third: it roots support on the plate
+alone under `m_scaffold || support_on_build_plate_only`, because a pillar never
+stands on the model. Auto-tilt names the style as its own generator and refuses
+to evaluate an object that uses it, with the message "Auto-tilt cannot verify
+this object: Tree Scaffold support is not evaluated."
 
 A project that names `tree_scaffold` in a build without the style loads with
 the default style substituted, and the two scaffold keys are dropped as
@@ -59,15 +60,22 @@ the contact selection erases the contacts it did not keep, the scaffold keeps
 those pointers in `m_dropped_contacts`, because the island hold floor draws on
 them.
 
-After `plan_layer_heights` the generator branches. Under Scaffold it fills a
+Before `plan_layer_heights`, under Scaffold, the generator fills a
 `ScaffoldSupport::Params` from the object config (toolpath width, pillar
 diameter, `m_ts_data->m_xy_distance`, the two scaffold keys,
-`max_bridge_length`, the interface layer count, the object's print z offset and
-a pad thickness of 0.6 mm rounded up to the first planned layer at or above it)
-and computes each planned layer's clip once, a `ScaffoldSupport::LayerClip`:
-the model over the layer's whole height, and that model grown by the xy
-distance together with the bottom-gap trim regions. It calls
-`ScaffoldSupport::draw`, whose neck check reads the same clips. `drop_nodes`,
+`max_bridge_length`, the interface layer count and the object's print z
+offset) and calls `ScaffoldSupport::choose_tips` on the kept and the dropped
+contacts. `plan_layer_heights` then takes every chosen tip's z as a layer top
+besides the contacts' own, so a tip the hold floor seeded or restored where no
+contact stands prints its top ring on the layer right under it, not under an
+air gap. Under every other style that list is empty.
+
+After the plan the generator branches. Under Scaffold it sets the pad thickness
+to 0.6 mm rounded up to the first planned layer at or above it and computes
+each planned layer's clip once, a `ScaffoldSupport::LayerClip`: the model over
+the layer's whole height, and that model grown by the xy distance together
+with the bottom-gap trim regions. It calls `ScaffoldSupport::draw` with the
+chosen tips, and the draw's neck check reads the same clips. `drop_nodes`,
 `smooth_nodes` and `draw_circles` do not run.
 
 For each planned layer `TreeSupport` then clips the returned base areas against
@@ -83,9 +91,13 @@ run for every style alike.
 
 ## The ScaffoldSupport module
 
-`src/libslic3r/Support/ScaffoldSupport.{hpp,cpp}` holds one function,
-`ScaffoldSupport::draw`, that turns the contact nodes into per-layer areas and
-counts what it did with them. It runs seven steps.
+`src/libslic3r/Support/ScaffoldSupport.{hpp,cpp}` holds two functions that
+run seven steps between them. `ScaffoldSupport::choose_tips`, the selection,
+runs steps 1 to 4 on the contact nodes, reads no planned layer and returns the
+tips with the hold floor's count, which is why it can run before the layers are
+planned. `ScaffoldSupport::draw` runs steps 5 to 7 on those tips and the
+planned layers, turns them into per-layer areas and counts what it did with
+them.
 
 1. Tip selection. Every contact node becomes a tip, except an interior contact
    (`SupportNode::Placement::Interior`) whose overhang, shrunk by half of
@@ -93,7 +105,7 @@ counts what it did with them. It runs seven steps.
    bridge span the corner and contour tips on its rim already hold it.
 2. The wall skip. The seam clips support inside the xy distance of the model,
    so a head whose neck stood in that band would lose its neck while its ring
-   survived. The draw reads the object layer at the neck's bottom, one head
+   survived. The selection reads the object layer at the neck's bottom, one head
    width plus one toolpath width under the tip, and skips a tip whose centre
    lies within the xy distance of that layer's slices; the wall anchors that
    band as it does under the legacy tree. The layer just under the overhang is
@@ -120,17 +132,17 @@ counts what it did with them. It runs seven steps.
    skip removes that seed and the island joins within 1 mm, the wall beside it
    holds it: it gets no tip, no count, and logs
    `scaffold island held at z: wall` at debug level. A taller island whose seed
-   stands at a wall counts as under-held. Short of the floor, the draw restores
-   dropped contacts under the island, lowest first and among equals the one
-   furthest from the island's tips. An island counts as under-held only when it
-   holds fewer tips than both its floor and the number its birth piece fits,
-   the points of a hexagonal grid at the pillar diameter inside the piece
+   stands at a wall counts as under-held. Short of the floor, the selection
+   restores dropped contacts under the island, lowest first and among equals
+   the one furthest from the island's tips. An island counts as under-held only
+   when it holds fewer tips than both its floor and the number its birth piece
+   fits, the points of a hexagonal grid at the pillar diameter inside the piece
    shrunk by half a pillar diameter, never fewer than one. A tip belongs to the
    island that owns the model piece over it on the overhang's own layer, one
    above the node's layer.
 4. The alias merge. The front half can hand the same overhang spot on two
    consecutive layers, and the builder keeps one point of each pair within
-   `sla::D_SP`. The draw visits the tips lowest first, among equals by seed
+   `sla::D_SP`. The selection visits the tips lowest first, among equals by seed
    id, and merges a tip standing within `sla::D_SP` in 3-D of a tip already
    kept into it, so no two tips it hands the builder are aliases. A merge logs
    `scaffold tip merged at (x, y, z)` at debug level and counts as neither
@@ -155,9 +167,11 @@ counts what it did with them. It runs seven steps.
    outside the clip's band and the rings outside the model, with the small
    holes `TreeSupport::fill_small_holes` fills filled, as `finish_layer_areas`
    fills them on every support layer. The base goes through
-   `Params::base_cover`, which lays its walls through the same
-   `tree_supports_generate_paths` call `generate_toolpaths` makes, so a wide
-   area's inside and a sliver too short for a loop print nothing. A ring
+   `Params::base_cover`, which under the default base pattern lays its walls
+   through the same `tree_supports_generate_paths` call `generate_toolpaths`
+   makes, so a wide area's inside and a sliver too short for a loop print
+   nothing, and under a pattern with infill other than lightning reads the
+   area opened by half a support line. A ring
    prints one interface loop on its area shrunk by half the interface
    spacing, laid through `extrusion_entities_append_loops` as
    `make_perimeter_and_infill` lays it, with its infill counted as solid, so a
@@ -184,8 +198,8 @@ counts what it did with them. It runs seven steps.
    adds a pad of the pad thickness with a 1.6 mm brim and no wall.
 7. Slicing. Each run slices its cage at the middle of every planned layer,
    and each routed head's own mesh at the tops of its top interface layer,
-   the highest planned layer at or under the tip, and of the layers under it
-   up to the interface count. The last run's slices are the output: the pad,
+   the planned layer whose top is the tip's z, and of the layers under it up
+   to the interface count. The last run's slices are the output: the pad,
    sliced on the layers it spans, joins the cage's sections as base areas, and
    the rings become the layer's interface areas and leave its base.
 
@@ -240,9 +254,15 @@ prints it at the same density with the support flow, so every foot lands on
 printed material; the pad layers between only carry the top and print it at
 half that density.
 
-Above the pad, pillars, bridges and braces print exactly as the legacy tree's
-base: walls around each area with no infill, laid by
-`tree_supports_generate_paths`. The tip rings print as the top interface, in
+Above the pad, pillars, bridges and braces print as the legacy tree's base.
+`generate_toolpaths` sets a base area's `need_infill` from `with_infill`, which
+holds under every `support_base_pattern` but the default and none. Under those
+two each area prints walls with no infill, laid by
+`tree_supports_generate_paths`. Under a pattern with infill each area prints
+walls and infill through `make_perimeter_and_infill`, or tree walls and
+lightning infill under the lightning pattern, and `Params::base_cover` reads
+such an area, lightning aside, as the area opened by half a support line. The
+tip rings print as the top interface, in
 the interface pattern and flow; with no interface layers configured the rings
 stay in the base and print as base.
 
@@ -292,12 +312,13 @@ result row, the pad's densities and the wall-only base on a shelf fixture with
 nothing floating and no tip beside the column's wall, cancellation during the
 build, rings printing as base without interface layers, a tip with no route
 being dropped and counted, a head whose neck the band cuts on a slope beside
-a wall being dropped with no ring left floating, interior tip thinning, the
-hold floor restoring contacts under tall islands and capped by what a birth
-piece fits, a tip seeded under an unseeded feature start with none under
-debris or under a sliver the wall beside it holds, and braces on slender
-pillars. The SLA builder changes are covered in
-`tests/sla_print/sla_print_tests.cpp`.
+a wall being dropped with no ring left floating and no bare planned layer
+left, interior tip thinning, the hold floor restoring contacts under tall
+islands and capped by what a birth piece fits, a tip seeded under an unseeded
+feature start with its ring on the layer its z tops and none under debris or
+under a sliver the wall beside it holds, a sliver joining too high for its
+wall counted under-held, and braces on slender pillars. The SLA builder changes
+are covered in `tests/sla_print/sla_print_tests.cpp`.
 
 The hidden case "Scaffold support over corpus plate 3 in two poses"
 (`[ScaffoldSupport][.]`) needs `ORCA_MINIATURE_CORPUS` pointing at the

@@ -69,17 +69,6 @@ sla::SupportTreeConfig tree_config(const Params &params)
 // The seed a contact was placed for, or the largest id for a node the seed pass never named.
 uint64_t seed_id(const SupportNode &node) { return node.source_ids.empty() ? std::numeric_limits<uint64_t>::max() : node.source_ids.front(); }
 
-// Where a tip stands. `node` is the contact it stands for, or null for a tip the hold floor seeded under an island
-// the front half left without one.
-struct TipSite
-{
-    Point              position;
-    double             print_z      = 0.;
-    int                obj_layer_nr = 0;
-    uint64_t           seed         = std::numeric_limits<uint64_t>::max();
-    const SupportNode *node         = nullptr;
-};
-
 TipSite site_of(const SupportNode &node) { return { node.position, node.print_z, node.obj_layer_nr, seed_id(node), &node }; }
 
 // The tips a model island needs for its unjoined height: one for a sliver, two up to 5 mm, three above. A slab z is
@@ -294,24 +283,14 @@ void merge_aliases(std::vector<TipSite> &tips)
 
 } // namespace
 
-Output draw(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts,
-            const std::vector<SupportNode *> &dropped, const std::vector<LayerHeightData> &layer_heights,
-            const std::vector<LayerClip> &clips, const ModelSupportRisk::Field &risk, const Params &params,
-            const std::function<void()> &throw_on_cancel)
+Tips choose_tips(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts,
+                 const std::vector<SupportNode *> &dropped, const Params &params)
 {
-    Output out;
-    out.layers.resize(layer_heights.size());
-    for (const LayerHeightData &plan : layer_heights) {
-        if (plan.print_z > params.pad_thickness_mm + EPSILON)
-            break;
-        ++ out.pad_layers;
-    }
-
     // One tip per contact. An interior tip is kept only where its overhang holds a disc as wide as the longest bridge:
     // under a narrower overhang the tips on its rim already hold it.
     std::vector<TipSite> nodes;
-    for (size_t i = 0; i < std::min(contacts.size(), layer_heights.size()); ++ i)
-        for (const SupportNode *node : contacts[i])
+    for (const std::vector<SupportNode *> &layer : contacts)
+        for (const SupportNode *node : layer)
             if (node->placement != SupportNode::Placement::Interior ||
                 (! node->overhang.empty() && ! offset_ex(node->overhang, -scale_(params.max_bridge_length_mm / 2.)).empty()))
                 nodes.push_back(site_of(*node));
@@ -367,12 +346,31 @@ Output draw(const PrintObject &object, const std::vector<std::vector<SupportNode
     nodes.erase(std::remove_if(nodes.begin(), nodes.end(), at_wall), nodes.end());
     spare.erase(std::remove_if(spare.begin(), spare.end(), at_wall), spare.end());
 
-    const auto islands_start      = std::chrono::steady_clock::now();
-    out.counts.islands_under_held = restore_hold_floor(object, nodes, spare, params.pillar_diameter_mm, at_wall);
-    out.stage_ms.island_joins     = ms_since(islands_start);
+    Tips       tips;
+    const auto islands_start = std::chrono::steady_clock::now();
+    tips.islands_under_held  = restore_hold_floor(object, nodes, spare, params.pillar_diameter_mm, at_wall);
+    tips.island_joins_ms     = ms_since(islands_start);
     // The floor counted tips a pillar diameter apart, so no alias counted there twice; the merge comes after it so
     // that a restored contact standing on a kept one merges too.
     merge_aliases(nodes);
+    tips.sites = std::move(nodes);
+    return tips;
+}
+
+Output draw(const PrintObject &object, const Tips &chosen, const std::vector<LayerHeightData> &layer_heights,
+            const std::vector<LayerClip> &clips, const ModelSupportRisk::Field &risk, const Params &params,
+            const std::function<void()> &throw_on_cancel)
+{
+    Output out;
+    out.layers.resize(layer_heights.size());
+    for (const LayerHeightData &plan : layer_heights) {
+        if (plan.print_z > params.pad_thickness_mm + EPSILON)
+            break;
+        ++ out.pad_layers;
+    }
+    out.counts.islands_under_held = chosen.islands_under_held;
+    out.stage_ms.island_joins     = chosen.island_joins_ms;
+    const std::vector<TipSite> &nodes = chosen.sites;
 
     // A tip's grade is the width of the disc it fuses to the model with: two support lines, or four where the model
     // under it hangs off a neck at least eight lines wide. The pin is half the grade. A seeded tip starts a feature
@@ -421,7 +419,7 @@ Output draw(const PrintObject &object, const std::vector<std::vector<SupportNode
     };
 
     // How many planned layers have their top at or under a head's tip. The head's rings print on the highest of
-    // them and the ones under it up to the interface count.
+    // them, the layer the tip's z tops, and the ones under it up to the interface count.
     const auto layers_under_tip = [&](const sla::Head &head) {
         const double tip_z = head.pos.z() + params.z_offset_mm;
         return size_t(std::upper_bound(layer_heights.begin(), layer_heights.end(), tip_z + EPSILON,

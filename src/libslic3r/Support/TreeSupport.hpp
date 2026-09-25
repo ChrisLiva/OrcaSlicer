@@ -547,9 +547,10 @@ private:
     /*! BBS: MusangKing: maximum layer height
      * \brief Optimize the generation of tree support by pre-planning the layer_heights
      *
+     * \param tip_tops The z of each scaffold tip, each planned as a layer's top. Empty under every other style.
     */
 
-    std::vector<LayerHeightData> plan_layer_heights();
+    std::vector<LayerHeightData> plan_layer_heights(const std::vector<coordf_t> &tip_tops);
     /*!
      * \brief Creates points where support contacts the model.
      *

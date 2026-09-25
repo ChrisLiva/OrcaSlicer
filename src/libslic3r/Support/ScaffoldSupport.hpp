@@ -1,4 +1,5 @@
 #pragma once
+#include <limits>
 #include "TreeSupport.hpp"          // SupportNode, LayerHeightData
 #include "ModelSupportRisk.hpp"
 namespace Slic3r::ScaffoldSupport {
@@ -23,11 +24,25 @@ struct StageMs { uint32_t island_joins = 0, build = 0, slice = 0; };   // for Tr
 struct Output { std::vector<LayerAreas> layers;   // one entry per planned layer
                 size_t pad_layers = 0;            // the leading planned layers whose base is the pad
                 Counts counts; StageMs stage_ms; };
-// contacts: TreeSupport's contact_nodes after plan_layer_heights re-distributes them, one entry per planned layer.
-// dropped: the nodes the erase loop after select_contacts took out, the hold floor's candidates.
+// Where a tip stands. `node` is the contact it stands for, or null for a tip the hold floor seeded under an island
+// the front half left without one.
+struct TipSite
+{
+    Point              position;
+    double             print_z      = 0.;
+    int                obj_layer_nr = 0;
+    uint64_t           seed         = std::numeric_limits<uint64_t>::max();
+    const SupportNode *node         = nullptr;
+};
+// The tips `draw` builds heads for, with what the hold floor counted and how long its island map took.
+struct Tips { std::vector<TipSite> sites; size_t islands_under_held = 0; uint32_t island_joins_ms = 0; };
+// contacts: TreeSupport's contact_nodes before plan_layer_heights re-distributes them, the nodes the contact selection
+// kept. dropped: the nodes the erase loop after select_contacts took out, the hold floor's candidates. Reads no planned
+// layer, so TreeSupport plans a layer topped at every tip's z.
+Tips choose_tips(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts,
+                 const std::vector<SupportNode *> &dropped, const Params &params);
 // clips: the clip the seam runs on each planned layer, which the neck check applies the same way.
-Output draw(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts,
-            const std::vector<SupportNode *> &dropped, const std::vector<LayerHeightData> &layer_heights,
+Output draw(const PrintObject &object, const Tips &chosen, const std::vector<LayerHeightData> &layer_heights,
             const std::vector<LayerClip> &clips, const ModelSupportRisk::Field &risk, const Params &params,
             const std::function<void()> &throw_on_cancel);
 }
