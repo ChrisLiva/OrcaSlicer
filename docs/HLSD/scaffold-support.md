@@ -80,7 +80,7 @@ chosen tips, and the draw's neck check reads the same clips. `drop_nodes`,
 
 For each planned layer `TreeSupport` then clips the returned areas.
 `ScaffoldSupport::clip_base` keeps the base out of the grown band and adds back
-the painted tips' heads kept out of the model alone, the machine border clips
+the enforced tips' heads kept out of the model alone, the machine border clips
 the result, and the interface areas stay out of the model alone, since the
 rings fuse to it. The base areas become `BaseType` area groups with no infill
 and the interface areas become `Roof1stLayer` groups; a group on one of the
@@ -116,12 +116,13 @@ them.
    has not. A skipped tip logs `scaffold tip skipped at (x, y, z): wall` at
    debug level and counts as neither placed nor dropped. The same test applies
    to the dropped contacts the hold floor may restore and to the tips it
-   seeds. A painted tip is exempt: a contact the paint asked for,
-   `SupportNode::is_pinned`, which under Scaffold marks a painted area
-   enforcer's contacts and every vertical enforcer point, becomes a
-   `TipSite` with `painted` set, and the skip keeps it however close the wall
-   stands, so the tip fuses where the user painted and leaves its scar
-   there.
+   seeds. An enforced tip is exempt: a contact a support enforcer asked for,
+   `SupportNode::is_pinned`, which under Scaffold marks every contact on an
+   overhang an enforcer covers, whether painted facets or an enforcer
+   modifier volume, and every vertical enforcer point painted facets place,
+   becomes a `TipSite` with `enforced` set, and the skip keeps it however
+   close the wall stands, so the tip fuses where the user asked for support
+   and leaves its scar there.
 3. The island hold floor. `SupportAnalysis::island_joins` maps every mid-air
    island of the model to the slab where it first meets the rooted body. An
    island needs one tip when its unjoined height is at most 1 mm, two up to
@@ -152,7 +153,7 @@ them.
    `sla::D_SP`. The selection visits the tips lowest first, among equals by seed
    id, and merges a tip standing within `sla::D_SP` in 3-D of a tip already
    kept into it, so no two tips it hands the builder are aliases; a kept tip is
-   painted when any tip merged into it was. A merge logs
+   enforced when any tip merged into it was. A merge logs
    `scaffold tip merged at (x, y, z)` at debug level and counts as neither
    placed nor dropped.
 5. Grading. A tip's head fuses to the model with a disc two support lines
@@ -172,10 +173,10 @@ them.
    The neck check then reads what the seam would print of the build on each
    planned layer above the pad, as the outlines its lines cover, since the
    floating pass reads `polygons_covered_by_width`. The areas are the cage
-   outside the clip's band with the painted heads outside the model, through
+   outside the clip's band with the enforced heads outside the model, through
    the `clip_base` the seam calls, and the rings outside the model, with the
    small holes `TreeSupport::fill_small_holes` fills filled, as
-   `finish_layer_areas` fills them on every support layer, so a painted head's
+   `finish_layer_areas` fills them on every support layer, so an enforced head's
    neck beside a wall holds its rings and the head is not cut for it. The base
    goes through `Params::base_cover`, which under the default base pattern
    lays its walls
@@ -197,10 +198,16 @@ them.
    wall of a cage hole, a gap among fused necks 2 mm across or wider whose
    narrower stretches on the layers around it are filled, has its hole filled
    instead, which removes a wall that stands over the unprinted inside of the
-   section below. A painted head whose own neck under its rings lies in a
+   section below. An enforced head whose own neck under its rings lies in a
    floating piece that holds no ring and walls no hole is cut as well: the
    head runs through the model or narrows under a line there, so the neck the
-   paint exempts from the band would print in mid-air. The cut heads' points
+   enforcer exempts from the band would print in mid-air. On a layer with an
+   enforced head a piece counts as a hole's wall only when the base the seam
+   prints after the fill borders no hole at it, since the band or the model
+   can cut the filled hole out of that base again and leave the wall in
+   mid-air. With no interface layers there is no ring to check, but the check
+   still runs while any tip is enforced, since an enforced head prints its
+   neck up to its tip. The cut heads' points
    leave the point set, in order, and the builder runs again, since a run
    re-routes the neighbours of what it lost and can strand another ring. It
    repeats until no head is cut, at most six runs (plate 3 of the corpus needs
@@ -214,14 +221,14 @@ them.
 7. Slicing. Each run slices its cage at the middle of every planned layer,
    each routed head's own mesh at the tops of its top interface layer,
    the planned layer whose top is the tip's z, and of the layers under it up
-   to the interface count, and a painted tip's head at the middles of the
+   to the interface count, and an enforced tip's head at the middles of the
    layers it reaches under those. The last run's slices are the output: the
    pad, sliced on the layers it spans, joins the cage's sections as base
    areas, the rings become the layer's interface areas and leave its base, and
-   the painted heads' slices go out apart for `clip_base`.
+   the enforced heads' slices go out apart for `clip_base`.
 
 The returned `Output` carries one `LayerAreas` per planned layer (base,
-interface and painted heads), the number of
+interface and enforced heads), the number of
 leading layers that are pad, the five tip and pillar counts, and the
 milliseconds spent in the island map, in every build with the pad, and in the
 slicing with the neck checks, which
@@ -284,12 +291,13 @@ tip rings print as the top interface, in
 the interface pattern and flow; with no interface layers configured the rings
 stay in the base and print as base.
 
-Base stays out of the model grown by the xy distance, except a painted tip's
-own head under its rings, which stays out of the model alone: without it the
-band would cut the neck of a tip the user painted beside a wall and leave its
-rings over nothing. The exemption covers that head only; pillars, bridges and
-braces keep the band, and the neck check cuts a painted head whose own neck
-would print in mid-air.
+Base stays out of the model grown by the xy distance, except at an enforced
+tip, one that painted enforcer facets or an enforcer modifier volume asked
+for: the tip's own head under its rings stays out of the model alone. Without
+that exception the band would cut the neck of a tip the user enforced beside a
+wall and leave its rings over nothing. The exemption covers that head only;
+pillars, bridges and braces keep the band, and the neck check cuts an enforced
+head whose own neck would print in mid-air.
 
 The floating pass runs on every pass that measures itself, and the scaffold
 always does, since it forces miniature contacts on. Under Scaffold the pass
@@ -344,8 +352,9 @@ feature start with its ring on the layer its z tops and none under debris or
 under a sliver the wall beside it holds, a sliver joining too high for its
 wall counted under-held, braces on slender pillars, and a painted bar
 underside and a painted column face beside the column's wall printing their
-tips there at the corpus's widths and layer height, where the unpainted bar
-prints none. The SLA builder changes are covered in
+tips there at the corpus's widths and layer height, with two interface layers
+and with none, where the unpainted bar prints none and no base but those
+enforced heads enters the band. The SLA builder changes are covered in
 `tests/sla_print/sla_print_tests.cpp`.
 
 The hidden case "Scaffold support over corpus plate 3 in two poses"
@@ -354,6 +363,8 @@ directory holding `elf_test.3mf`. It slices plate 3's object under tree slim
 and tree scaffold, first in the stored pose and then upright, times each
 `Print::process()` and one `island_joins` call, writes one row per slice, and
 requires of each scaffold slice: dropped tips at most a fifth of those placed,
-no floating piece removed, a process time at most 1.5 times the tree-slim
-slice's, `island_joins` within 2 s and a support volume at most 2.5 times the
-tree-slim slice's; the upright pose also requires no under-held island.
+no floating piece removed, a process time at most 1.75 times the tree-slim
+slice's in the stored pose, whose painted enforcers add tips beside the walls,
+and 1.5 times upright, `island_joins` within 2 s and a support volume at most
+2.5 times the tree-slim slice's; the upright pose also requires no under-held
+island.

@@ -234,7 +234,7 @@ size_t restore_hold_floor(const PrintObject &object, std::vector<TipSite> &tips,
 // equals by seed id, and a tip within the distance of a tip already kept merges into it; a merged tip absorbs none.
 // A chain at the layer pitch therefore keeps every tip standing further than the distance from the kept tips under
 // it, and three tips all within the distance of each other keep one where the builder's pairs would keep two: no
-// two kept tips are aliases, so the builder filters none. A kept tip is painted when a tip merged into it was. The
+// two kept tips are aliases, so the builder filters none. A kept tip is enforced when a tip merged into it was. The
 // kept tips sit in a grid of cells the distance wide, so a tip reads the 27 cells around its own. `tips` keeps its
 // order.
 void merge_aliases(std::vector<TipSite> &tips)
@@ -271,7 +271,7 @@ void merge_aliases(std::vector<TipSite> &tips)
                       int64_t(std::floor(p.z() / sla::D_SP))};
         if (const size_t into = alias_of(p, c); into != size_t(-1)) {
             BOOST_LOG_TRIVIAL(debug) << "scaffold tip merged at (" << p.x() << ", " << p.y() << ", " << p.z() << ")";
-            tips[into].painted = tips[into].painted || tips[i].painted;
+            tips[into].enforced = tips[into].enforced || tips[i].enforced;
             continue;
         }
         keep[i] = true;
@@ -286,11 +286,11 @@ void merge_aliases(std::vector<TipSite> &tips)
 
 } // namespace
 
-ExPolygons clip_base(const ExPolygons &base, const ExPolygons &painted_heads, const LayerClip &clip)
+ExPolygons clip_base(const ExPolygons &base, const ExPolygons &enforced_heads, const LayerClip &clip)
 {
     ExPolygons out = diff_ex(base, clip.band);
-    if (! painted_heads.empty())
-        out = union_ex(out, diff_ex(painted_heads, clip.model));
+    if (! enforced_heads.empty())
+        out = union_ex(out, diff_ex(enforced_heads, clip.model));
     return out;
 }
 
@@ -311,8 +311,8 @@ Tips choose_tips(const PrintObject &object, const std::vector<std::vector<Suppor
     // would be cut while its ring survived. Under a slope the head tilts along the underside's normal and the
     // slope recedes at least its rise by that depth, so the neck clears the band; beside a wall it does not, and
     // the wall anchors that band as it does under the legacy tree. A neck bottoming under the first layer stands
-    // by the pad and is kept, and so is a painted tip: the paint asked for it there, and `clip_base` keeps its head
-    // out of the model alone.
+    // by the pad and is kept, and so is an enforced tip: the enforcer asked for it there, and `clip_base` keeps its
+    // head out of the model alone.
     const double neck_depth_mm = head_width_mm + params.toolpath_width_mm;
     const auto   reference_layer = [&object, neck_depth_mm](const TipSite &tip) {
         const double z = tip.print_z - neck_depth_mm;
@@ -343,7 +343,7 @@ Tips choose_tips(const PrintObject &object, const std::vector<std::vector<Suppor
     // A tip the hold floor seeds may stand over a layer no other tip does, so its band is offset on the spot.
     const auto at_wall = [&](const TipSite &tip) {
         const int l = reference_layer(tip);
-        if (l < 0 || tip.painted)
+        if (l < 0 || tip.enforced)
             return false;
         const auto        it     = std::lower_bound(wall_layers.begin(), wall_layers.end(), l);
         const bool        listed = it != wall_layers.end() && *it == l;
@@ -439,7 +439,7 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
                       layer_heights.begin());
     };
     // A build's slices: the cage through each planned layer's middle, each routed head's own head through the tops of
-    // its ring layers, `first` the lowest, and a painted tip's own head through the middles of the layers it reaches
+    // its ring layers, `first` the lowest, and an enforced tip's own head through the middles of the layers it reaches
     // under its rings, `neck_first` the lowest. The rings are indexed as the build's heads, whose ids index `tip_of`.
     struct Rings { size_t first = 0; std::vector<ExPolygons> slices; size_t neck_first = 0; std::vector<ExPolygons> neck; };
     std::vector<float> middles;
@@ -464,8 +464,8 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
                 const size_t above = layers_under_tip(heads[h]);
                 const size_t count = std::min(above, params.interface_layers);
                 rings[h].first     = above - count;
-                const bool painted = nodes[tip_of[size_t(heads[h].id)]].painted;
-                if (count == 0 && ! painted)
+                const bool enforced = nodes[tip_of[size_t(heads[h].id)]].enforced;
+                if (count == 0 && ! enforced)
                     continue;
                 const indexed_triangle_set head = sla::get_mesh(heads[h], 45);
                 // The slicer wants its heights ascending.
@@ -475,7 +475,7 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
                         zs.push_back(float(layer_heights[i].print_z - params.z_offset_mm));
                     rings[h].slices = slice_mesh_ex(head, zs, 0.f);
                 }
-                if (painted) {
+                if (enforced) {
                     const float bottom = std::min_element(head.vertices.begin(), head.vertices.end(),
                                                           [](const Vec3f &a, const Vec3f &b) { return a.z() < b.z(); })->z();
                     rings[h].neck_first = std::min(size_t(std::lower_bound(middles.begin(), middles.end(), bottom) - middles.begin()),
@@ -487,8 +487,8 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
             }
         });
     };
-    // The painted heads' slices per planned layer.
-    const auto painted_heads = [&layer_heights](const std::vector<Rings> &rings) {
+    // The enforced heads' slices per planned layer.
+    const auto enforced_heads = [&layer_heights](const std::vector<Rings> &rings) {
         std::vector<ExPolygons> out(layer_heights.size());
         for (const Rings &r : rings)
             for (size_t k = 0; k < r.neck.size(); ++ k)
@@ -511,12 +511,13 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
     // A head is cut where one of its rings lies in a floating piece. A floating piece that holds no ring and is the
     // wall of a hole in the cage's section stands over the unprinted inside of the section below: a gap among fused
     // necks 2 mm across or wider keeps its hole while the same gap narrower on the layers around it is filled. That
-    // hole is filled too, which removes the wall and nothing a rooted piece stands on. A painted head is cut where its
-    // own neck under its rings lies in a floating piece that holds no ring and walls no hole: the head runs through the
-    // model or narrows under a line there, so the neck the paint exempts from the band would print in mid-air.
+    // hole is filled too, which removes the wall and nothing a rooted piece stands on. An enforced head is cut where
+    // its own neck under its rings lies in a floating piece that holds no ring and walls no hole the fill removes: the
+    // head runs through the model or narrows under a line there, so the neck the enforcer exempts from the band would
+    // print in mid-air.
     const float half_line = float(scale_(0.5 * params.toolpath_width_mm));
     const auto find_stranded = [&](const std::vector<sla::Head> &heads, std::vector<ExPolygons> &cage,
-                                   const std::vector<Rings> &rings, const std::vector<ExPolygons> &painted) {
+                                   const std::vector<Rings> &rings, const std::vector<ExPolygons> &enforced) {
         std::vector<char> cut(heads.size(), 0);
         const size_t lowest = out.pad_layers;
         if (lowest >= layer_heights.size())
@@ -526,17 +527,23 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
             for (size_t k = 0; k < r.slices.size(); ++ k)
                 if (r.first + k >= lowest)
                     append(interface_[r.first + k - lowest], r.slices[k]);
+        // The base and the rings the seam lays on the layer `s` above the pad, with their small holes filled.
+        const auto seam_areas = [&](size_t s) {
+            const size_t i       = lowest + s;
+            ExPolygons   rings_i = diff_ex(union_ex(interface_[s]), clips[i].model);
+            ExPolygons   base_i  = diff_ex(clip_base(cage[i], enforced[i], clips[i]), rings_i);
+            for (ExPolygon &area : base_i)
+                TreeSupport::fill_small_holes(area);
+            for (ExPolygon &area : rings_i)
+                TreeSupport::fill_small_holes(area);
+            return std::make_pair(std::move(base_i), std::move(rings_i));
+        };
         const double ground = layer_heights[lowest].print_z - layer_heights[lowest].height;
         std::vector<SupportAnalysis::Slab> slabs(interface_.size());
         tbb::parallel_for(tbb::blocked_range<size_t>(0, slabs.size()), [&](const tbb::blocked_range<size_t> &range) {
             for (size_t s = range.begin(); s < range.end(); ++ s) {
                 const size_t     i       = lowest + s;
-                ExPolygons       rings_i = diff_ex(union_ex(interface_[s]), clips[i].model);
-                ExPolygons       base_i  = diff_ex(clip_base(cage[i], painted[i], clips[i]), rings_i);
-                for (ExPolygon &area : base_i)
-                    TreeSupport::fill_small_holes(area);
-                for (ExPolygon &area : rings_i)
-                    TreeSupport::fill_small_holes(area);
+                const auto       [base_i, rings_i] = seam_areas(s);
                 const float      inset   = float(scale_(0.5 * Flow::rounded_rectangle_extrusion_spacing(
                                                         float(params.interface_width_mm), float(layer_heights[i].height))));
                 Polygons         printed = params.base_cover(base_i, layer_heights[i].height);
@@ -587,6 +594,18 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
                 ringed[s][j] = 1;
         }
         // A hole's wall covers from the hole's edge to a line into the section.
+        const auto walls_hole = [half_line](const Polygon &hole, const BoundingBox &piece_box, const ExPolygon &piece) {
+            BoundingBox box = get_extents(hole);
+            box.offset(2 * half_line);
+            if (! box.overlap(piece_box))
+                return false;
+            Polygon gap = hole;
+            gap.make_counter_clockwise();
+            return ! intersection_ex(offset_ex(ExPolygon(gap), 2.f * half_line), ExPolygons{ piece }).empty();
+        };
+        // On a layer with an enforced head the band or the model can cut a filled hole out of the printed base again,
+        // and the wall around it stays in mid-air: there a piece counts as a hole's wall only when the base the seam
+        // prints after the fill borders no hole at the piece.
         std::vector<std::vector<char>> walls(slabs.size());
         tbb::parallel_for(tbb::blocked_range<size_t>(0, slabs.size()), [&](const tbb::blocked_range<size_t> &range) {
             for (size_t s = range.begin(); s < range.end(); ++ s) {
@@ -594,24 +613,24 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
                 for (size_t j = 0; j < adrift[s].size(); ++ j) {
                     if (ringed[s][j])
                         continue;
-                    const BoundingBox &piece_box = adrift[s][j].first;
-                    const ExPolygon   &piece     = *adrift[s][j].second;
                     for (ExPolygon &section : cage[lowest + s])
                         section.holes.erase(std::remove_if(section.holes.begin(), section.holes.end(), [&](const Polygon &hole) {
-                            BoundingBox box = get_extents(hole);
-                            box.offset(2 * half_line);
-                            if (! box.overlap(piece_box))
-                                return false;
-                            Polygon gap = hole;
-                            gap.make_counter_clockwise();
-                            const bool wall = ! intersection_ex(offset_ex(ExPolygon(gap), 2.f * half_line), ExPolygons{ piece }).empty();
+                            const bool wall = walls_hole(hole, adrift[s][j].first, *adrift[s][j].second);
                             walls[s][j] = walls[s][j] || wall;
                             return wall;
                         }), section.holes.end());
                 }
+                if (enforced[lowest + s].empty() || std::find(walls[s].begin(), walls[s].end(), char(1)) == walls[s].end())
+                    continue;
+                const ExPolygons base = seam_areas(s).first;
+                for (size_t j = 0; j < adrift[s].size(); ++ j)
+                    for (const ExPolygon &area : base)
+                        for (const Polygon &hole : area.holes)
+                            if (walls[s][j] && walls_hole(hole, adrift[s][j].first, *adrift[s][j].second))
+                                walls[s][j] = 0;
             }
         });
-        // The painted heads whose own neck lies in a floating piece that holds no ring and walls no hole.
+        // The enforced heads whose own neck lies in a floating piece that holds no ring and walls no hole.
         tbb::parallel_for(tbb::blocked_range<size_t>(0, heads.size()), [&](const tbb::blocked_range<size_t> &range) {
             for (size_t h = range.begin(); h < range.end(); ++ h)
                 for (size_t k = 0; k < rings[h].neck.size() && ! cut[h]; ++ k) {
@@ -630,7 +649,7 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
 
     // What became of each tip. A head the builder kept carries its point's index as its id; one it gave up on
     // lost the id and is found by the position it was built at; a point with no head was filtered out. A head
-    // whose rings, or painted neck, would float is cut: `Unrouted` where the builder left it with no pillar and no
+    // whose rings, or enforced neck, would float is cut: `Unrouted` where the builder left it with no pillar and no
     // bridge, which a side head whose ground pillar fails keeps, else `Neck`.
     enum class Tip : uint8_t { Filtered, Unrouted, Neck, Routed };
     const auto outcomes = [](const sla::SupportTreeBuilder &builder, const sla::SupportPoints &pts) {
@@ -662,10 +681,13 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
     // The builder runs until no head is cut, each time without the heads the last run cut, so no pillar or bridge
     // stands for a head that is gone; a run re-routes the neighbours of what it lost, which can strand another
     // ring. The points keep their order, so a head's id is its index among the points left. With no interface layer
-    // there is no ring to strand and one run stands. Each run builds and slices the whole cage, 2.5 to 3 s on plate
-    // 3 of the corpus, whose runs cut about 90, 10, 3, 2 and then no head: six runs leave one spare, and the heads
-    // the sixth still cuts are dropped without another run, their rings left out of the output.
+    // there is no ring to strand, but an enforced head still prints its neck up to the tip outside the band, so the
+    // check runs while any tip is enforced and one run stands only when none is. Each run builds and slices the whole
+    // cage, 2.5 to 3 s on plate 3 of the corpus, whose runs cut about 90, 10, 3, 2 and then no head: six runs leave one
+    // spare, and the heads the sixth still cuts are dropped without another run, their rings left out of the output.
     constexpr size_t max_builds = 6;
+    const bool       check      = params.interface_layers > 0 ||
+                                  std::any_of(nodes.begin(), nodes.end(), [](const TipSite &tip) { return tip.enforced; });
     std::vector<Tip>    tips(points.size(), Tip::Filtered);
     sla::SupportPoints  left = points;
     std::vector<size_t> index_of(points.size());
@@ -682,8 +704,7 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
         build_ms += ms_since(run_start);
         const auto slice_start = std::chrono::steady_clock::now();
         slice_build(*builder, index_of, cage, rings);
-        cut = params.interface_layers > 0 ? find_stranded(builder->heads(), cage, rings, painted_heads(rings))
-                                          : std::vector<char>(builder->heads().size(), 0);
+        cut = check ? find_stranded(builder->heads(), cage, rings, enforced_heads(rings)) : std::vector<char>(builder->heads().size(), 0);
         out.stage_ms.slice += ms_since(slice_start);
         const size_t cut_count = size_t(std::count(cut.begin(), cut.end(), char(1)));
         BOOST_LOG_TRIVIAL(debug) << "scaffold build " << run << ": " << left.size() << " points, " << cut_count << " heads cut";
@@ -743,7 +764,7 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
     out.stage_ms.build = build_ms + ms_since(pad_start);
 
     // The last build's slices are the output: each planned layer is the cage's and the pad's section through the
-    // layer's middle, each routed head's rings print as interface, and the painted heads under their rings go out
+    // layer's middle, each routed head's rings print as interface, and the enforced heads under their rings go out
     // apart for `clip_base`.
     const auto output_start = std::chrono::steady_clock::now();
     if (! pad_mesh.indices.empty()) {
@@ -758,10 +779,10 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
                 cage[i] = union_ex(cage[i]);
             }
     }
-    std::vector<ExPolygons> necks = painted_heads(rings);
+    std::vector<ExPolygons> necks = enforced_heads(rings);
     for (size_t i = 0; i < out.layers.size(); ++ i) {
-        out.layers[i].base          = std::move(cage[i]);
-        out.layers[i].painted_heads = std::move(necks[i]);
+        out.layers[i].base           = std::move(cage[i]);
+        out.layers[i].enforced_heads = std::move(necks[i]);
     }
     for (const Rings &r : rings)
         for (size_t k = 0; k < r.slices.size(); ++ k)

@@ -2090,7 +2090,7 @@ void TreeSupport::generate()
             for (size_t i = range.begin(); i < range.end(); ++ i) {
                 SupportLayer *ts_layer = m_object->get_support_layer(int(i + m_raft_layers));
                 // The layer's clip, then the bed.
-                ExPolygons base       = intersection_ex(ScaffoldSupport::clip_base(out.layers[i].base, out.layers[i].painted_heads, clips[i]),
+                ExPolygons base       = intersection_ex(ScaffoldSupport::clip_base(out.layers[i].base, out.layers[i].enforced_heads, clips[i]),
                                                         m_machine_border);
                 ExPolygons interface_ = diff_ex(out.layers[i].interface_, clips[i].model);
                 base = diff_ex(base, interface_);
