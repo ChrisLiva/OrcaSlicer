@@ -10,6 +10,10 @@ struct Params {   // filled by TreeSupport from its config and support params
     size_t interface_layers;    // support_interface_top_layers
 };
 struct LayerAreas { ExPolygons base; ExPolygons interface_; };   // before the 2D clip TreeSupport runs
+// The 2D clip TreeSupport runs on a planned layer, computed once for `draw` and the seam: interface stays out of
+// `model`, the object over the layer's whole height, and base stays out of `band`, that model grown by the xy distance
+// together with the bottom gap's trim.
+struct LayerClip { ExPolygons model, band; };
 struct Counts { size_t tips_placed = 0, tips_routed = 0, tips_dropped = 0, islands_under_held = 0,
                 pillars_unbraced = 0; };
 struct StageMs { uint32_t island_joins = 0, build = 0, slice = 0; };   // for TreeSupport's profiler
@@ -18,7 +22,9 @@ struct Output { std::vector<LayerAreas> layers;   // one entry per planned layer
                 Counts counts; StageMs stage_ms; };
 // contacts: TreeSupport's contact_nodes after plan_layer_heights re-distributes them, one entry per planned layer.
 // dropped: the nodes the erase loop after select_contacts took out, the hold floor's candidates.
+// clips: the clip the seam runs on each planned layer, which the neck check applies the same way.
 Output draw(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts,
             const std::vector<SupportNode *> &dropped, const std::vector<LayerHeightData> &layer_heights,
-            const ModelSupportRisk::Field &risk, const Params &params, const std::function<void()> &throw_on_cancel);
+            const std::vector<LayerClip> &clips, const ModelSupportRisk::Field &risk, const Params &params,
+            const std::function<void()> &throw_on_cancel);
 }

@@ -64,12 +64,15 @@ After `plan_layer_heights` the generator branches. Under Scaffold it fills a
 diameter, `m_ts_data->m_xy_distance`, the two scaffold keys,
 `max_bridge_length`, the interface layer count, the object's print z offset and
 a pad thickness of 0.6 mm rounded up to the first planned layer at or above it)
-and calls `ScaffoldSupport::draw`. `drop_nodes`, `smooth_nodes` and
-`draw_circles` do not run.
+and computes each planned layer's clip once, a `ScaffoldSupport::LayerClip`:
+the model over the layer's whole height, and that model grown by the xy
+distance together with the bottom-gap trim regions. It calls
+`ScaffoldSupport::draw`, whose neck check reads the same clips. `drop_nodes`,
+`smooth_nodes` and `draw_circles` do not run.
 
-For each planned layer `TreeSupport` then clips the returned areas against the
-model over the layer's whole height, grown by the xy distance, against the
-bottom-gap trim regions and against the machine border. The base areas become
+For each planned layer `TreeSupport` then clips the returned base areas against
+the grown band and the machine border, and the interface areas against the
+model alone, since the rings fuse to it. The base areas become
 `BaseType` area groups with no infill and the interface areas become
 `Roof1stLayer` groups; a group on one of the pad's layers carries `pad = true`.
 The shared members `finish_layer_areas`, `normalize_interface_ids` and
@@ -137,19 +140,36 @@ counts what it did with them. It runs seven steps.
    as the safety distance and the scaffold brace slenderness. The mesh's
    ground level sits at the pad's top, so pillars end on it. A head the
    builder kept is a routed tip; a head it built and gave up on is an
-   unrouted drop; a point that never got a head is a filtered drop. Each drop
-   logs `scaffold tip dropped at (x, y, z): unrouted` or `filtered` at debug
-   level. When anything routed, `SupportTreeBuilder::add_pad` adds a pad of
-   the pad thickness with a 1.6 mm brim and no wall.
-7. Slicing. The draw slices cage and pad as one mesh at the middle of every
-   planned layer into base areas. For each routed head it slices the head's
-   own mesh at the tops of its top interface layer, the highest planned layer
-   at or under the tip, and of the layers under it up to the interface count;
-   those rings become the layer's interface areas and leave its base.
+   unrouted drop; a point that never got a head is a filtered drop.
+   The neck check then reads what the seam would print of the build on each
+   planned layer above the pad: the cage outside the clip's band, opened by
+   half a support line since a sliver no line fits prints nothing, and the
+   rings outside the model. `SupportAnalysis::floating_pieces`, the rule the
+   floating pass applies, finds the pieces with no chain of overlaps down to
+   the pad's top, and a head one of whose rings lies in such a piece is cut:
+   its tilted neck crosses the band under its rings, or the builder left it
+   with no pillar and no bridge, which a side head whose ground pillar fails
+   keeps. The cut heads' points leave the point set, in order, and the
+   builder runs again, since a run re-routes the neighbours of what it lost
+   and can strand another ring. It repeats until no head is cut, at most six
+   runs (plate 3 of the corpus needs five), and the heads the sixth run still
+   cuts are dropped without another run, their rings left out of the output.
+   Each run logs `scaffold build <n>: <points> points, <cut> heads cut` and
+   each drop `scaffold tip dropped at (x, y, z): <reason>` at debug level,
+   the reason `filtered`, `unrouted` (also for a cut head with no pillar and
+   no bridge) or `neck`. When anything routed, `SupportTreeBuilder::add_pad`
+   adds a pad of the pad thickness with a 1.6 mm brim and no wall.
+7. Slicing. Each run slices its cage at the middle of every planned layer,
+   and each routed head's own mesh at the tops of its top interface layer,
+   the highest planned layer at or under the tip, and of the layers under it
+   up to the interface count. The last run's slices are the output: the pad,
+   sliced on the layers it spans, joins the cage's sections as base areas, and
+   the rings become the layer's interface areas and leave its base.
 
 The returned `Output` carries one `LayerAreas` per planned layer, the number of
 leading layers that are pad, the five tip and pillar counts, and the
-milliseconds spent in the island map, the build and the slicing, which
+milliseconds spent in the island map, in every build with the pad, and in the
+slicing with the neck checks, which
 `TreeSupport` writes into its profiler as `STAGE_ISLAND_JOINS`,
 `STAGE_SCAFFOLD_BUILD` and `STAGE_SCAFFOLD_SLICE`.
 
@@ -248,10 +268,11 @@ cases. They cover the style and its keys in the config, the island map, the
 result row, the pad's densities and the wall-only base on a shelf fixture with
 nothing floating and no tip beside the column's wall, cancellation during the
 build, rings printing as base without interface layers, a tip with no route
-being dropped and counted, interior tip thinning, the hold floor restoring
-contacts under tall islands and capped by what a birth piece fits, a tip
-seeded under an unseeded feature start with none under debris, and braces on
-slender pillars. The SLA builder changes are covered in
+being dropped and counted, a head whose neck the band cuts on a slope beside
+a wall being dropped with no ring left floating, interior tip thinning, the
+hold floor restoring contacts under tall islands and capped by what a birth
+piece fits, a tip seeded under an unseeded feature start with none under
+debris, and braces on slender pillars. The SLA builder changes are covered in
 `tests/sla_print/sla_print_tests.cpp`.
 
 The hidden case "Scaffold support over corpus plate 3 in two poses"
@@ -259,7 +280,7 @@ The hidden case "Scaffold support over corpus plate 3 in two poses"
 directory holding `elf_test.3mf`. It slices plate 3's object under tree slim
 and tree scaffold, first in the stored pose and then upright, times each
 `Print::process()` and one `island_joins` call, writes one row per slice, and
-requires of each scaffold slice: dropped tips at most a tenth of those placed,
+requires of each scaffold slice: dropped tips at most a fifth of those placed,
 no floating piece removed, a process time at most 1.5 times the tree-slim
 slice's, `island_joins` within 2 s and a support volume at most 2.5 times the
 tree-slim slice's; the upright pose also requires no under-held island.

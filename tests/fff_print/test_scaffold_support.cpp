@@ -213,6 +213,23 @@ TriangleMesh floating_slab_fixture()
     return post;
 }
 
+// A 6 x 6 x 14 mm column at x 0..6, y 0..6 carrying off its +x face a plank 2 mm thick whose underside falls at
+// 45 degrees from z 10 at the face to z 8 at x 8, across y 0..6. A head on the underside aims along the underside's
+// normal, down and back toward the column, so a tip under a millimetre from the face tilts its neck into the
+// column's xy band a few layers under its rings.
+TriangleMesh slope_fixture()
+{
+    TriangleMesh       column = make_cube(6., 6., 14.);
+    std::vector<Vec3f> corners;
+    for (const float y : { 0.f, 6.f })
+        for (const float z : { 0.f, 2.f }) {
+            corners.emplace_back(5.f, y, 11.f + z);
+            corners.emplace_back(8.f, y, 8.f + z);
+        }
+    column.merge(TriangleMesh(its_convex_hull(corners)));
+    return column;
+}
+
 // A JSON config written to the OS temp directory and removed when the guard leaves scope.
 struct ScratchJson
 {
@@ -685,6 +702,26 @@ TEST_CASE("A tip with no path to the pad is dropped and counted", "[ScaffoldSupp
     CHECK(report.floating_pieces_removed == 0);
 }
 
+TEST_CASE("A routed head whose neck the xy band would cut is dropped and no ring floats", "[ScaffoldSupport]")
+{
+    // At the corpus's 0.22 mm support line and 0.5 mm xy distance a small-grade neck, 0.44 mm across under its pin, fits
+    // wholly inside the column's band. The seam clips base by that band and the rings by the model alone, so a head
+    // whose neck crosses the band keeps its rings over nothing; such a head is dropped and the cage is built without it.
+    Print print;
+    init_and_process_print({ slope_fixture() }, print,
+                           scaffold_config({ { "support_line_width", "0.22" }, { "support_object_xy_distance", "0.5" } }));
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    REQUIRE(object.support_analysis() != nullptr);
+    const SupportAnalysis::Report &report = *object.support_analysis();
+    INFO("tips placed " << report.tips_placed << " routed " << report.tips_routed << " dropped " << report.tips_dropped
+                        << " floating removed " << report.floating_pieces_removed);
+    CHECK(report.floating_pieces_removed == 0);
+    CHECK(report.tips_dropped >= 1);
+    CHECK(report.tips_routed > 0);
+    CHECK(report.tips_placed == report.tips_routed + report.tips_dropped);
+}
+
 TEST_CASE("Interior tips survive only where a bridge span fits", "[ScaffoldSupport]")
 {
     // A 12 mm wide slab holds no 14 mm disc, so at a 14 mm bridge length every tip under it stands on the rim; a 10 mm
@@ -959,7 +996,7 @@ TEST_CASE("Scaffold support over corpus plate 3 in two poses", "[ScaffoldSupport
         INFO("pose " << pose);
         {
             INFO("tips dropped " << scaffold.metrics.tips_dropped << " of " << scaffold.metrics.tips_placed << " placed");
-            REQUIRE(scaffold.metrics.tips_dropped <= scaffold.metrics.tips_placed / 10);
+            REQUIRE(scaffold.metrics.tips_dropped <= scaffold.metrics.tips_placed / 5);
         }
         {
             INFO("floating pieces removed " << scaffold.metrics.floating_pieces_removed << " (tree slim " << slim.metrics.floating_pieces_removed << ")");

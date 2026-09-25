@@ -2028,9 +2028,31 @@ void TreeSupport::generate()
         params.z_offset_mm          = m_slicing_params.object_print_z_min;
         params.interface_layers     = m_support_params.num_top_interface_layers;
 
+        // The clip the seam runs on each planned layer, computed once, since draw's neck check applies it the same way:
+        // base stays out of the model over the layer's whole height grown by the xy distance and out of the bottom
+        // gap, and interface out of the model alone.
+        std::vector<ScaffoldSupport::LayerClip> clips(plan.size());
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, plan.size()), [&](const tbb::blocked_range<size_t> &range) {
+            for (size_t i = range.begin(); i < range.end(); ++ i) {
+                SupportLayer  *ts_layer = m_object->get_support_layer(int(i + m_raft_layers));
+                const coordf_t print_z  = plan[i].print_z;
+                const coordf_t bottom_z = plan[i].print_z - plan[i].height;
+                ts_layer->print_z = print_z;
+                ts_layer->height  = plan[i].height;
+                ExPolygons model;
+                for (const Layer *layer : m_object->layers())
+                    if (std::min(layer->print_z, print_z) - std::max(layer->bottom_z(), bottom_z) > EPSILON)
+                        append(model, layer->lslices);
+                clips[i].model = union_ex(model);
+                Polygons band  = to_polygons(offset_ex(clips[i].model, scale_(m_ts_data->m_xy_distance)));
+                polygons_append(band, get_trim_support_regions(*m_object, ts_layer, 0., m_slicing_params.gap_object_support, 0));
+                clips[i].band = union_ex(band);
+            }
+        });
+
         m_object->print()->set_status(60, _u8L("Generating support"));
-        const ScaffoldSupport::Output out = ScaffoldSupport::draw(*m_object, contact_nodes, m_dropped_contacts, plan, m_risk, params,
-                                                                  throw_on_cancel);
+        const ScaffoldSupport::Output out = ScaffoldSupport::draw(*m_object, contact_nodes, m_dropped_contacts, plan, clips, m_risk,
+                                                                  params, throw_on_cancel);
         profiler.stage_durations[STAGE_ISLAND_JOINS]   = out.stage_ms.island_joins;
         profiler.stage_durations[STAGE_SCAFFOLD_BUILD] = out.stage_ms.build;
         profiler.stage_durations[STAGE_SCAFFOLD_SLICE] = out.stage_ms.slice;
@@ -2041,21 +2063,10 @@ void TreeSupport::generate()
         std::vector<char> filled(plan.size(), 0);
         tbb::parallel_for(tbb::blocked_range<size_t>(0, plan.size()), [&](const tbb::blocked_range<size_t> &range) {
             for (size_t i = range.begin(); i < range.end(); ++ i) {
-                SupportLayer  *ts_layer = m_object->get_support_layer(int(i + m_raft_layers));
-                const coordf_t print_z  = plan[i].print_z;
-                const coordf_t bottom_z = plan[i].print_z - plan[i].height;
-                ts_layer->print_z = print_z;
-                ts_layer->height  = plan[i].height;
-                // The model over the layer's whole height, clearance first, then the bottom gap and the bed.
-                ExPolygons model;
-                for (const Layer *layer : m_object->layers())
-                    if (std::min(layer->print_z, print_z) - std::max(layer->bottom_z(), bottom_z) > EPSILON)
-                        append(model, layer->lslices);
-                model = union_ex(model);
-                ExPolygons base = diff_ex(out.layers[i].base, offset_ex(model, scale_(m_ts_data->m_xy_distance)));
-                base = intersection_ex(diff_ex(base, get_trim_support_regions(*m_object, ts_layer, 0., m_slicing_params.gap_object_support, 0)),
-                                       m_machine_border);
-                ExPolygons interface_ = diff_ex(out.layers[i].interface_, model);
+                SupportLayer *ts_layer = m_object->get_support_layer(int(i + m_raft_layers));
+                // The layer's clip, then the bed.
+                ExPolygons base       = intersection_ex(diff_ex(out.layers[i].base, clips[i].band), m_machine_border);
+                ExPolygons interface_ = diff_ex(out.layers[i].interface_, clips[i].model);
                 base = diff_ex(base, interface_);
                 if (base.empty() && interface_.empty()) {
                     ts_layer->print_z = 0.;

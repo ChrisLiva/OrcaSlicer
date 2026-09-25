@@ -6,6 +6,7 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <unordered_map>
 
 #include "ClipperUtils.hpp"
@@ -287,7 +288,8 @@ void merge_aliases(std::vector<TipSite> &tips)
 
 Output draw(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts,
             const std::vector<SupportNode *> &dropped, const std::vector<LayerHeightData> &layer_heights,
-            const ModelSupportRisk::Field &risk, const Params &params, const std::function<void()> &throw_on_cancel)
+            const std::vector<LayerClip> &clips, const ModelSupportRisk::Field &risk, const Params &params,
+            const std::function<void()> &throw_on_cancel)
 {
     Output out;
     out.layers.resize(layer_heights.size());
@@ -393,44 +395,212 @@ Output draw(const PrintObject &object, const std::vector<std::vector<SupportNode
     TriangleMesh mesh = object.model_object()->raw_mesh();
     mesh.transform(object.trafo_centered());
 
-    const auto build_start = std::chrono::steady_clock::now();
-    sla::SupportableMesh sm(mesh.its, points, tree_config(params));
+    sla::SupportableMesh sm(mesh.its, sla::SupportPoints{}, tree_config(params));
     // The copy the SupportableMesh holds drops any ground offset its source carried, so the offset goes on
     // the copy: pillars end on the pad's top face.
     sm.emesh.ground_level_offset(params.pad_thickness_mm);
-    sla::SupportTreeBuilder builder;
-    sla::JobController      ctl;
+    sla::JobController ctl;
     ctl.stopcondition = [&object] { return object.print()->canceled(); };
     ctl.cancelfn      = throw_on_cancel;
-    builder.set_ctl(ctl);
-    if (sla::SupportTreeBuildsteps::execute(builder, sm))
-        throw_on_cancel();
-    out.counts.pillars_unbraced = builder.unbraced_pillars;
+    // A fresh builder per run: the builder's move assignment carries neither its junctions nor its anchors.
+    const auto build = [&sm, &ctl, &throw_on_cancel](const sla::SupportPoints &pts) {
+        auto builder = std::make_unique<sla::SupportTreeBuilder>();
+        builder->set_ctl(ctl);
+        sm.pts = pts;
+        if (sla::SupportTreeBuildsteps::execute(*builder, sm))
+            throw_on_cancel();
+        return builder;
+    };
+
+    // How many planned layers have their top at or under a head's tip. The head's rings print on the highest of
+    // them and the ones under it up to the interface count.
+    const auto layers_under_tip = [&](const sla::Head &head) {
+        const double tip_z = head.pos.z() + params.z_offset_mm;
+        return size_t(std::upper_bound(layer_heights.begin(), layer_heights.end(), tip_z + EPSILON,
+                                       [](double z, const LayerHeightData &plan) { return z < plan.print_z; }) -
+                      layer_heights.begin());
+    };
+    // A build's slices: the cage through each planned layer's middle, and each routed head's own head through the
+    // tops of its ring layers, `first` the lowest. The rings are indexed as the build's heads.
+    struct Rings { size_t first = 0; std::vector<ExPolygons> slices; };
+    std::vector<float> middles;
+    middles.reserve(layer_heights.size());
+    for (const LayerHeightData &plan : layer_heights)
+        middles.push_back(float(plan.print_z - 0.5 * plan.height - params.z_offset_mm));
+    const auto slice_build = [&](const sla::SupportTreeBuilder &builder, std::vector<ExPolygons> &cage, std::vector<Rings> &rings) {
+        const indexed_triangle_set &merged = builder.retrieve_mesh(sla::MeshType::Support);
+        cage = merged.indices.empty() ? std::vector<ExPolygons>() : slice_mesh_ex(merged, middles, 0.f, throw_on_cancel);
+        cage.resize(layer_heights.size());
+        const std::vector<sla::Head> &heads = builder.heads();
+        rings.assign(heads.size(), Rings());
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, layer_heights.size()), [&](const tbb::blocked_range<size_t> &range) {
+            for (size_t i = range.begin(); i < range.end(); ++ i)
+                cage[i] = union_ex(cage[i]);
+        });
+        if (params.interface_layers == 0)
+            return;
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, heads.size()), [&](const tbb::blocked_range<size_t> &range) {
+            for (size_t h = range.begin(); h < range.end(); ++ h) {
+                if (! heads[h].is_valid())
+                    continue;
+                const size_t above = layers_under_tip(heads[h]);
+                const size_t count = std::min(above, params.interface_layers);
+                if (count == 0)
+                    continue;
+                // The slicer wants its heights ascending.
+                rings[h].first = above - count;
+                std::vector<float> zs;
+                for (size_t i = rings[h].first; i < above; ++ i)
+                    zs.push_back(float(layer_heights[i].print_z - params.z_offset_mm));
+                rings[h].slices = slice_mesh_ex(sla::get_mesh(heads[h], 45), zs, 0.f);
+            }
+        });
+    };
+    // The heads whose rings would print over nothing. What the seam lays on each planned layer above the pad, the
+    // cage outside the band opened by half a support line and the rings outside the model, goes through the
+    // connectivity rule the floating pass applies, with the pad's top as the ground every pillar stands on: a base
+    // sliver no line fits prints nothing and holds nothing up, while the interface prints what is left of a ring
+    // however small. The floating pass reads the scaffold as rooted on the plate alone, and with that flag the rule
+    // reads no model slab. A head is cut where one of its rings lies in a floating piece.
+    const float half_line   = float(scale_(0.5 * params.toolpath_width_mm));
+    const auto  cut_by_neck = [&](const std::vector<sla::Head> &heads, const std::vector<ExPolygons> &cage,
+                                  const std::vector<Rings> &rings) {
+        std::vector<char> cut(heads.size(), 0);
+        const size_t lowest = out.pad_layers;
+        if (lowest >= layer_heights.size())
+            return cut;
+        std::vector<ExPolygons> interface_(layer_heights.size() - lowest);
+        for (const Rings &r : rings)
+            for (size_t k = 0; k < r.slices.size(); ++ k)
+                if (r.first + k >= lowest)
+                    append(interface_[r.first + k - lowest], r.slices[k]);
+        const double ground = layer_heights[lowest].print_z - layer_heights[lowest].height;
+        std::vector<SupportAnalysis::Slab> slabs(interface_.size());
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, slabs.size()), [&](const tbb::blocked_range<size_t> &range) {
+            for (size_t s = range.begin(); s < range.end(); ++ s) {
+                const size_t     i       = lowest + s;
+                const ExPolygons rings_i = diff_ex(union_ex(interface_[s]), clips[i].model);
+                ExPolygons       printed = opening_ex(diff_ex(diff_ex(cage[i], clips[i].band), rings_i), half_line);
+                append(printed, rings_i);
+                slabs[s].bottom_z = layer_heights[i].print_z - layer_heights[i].height - ground;
+                slabs[s].print_z  = layer_heights[i].print_z - ground;
+                slabs[s].polygons = union_ex(printed);
+            }
+        });
+        const std::vector<std::vector<bool>> floating = SupportAnalysis::floating_pieces(slabs, {}, true, 0.);
+        std::vector<std::vector<std::pair<BoundingBox, const ExPolygon *>>> adrift(slabs.size());
+        bool any = false;
+        for (size_t s = 0; s < slabs.size(); ++ s)
+            for (size_t k = 0; k < slabs[s].polygons.size(); ++ k)
+                if (floating[s][k]) {
+                    adrift[s].emplace_back(get_extents(slabs[s].polygons[k]), &slabs[s].polygons[k]);
+                    any = true;
+                }
+        if (! any)
+            return cut;
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, heads.size()), [&](const tbb::blocked_range<size_t> &range) {
+            for (size_t h = range.begin(); h < range.end(); ++ h)
+                for (size_t k = 0; k < rings[h].slices.size() && ! cut[h]; ++ k) {
+                    if (rings[h].first + k < lowest || rings[h].slices[k].empty())
+                        continue;
+                    const BoundingBox box = get_extents(rings[h].slices[k]);
+                    for (const auto &[piece_box, piece] : adrift[rings[h].first + k - lowest])
+                        if (piece_box.overlap(box) && ! intersection_ex(rings[h].slices[k], ExPolygons{ *piece }).empty()) {
+                            cut[h] = 1;
+                            break;
+                        }
+                }
+        });
+        return cut;
+    };
 
     // What became of each tip. A head the builder kept carries its point's index as its id; one it gave up on
-    // lost the id and is found by the position it was built at; a point with no head was filtered out.
-    enum class Tip : uint8_t { Filtered, Unrouted, Routed };
-    std::vector<Tip>    tips(points.size(), Tip::Filtered);
-    std::vector<size_t> by_pos(points.size());
-    for (size_t i = 0; i < by_pos.size(); ++ i)
-        by_pos[i] = i;
-    const auto pos_less = [](const Vec3d &a, const Vec3d &b) { return std::lexicographical_compare(a.data(), a.data() + 3, b.data(), b.data() + 3); };
-    const auto pos_of   = [&points](size_t i) { return Vec3d(points[i].pos.cast<double>()); };
-    std::sort(by_pos.begin(), by_pos.end(), [&](size_t a, size_t b) { return pos_less(pos_of(a), pos_of(b)); });
-    for (const sla::Head &head : builder.heads()) {
-        if (head.is_valid()) {
-            if (size_t(head.id) < tips.size())
-                tips[head.id] = Tip::Routed;
-            continue;
-        }
-        auto it = std::lower_bound(by_pos.begin(), by_pos.end(), head.pos,
-                                   [&](size_t i, const Vec3d &pos) { return pos_less(pos_of(i), pos); });
-        for (; it != by_pos.end() && (pos_of(*it) - head.pos).norm() <= 1e-6; ++ it)
-            if (tips[*it] == Tip::Filtered) {
-                tips[*it] = Tip::Unrouted;
-                break;
+    // lost the id and is found by the position it was built at; a point with no head was filtered out. A head
+    // whose rings would float is cut: `Unrouted` where the builder left it with no pillar and no bridge, which a
+    // side head whose ground pillar fails keeps, else `Neck`.
+    enum class Tip : uint8_t { Filtered, Unrouted, Neck, Routed };
+    const auto outcomes = [](const sla::SupportTreeBuilder &builder, const sla::SupportPoints &pts) {
+        std::vector<Tip>    tips(pts.size(), Tip::Filtered);
+        std::vector<size_t> by_pos(pts.size());
+        for (size_t i = 0; i < by_pos.size(); ++ i)
+            by_pos[i] = i;
+        const auto pos_less = [](const Vec3d &a, const Vec3d &b) { return std::lexicographical_compare(a.data(), a.data() + 3, b.data(), b.data() + 3); };
+        const auto pos_of   = [&pts](size_t i) { return Vec3d(pts[i].pos.cast<double>()); };
+        std::sort(by_pos.begin(), by_pos.end(), [&](size_t a, size_t b) { return pos_less(pos_of(a), pos_of(b)); });
+        for (const sla::Head &head : builder.heads()) {
+            if (head.is_valid()) {
+                if (size_t(head.id) < tips.size())
+                    tips[head.id] = Tip::Routed;
+                continue;
             }
+            auto it = std::lower_bound(by_pos.begin(), by_pos.end(), head.pos,
+                                       [&](size_t i, const Vec3d &pos) { return pos_less(pos_of(i), pos); });
+            for (; it != by_pos.end() && (pos_of(*it) - head.pos).norm() <= 1e-6; ++ it)
+                if (tips[*it] == Tip::Filtered) {
+                    tips[*it] = Tip::Unrouted;
+                    break;
+                }
+        }
+        return tips;
+    };
+    const auto cut_reason = [](const sla::Head &head) { return head.pillar_id < 0 && head.bridge_id < 0 ? Tip::Unrouted : Tip::Neck; };
+
+    // The builder runs until no head is cut, each time without the heads the last run cut, so no pillar or bridge
+    // stands for a head that is gone; a run re-routes the neighbours of what it lost, which can strand another
+    // ring. The points keep their order, so a head's id is its index among the points left. With no interface layer
+    // there is no ring to strand and one run stands. Each run builds and slices the whole cage, 2.5 to 3 s on plate
+    // 3 of the corpus, whose runs cut about 90, 10, 3, 2 and then no head: six runs leave one spare, and the heads
+    // the sixth still cuts are dropped without another run, their rings left out of the output.
+    constexpr size_t max_builds = 6;
+    std::vector<Tip>    tips(points.size(), Tip::Filtered);
+    sla::SupportPoints  left = points;
+    std::vector<size_t> index_of(points.size());
+    for (size_t i = 0; i < index_of.size(); ++ i)
+        index_of[i] = i;
+    std::unique_ptr<sla::SupportTreeBuilder> builder;
+    std::vector<ExPolygons>                  cage;
+    std::vector<Rings>                       rings;
+    std::vector<char>                        cut;
+    uint32_t                                 build_ms = 0;
+    for (size_t run = 1;; ++ run) {
+        const auto run_start = std::chrono::steady_clock::now();
+        builder              = build(left);
+        build_ms += ms_since(run_start);
+        const auto slice_start = std::chrono::steady_clock::now();
+        slice_build(*builder, cage, rings);
+        cut = params.interface_layers > 0 ? cut_by_neck(builder->heads(), cage, rings) : std::vector<char>(builder->heads().size(), 0);
+        out.stage_ms.slice += ms_since(slice_start);
+        const size_t cut_count = size_t(std::count(cut.begin(), cut.end(), char(1)));
+        BOOST_LOG_TRIVIAL(debug) << "scaffold build " << run << ": " << left.size() << " points, " << cut_count << " heads cut";
+        if (cut_count == 0 || run == max_builds)
+            break;
+        const std::vector<sla::Head> &heads = builder->heads();
+        std::vector<char>             gone(left.size(), 0);
+        for (size_t h = 0; h < heads.size(); ++ h)
+            if (cut[h]) {
+                gone[size_t(heads[h].id)] = 1;
+                tips[index_of[size_t(heads[h].id)]] = cut_reason(heads[h]);
+            }
+        size_t next = 0;
+        for (size_t k = 0; k < left.size(); ++ k)
+            if (! gone[k]) {
+                left[next]     = left[k];
+                index_of[next] = index_of[k];
+                ++ next;
+            }
+        left.resize(next);
+        index_of.resize(next);
     }
+    const std::vector<Tip> last = outcomes(*builder, left);
+    for (size_t k = 0; k < last.size(); ++ k)
+        tips[index_of[k]] = last[k];
+    for (size_t h = 0; h < cut.size(); ++ h)
+        if (cut[h]) {
+            tips[index_of[size_t(builder->heads()[h].id)]] = cut_reason(builder->heads()[h]);
+            rings[h].slices.clear();
+        }
+    out.counts.pillars_unbraced = builder->unbraced_pillars;
+    static constexpr const char *reason[] = { "filtered", "unrouted", "neck" };
     for (size_t i = 0; i < tips.size(); ++ i) {
         if (tips[i] == Tip::Routed) {
             ++ out.counts.tips_routed;
@@ -439,64 +609,49 @@ Output draw(const PrintObject &object, const std::vector<std::vector<SupportNode
         ++ out.counts.tips_dropped;
         const Vec3f &p = points[i].pos;
         BOOST_LOG_TRIVIAL(debug) << "scaffold tip dropped at (" << p.x() << ", " << p.y() << ", " << p.z()
-                                 << "): " << (tips[i] == Tip::Unrouted ? "unrouted" : "filtered");
+                                 << "): " << reason[size_t(tips[i])];
     }
 
-    // The cage and the pad under it as one mesh. A cage with no part routed gets no pad.
-    indexed_triangle_set cage = builder.retrieve_mesh(sla::MeshType::Support);
-    if (! cage.indices.empty()) {
+    // The pad under the cage, on the layers it spans. A cage with no part routed gets no pad.
+    const auto pad_start = std::chrono::steady_clock::now();
+    indexed_triangle_set pad_mesh;
+    if (! builder->retrieve_mesh(sla::MeshType::Support).indices.empty()) {
         sla::PadConfig pad;
         pad.wall_thickness_mm    = params.pad_thickness_mm;
         pad.wall_height_mm       = 0.;
         pad.brim_size_mm         = 1.6;
         pad.embed_object.enabled = false;
-        builder.add_pad({}, pad);
-        its_merge(cage, builder.retrieve_mesh(sla::MeshType::Pad));
+        builder->add_pad({}, pad);
+        pad_mesh = builder->retrieve_mesh(sla::MeshType::Pad);
     }
-    out.stage_ms.build = ms_since(build_start);
+    out.stage_ms.build = build_ms + ms_since(pad_start);
 
-    // Each planned layer is the cage's section through the layer's middle.
-    const auto slice_start = std::chrono::steady_clock::now();
-    if (! cage.indices.empty() && ! layer_heights.empty()) {
-        std::vector<float> zs;
-        zs.reserve(layer_heights.size());
-        for (const LayerHeightData &plan : layer_heights)
-            zs.push_back(float(plan.print_z - 0.5 * plan.height - params.z_offset_mm));
-        std::vector<ExPolygons> slices = slice_mesh_ex(cage, zs, 0.f, throw_on_cancel);
-        for (size_t i = 0; i < std::min(slices.size(), out.layers.size()); ++ i)
-            out.layers[i].base = union_ex(slices[i]);
-    }
-
-    // Each routed tip's own head, sliced on its top interface layer, the highest planned layer whose top is at
-    // or under the tip, and on the layers under it up to the interface count, prints as interface.
-    if (params.interface_layers > 0) {
-        for (const sla::Head &head : builder.heads()) {
-            if (! head.is_valid())
-                continue;
-            throw_on_cancel();
-            const double tip_z = head.pos.z() + params.z_offset_mm;
-            const size_t above = size_t(std::upper_bound(layer_heights.begin(), layer_heights.end(), tip_z + EPSILON,
-                                                         [](double z, const LayerHeightData &plan) { return z < plan.print_z; }) -
-                                        layer_heights.begin());
-            const size_t count = std::min(above, params.interface_layers);
-            if (count == 0)
-                continue;
-            // The slicer wants its heights ascending.
-            const size_t       first = above - count;
-            std::vector<float> zs;
-            for (size_t i = first; i < above; ++ i)
-                zs.push_back(float(layer_heights[i].print_z - params.z_offset_mm));
-            const std::vector<ExPolygons> rings = slice_mesh_ex(sla::get_mesh(head, 45), zs, 0.f);
-            for (size_t k = 0; k < std::min(count, rings.size()); ++ k)
-                append(out.layers[first + k].interface_, rings[k]);
-        }
-        for (LayerAreas &layer : out.layers)
-            if (! layer.interface_.empty()) {
-                layer.interface_ = union_ex(layer.interface_);
-                layer.base       = diff_ex(layer.base, layer.interface_);
+    // The last build's slices are the output: each planned layer is the cage's and the pad's section through the
+    // layer's middle, and each routed head's rings print as interface.
+    const auto output_start = std::chrono::steady_clock::now();
+    if (! pad_mesh.indices.empty()) {
+        const float  pad_top = std::max_element(pad_mesh.vertices.begin(), pad_mesh.vertices.end(),
+                                                [](const Vec3f &a, const Vec3f &b) { return a.z() < b.z(); })->z();
+        const size_t spans   = size_t(std::upper_bound(middles.begin(), middles.end(), pad_top) - middles.begin());
+        const std::vector<ExPolygons> pad_slices =
+            slice_mesh_ex(pad_mesh, std::vector<float>(middles.begin(), middles.begin() + spans), 0.f, throw_on_cancel);
+        for (size_t i = 0; i < pad_slices.size(); ++ i)
+            if (! pad_slices[i].empty()) {
+                append(cage[i], pad_slices[i]);
+                cage[i] = union_ex(cage[i]);
             }
     }
-    out.stage_ms.slice = ms_since(slice_start);
+    for (size_t i = 0; i < out.layers.size(); ++ i)
+        out.layers[i].base = std::move(cage[i]);
+    for (const Rings &r : rings)
+        for (size_t k = 0; k < r.slices.size(); ++ k)
+            append(out.layers[r.first + k].interface_, r.slices[k]);
+    for (LayerAreas &layer : out.layers)
+        if (! layer.interface_.empty()) {
+            layer.interface_ = union_ex(layer.interface_);
+            layer.base       = diff_ex(layer.base, layer.interface_);
+        }
+    out.stage_ms.slice += ms_since(output_start);
     return out;
 }
 
