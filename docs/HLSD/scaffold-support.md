@@ -106,20 +106,25 @@ counts what it did with them. It runs seven steps.
 3. The island hold floor. `SupportAnalysis::island_joins` maps every mid-air
    island of the model to the slab where it first meets the rooted body. An
    island needs one tip when its unjoined height is at most 1 mm, two up to
-   5 mm and three above, counted greedily from the lowest tip and only where
-   a tip stands a pillar diameter from every tip counted before it. A
-   never-joining island's height runs to the object's top, and one whose
-   height is at most 1 mm is mesh debris: it gets no floor, no tip and no
-   count. An island with no tip and no dropped contact under it gets one tip
-   seeded at the deepest point of its birth piece, at that piece's bottom, in
-   the small grade. Short of the floor, the draw restores dropped contacts
-   under the island, lowest first and among equals the one furthest from the
-   island's tips. An island counts as under-held only when it holds fewer tips
-   than both its floor and the number its birth piece fits, the points of a
-   hexagonal grid at the pillar diameter inside the piece shrunk by half a
-   pillar diameter, never fewer than one. A tip belongs to the island that owns
-   the model piece over it on the overhang's own layer, one above the node's
-   layer.
+   5 mm and three above, counted greedily from the lowest tip and only where a
+   tip stands a pillar diameter from every tip counted before it. A
+   never-joining island's height runs to its own top, the highest slab holding
+   a piece it owns, so one at most 1 mm tall is mesh debris at any height: it
+   gets no floor, no tip and no count, and logs
+   `scaffold island skipped at z: debris` at debug level. An island with no tip
+   and no dropped contact under it gets one tip seeded at the deepest point of
+   its birth piece, at that piece's bottom, in the small grade. When the wall
+   skip removes that seed and the island joins within 1 mm, the wall beside it
+   holds it: it gets no tip, no count, and logs
+   `scaffold island held at z: wall` at debug level. A taller island whose seed
+   stands at a wall counts as under-held. Short of the floor, the draw restores
+   dropped contacts under the island, lowest first and among equals the one
+   furthest from the island's tips. An island counts as under-held only when it
+   holds fewer tips than both its floor and the number its birth piece fits,
+   the points of a hexagonal grid at the pillar diameter inside the piece
+   shrunk by half a pillar diameter, never fewer than one. A tip belongs to the
+   island that owns the model piece over it on the overhang's own layer, one
+   above the node's layer.
 4. The alias merge. The front half can hand the same overhang spot on two
    consecutive layers, and the builder keeps one point of each pair within
    `sla::D_SP`. The draw visits the tips lowest first, among equals by seed
@@ -287,7 +292,8 @@ being dropped and counted, a head whose neck the band cuts on a slope beside
 a wall being dropped with no ring left floating, interior tip thinning, the
 hold floor restoring contacts under tall islands and capped by what a birth
 piece fits, a tip seeded under an unseeded feature start with none under
-debris, and braces on slender pillars. The SLA builder changes are covered in
+debris or under a sliver the wall beside it holds, and braces on slender
+pillars. The SLA builder changes are covered in
 `tests/sla_print/sla_print_tests.cpp`.
 
 The hidden case "Scaffold support over corpus plate 3 in two poses"

@@ -109,6 +109,7 @@ struct IslandJoin
 {
     size_t birth_slab = 0;
     size_t join_slab  = 0; // the slab count when the island never joins
+    size_t top_slab   = 0; // the highest slab holding a piece the island owns
 };
 
 struct IslandMap

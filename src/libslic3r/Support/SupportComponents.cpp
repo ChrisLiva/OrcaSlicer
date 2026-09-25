@@ -203,7 +203,7 @@ IslandMap island_joins(const std::vector<Slab> &model_slabs, double ground_z)
             if (pieces[p].below.empty() && ! rooted[sets.find(p)] && pieces[p].bottom_z > ground_z + EPSILON) {
                 open.push_back(map.islands.size());
                 birth_piece.push_back(p);
-                map.islands.push_back({ s, model_slabs.size() });
+                map.islands.push_back({ s, model_slabs.size(), s });
             }
         open.erase(std::remove_if(open.begin(), open.end(), [&](size_t i) {
                        if (! rooted[sets.find(birth_piece[i])])
@@ -217,7 +217,8 @@ IslandMap island_joins(const std::vector<Slab> &model_slabs, double ground_z)
                 oldest = i;
         }
         for (size_t p = first; p < last; ++ p)
-            map.island_of_piece[p] = oldest_open[sets.find(p)];
+            if ((map.island_of_piece[p] = oldest_open[sets.find(p)]) != npos)
+                map.islands[map.island_of_piece[p]].top_slab = s;
         for (size_t i : open)
             oldest_open[sets.find(birth_piece[i])] = npos;
     }

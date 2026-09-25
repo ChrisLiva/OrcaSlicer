@@ -71,8 +71,10 @@ TriangleMesh islands_fixture()
 // The islands fixture's block with a 4 x 4 x 4 mm cube at x 14..18, y 3..7, z 3.5..7.5 that a 6 x 2 x 1 mm bar at
 // x 9..15, y 4..6, z 3.5..4.5 joins to the block at the cube's first layer. Under the cube a 0.4 x 0.4 x 0.5 mm spike
 // at x 14..14.4, y 4.8..5.2, z 3..3.5 starts an island that joins the rooted body 0.6 mm up, too thin for a line, so
-// the front half seeds nothing under it; a 0.3 x 0.3 x 0.3 mm cube at x 35..35.3, y 5..5.3, z 7.2..7.5 never joins
-// and stands 0.8 mm under the object's top at z 8.
+// the front half seeds nothing under it. A 0.3 x 0.3 x 0.2 mm speck at x 35..35.3, y 5..5.3, z 3..3.2 fills one
+// slab and never joins. A 4 x 0.2 x 0.6 mm sliver at x 3..7, y 10.15..10.35, z 5..5.6 hangs 0.15 mm off the block's
+// +y face, inside its 0.35 mm xy band, until a 4 x 0.45 x 0.2 mm ledge at y 9.9..10.35, z 5.6..5.8 joins it to the
+// block 0.6 mm up.
 TriangleMesh seeded_islands_fixture()
 {
     TriangleMesh block = make_cube(10., 10., 8.);
@@ -82,12 +84,18 @@ TriangleMesh seeded_islands_fixture()
     bar.translate(9.f, 4.f, 3.5f);
     TriangleMesh spike = make_cube(0.4, 0.4, 0.5);
     spike.translate(14.f, 4.8f, 3.f);
-    TriangleMesh debris = make_cube(0.3, 0.3, 0.3);
-    debris.translate(35.f, 5.f, 7.2f);
+    TriangleMesh debris = make_cube(0.3, 0.3, 0.2);
+    debris.translate(35.f, 5.f, 3.f);
+    TriangleMesh sliver = make_cube(4., 0.2, 0.6);
+    sliver.translate(3.f, 10.15f, 5.f);
+    TriangleMesh ledge = make_cube(4., 0.45, 0.2);
+    ledge.translate(3.f, 9.9f, 5.6f);
     block.merge(cube);
     block.merge(bar);
     block.merge(spike);
     block.merge(debris);
+    block.merge(sliver);
+    block.merge(ledge);
     return block;
 }
 
@@ -378,6 +386,10 @@ TEST_CASE("Island joins name the slab each mid-air island first meets the rooted
     CHECK(map.islands[b].join_slab == slabs.size());
     CHECK(map.islands[c].birth_slab == 15);
     CHECK(map.islands[c].join_slab == slabs.size());
+    // A owns its pieces until the bar roots it at slab 30; B and C end at z 5, the top of slab 24.
+    CHECK(map.islands[a].top_slab == 29);
+    CHECK(map.islands[b].top_slab == 24);
+    CHECK(map.islands[c].top_slab == 24);
 
     // The piece of slab `s` whose outline holds `point`, or npos.
     const auto piece_holding = [&](size_t s, const Point &point) {
@@ -782,10 +794,10 @@ TEST_CASE("Interior tips survive only where a bridge span fits", "[ScaffoldSuppo
 
 TEST_CASE("The hold floor restores dropped contacts under tall islands", "[ScaffoldSupport]")
 {
-    // At a 3.5 mm contact distance the decimation keeps one end of stick B's 3 mm underside. B and post C stand 5 mm
-    // from their birth at z 3 to the object's top without joining, and cube A 3 mm to its join at z 6, so each wants
-    // two tips a pillar diameter (1.2 mm) apart: B gets its other end back, and C, 0.8 mm across, holds only one,
-    // which is all its footprint fits, so no island is under-held.
+    // At a 3.5 mm contact distance the decimation keeps one end of stick B's 3 mm underside. B and post C stand 2 mm
+    // from their birth at z 3 to their own tops at z 5 without joining, and cube A 3 mm to its join at z 6, so each
+    // wants two tips a pillar diameter (1.2 mm) apart: B gets its other end back, and C, 0.8 mm across, holds only
+    // one, which is all its footprint fits, so no island is under-held.
     Print print;
     init_and_process_print({ islands_fixture() }, print, scaffold_config({ { "support_contact_min_distance", "3.5" } }));
     REQUIRE(print.objects().size() == 1);
@@ -826,11 +838,13 @@ TEST_CASE("The hold floor restores dropped contacts under tall islands", "[Scaff
     CHECK(spread_mm >= 1.2);
 }
 
-TEST_CASE("Unseeded feature starts get a scaffold tip and floating debris gets none", "[ScaffoldSupport]")
+TEST_CASE("Unseeded feature starts get a scaffold tip while floating debris and wall-held slivers get none", "[ScaffoldSupport]")
 {
     // The spike is too thin to extrude, so no overhang and no contact starts under it, and the cube's contacts stand
     // on the body the bar roots. The spike's island joins 0.6 mm up and wants one tip, which the hold floor seeds at
-    // the spike's middle. The speck never joins and stands under 1 mm below the object's top: debris, left alone.
+    // the spike's middle. The speck never joins and its own height is one 0.2 mm slab: debris, left alone. The
+    // sliver's seed stands inside the block's xy band, where the wall skip removes it, and the sliver joins the
+    // block 0.6 mm up: the wall holds it, so it gets no tip and is not under-held.
     Print print;
     init_and_process_print({ seeded_islands_fixture() }, print, scaffold_config({ { "support_remove_small_overhang", "1" } }));
     REQUIRE(print.objects().size() == 1);
@@ -842,15 +856,32 @@ TEST_CASE("Unseeded feature starts get a scaffold tip and floating debris gets n
     CHECK(report.islands_under_held == 0);
     CHECK(report.floating_pieces_removed == 0);
 
+    // The block's first layer places the fixture's (0, 0) in the object's centred frame. The speck is born on slab 15
+    // (z 3.0..3.2 at 0.2 mm layers), never meets the rooted body, and tops out on its birth slab.
+    const Point                              origin = get_extents(object.layers().front()->lslices).min;
+    const std::vector<SupportAnalysis::Slab> slabs  = SupportAnalysis::model_slabs_of(object);
+    REQUIRE_FALSE(slabs.empty());
+    const SupportAnalysis::IslandMap map          = SupportAnalysis::island_joins(slabs, slabs.front().bottom_z);
+    const Point                      speck_middle = origin + Point::new_scale(35.15, 5.15);
+    size_t                           speck        = size_t(-1);
+    for (size_t s = 0; s < slabs.size() && speck == size_t(-1); ++ s)
+        for (size_t p = map.components.slab_range[s].first; p < map.components.slab_range[s].second; ++ p)
+            if (map.components.pieces[p].polygon.contains(speck_middle))
+                speck = map.island_of_piece[p];
+    REQUIRE(speck < map.islands.size());
+    CHECK(map.islands[speck].birth_slab == 15);
+    CHECK(map.islands[speck].join_slab == slabs.size());
+    CHECK(map.islands[speck].top_slab == map.islands[speck].birth_slab);
+
     // The seeded tip stands at the spike's bottom, z 3, and prints its disc on the highest planned layer whose top is
-    // at or under it. The block's first layer places the fixture's (0, 0) in the object's centred frame.
+    // at or under it.
     const auto   layers = object.support_layers();
     const size_t top    = top_layer_under(layers, 3.);
     REQUIRE(top != size_t(-1));
     INFO("the layer under the spike prints at z " << layers[top]->print_z);
-    const Point      origin = get_extents(object.layers().front()->lslices).min;
     const FixtureBox under_spike { origin, 13.7, 4.5, 14.7, 5.5 };
     const FixtureBox under_debris { origin, 34.7, 4.7, 35.6, 5.6 };
+    const FixtureBox under_sliver { origin, 2.7, 10., 7.3, 10.65 };
     size_t at_spike = 0;
     for (const ExPolygon &poly : role_footprint(*layers[top], erSupportMaterialInterface)) {
         const Point c = poly.contour.centroid();
@@ -860,12 +891,16 @@ TEST_CASE("Unseeded feature starts get a scaffold tip and floating debris gets n
             ++ at_spike;
     }
     CHECK(at_spike >= 1);
-    size_t at_debris = 0;
+    size_t at_debris = 0, at_sliver = 0;
     for (const SupportLayer *layer : layers)
-        for (const ExPolygon &poly : role_footprint(*layer, erSupportMaterialInterface))
+        for (const ExPolygon &poly : role_footprint(*layer, erSupportMaterialInterface)) {
             if (under_debris.contains(poly.contour.centroid()))
                 ++ at_debris;
+            if (under_sliver.contains(poly.contour.centroid()))
+                ++ at_sliver;
+        }
     CHECK(at_debris == 0);
+    CHECK(at_sliver == 0);
 }
 
 TEST_CASE("Slender scaffold pillars get braces and unreachable ones stand unbraced", "[ScaffoldSupport]")
