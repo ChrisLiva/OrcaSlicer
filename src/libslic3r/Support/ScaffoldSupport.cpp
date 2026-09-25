@@ -113,6 +113,115 @@ size_t tips_fitting(const ExPolygon &piece, double pillar_diameter_mm)
     return std::max<size_t>(fit, 1);
 }
 
+// The island that owns the model piece over `tip`, on the overhang's own layer, one above the node's; npos where none
+// does.
+size_t island_of(const SupportAnalysis::IslandMap &map, const TipSite &tip)
+{
+    const size_t s = size_t(tip.obj_layer_nr + 1);
+    if (tip.obj_layer_nr + 1 < 0 || s >= map.components.slab_range.size())
+        return size_t(-1);
+    for (size_t p = map.components.slab_range[s].first; p < map.components.slab_range[s].second; ++ p)
+        if (map.components.pieces[p].polygon.contains(tip.position))
+            return map.island_of_piece[p];
+    return size_t(-1);
+}
+
+// The piece island `k` starts from: the one piece of its birth slab it owns, since that piece has nothing under it to
+// share a set with.
+const ExPolygon *birth_piece_of(const SupportAnalysis::IslandMap &map, size_t k)
+{
+    const size_t     birth_slab  = map.islands[k].birth_slab;
+    const ExPolygon *birth_piece = nullptr;
+    for (size_t p = map.components.slab_range[birth_slab].first; p < map.components.slab_range[birth_slab].second; ++ p)
+        if (map.island_of_piece[p] == k)
+            birth_piece = &map.components.pieces[p].polygon;
+    return birth_piece;
+}
+
+// Greedy, lowest first: a tip counts where it stands a pillar diameter from every tip counted before it.
+void count_spaced(std::vector<TipSite> &counted, const TipSite &tip, double min_spacing)
+{
+    if (std::all_of(counted.begin(), counted.end(), [&](const TipSite &c) { return tip.position.distance_to(c.position) >= min_spacing; }))
+        counted.push_back(tip);
+}
+
+// Short of the floor: the dropped contacts come back lowest first, among equals the one furthest from the tips the
+// island already has.
+void restore_dropped(std::vector<TipSite> &kept, std::vector<TipSite> &candidates, std::vector<TipSite> &counted, size_t floor,
+                     double min_spacing, std::vector<TipSite> &tips)
+{
+    std::sort(candidates.begin(), candidates.end(), [](const TipSite &a, const TipSite &b) { return a.print_z < b.print_z; });
+    const auto nearest_kept = [&kept](const TipSite &tip) {
+        double d = std::numeric_limits<double>::max();
+        for (const TipSite &t : kept)
+            d = std::min(d, tip.position.distance_to(t.position));
+        return d;
+    };
+    size_t next = 0;
+    while (counted.size() < floor && next < candidates.size()) {
+        size_t tie_end = next;
+        while (tie_end < candidates.size() && candidates[tie_end].print_z <= candidates[next].print_z + EPSILON)
+            ++ tie_end;
+        size_t best = next;
+        double best_d = nearest_kept(candidates[next]);
+        for (size_t i = next + 1; i < tie_end; ++ i)
+            if (const double d = nearest_kept(candidates[i]); d > best_d) {
+                best   = i;
+                best_d = d;
+            }
+        std::swap(candidates[next], candidates[best]);
+        const TipSite restored = candidates[next ++];
+        kept.push_back(restored);
+        tips.push_back(restored);
+        count_spaced(counted, restored, min_spacing);
+    }
+}
+
+// Holds island `k` with its floor of tips, `kept` the tips standing under it and `spare` its dropped contacts, and
+// returns whether it stays short of the floor or of the tips its birth piece fits, whichever is fewer. Debris and an
+// island hanging from a wall read false.
+bool hold_island(const std::vector<SupportAnalysis::Slab> &slabs, const SupportAnalysis::IslandMap &map, size_t k,
+                 std::vector<TipSite> &kept, std::vector<TipSite> &spare, std::vector<TipSite> &tips, double pillar_diameter_mm,
+                 const std::function<bool(const TipSite &)> &at_wall)
+{
+    using namespace SupportAnalysis;
+    const IslandJoin &join   = map.islands[k];
+    const bool        joins  = join.join_slab < slabs.size();
+    const Slab       &birth  = slabs[join.birth_slab];
+    const IslandJoin &part   = map.islands[join.part];
+    const double      top_z  = slabs[part.top_slab].print_z;
+    const double      height = (joins ? slabs[join.join_slab].bottom_z : top_z) - birth.bottom_z;
+    if (! joins && top_z - slabs[part.birth_slab].bottom_z <= 1. + EPSILON) {
+        BOOST_LOG_TRIVIAL(debug) << "scaffold island skipped at " << birth.bottom_z << ": debris";
+        return false;
+    }
+    const size_t     floor       = hold_floor(height);
+    const ExPolygon *birth_piece = birth_piece_of(map, k);
+    if (kept.empty() && spare.empty() && birth_piece != nullptr) {
+        const TipSite seeded { inscribed_point(*birth_piece), birth.bottom_z, int(join.birth_slab) - 1 };
+        if (! at_wall(seeded)) {
+            const Vec2d xy = unscale(seeded.position);
+            BOOST_LOG_TRIVIAL(debug) << "scaffold tip seeded at (" << xy.x() << ", " << xy.y() << ", " << seeded.print_z << ")";
+            kept.push_back(seeded);
+            tips.push_back(seeded);
+        } else if (joins && height <= 1. + EPSILON) {
+            BOOST_LOG_TRIVIAL(debug) << "scaffold island held at " << birth.bottom_z << ": wall";
+            return false;
+        }
+    }
+    const double         min_spacing = scale_(pillar_diameter_mm);
+    std::vector<TipSite> counted;
+    std::sort(kept.begin(), kept.end(), [](const TipSite &a, const TipSite &b) {
+        return a.print_z != b.print_z ? a.print_z < b.print_z : a.seed < b.seed;
+    });
+    for (const TipSite &tip : kept)
+        if (counted.size() < floor)
+            count_spaced(counted, tip, min_spacing);
+    restore_dropped(kept, spare, counted, floor, min_spacing, tips);
+    // An island counts as under-held only where its birth piece has room for more tips than it got.
+    return counted.size() < floor && (birth_piece == nullptr || counted.size() < tips_fitting(*birth_piece, pillar_diameter_mm));
+}
+
 // Holds each mid-air island of the model with its floor of tips a pillar diameter apart, and returns how many islands
 // stay short of the floor or of the tips their birth piece fits, whichever is fewer. A tip belongs to the island that
 // owns the model piece over it, on the overhang's own layer, one above the node's. An island that never joins measures
@@ -131,101 +240,36 @@ size_t restore_hold_floor(const PrintObject &object, std::vector<TipSite> &tips,
     const IslandMap map = island_joins(slabs, slabs.front().bottom_z);
     if (map.islands.empty())
         return 0;
-    const auto island_of = [&](const TipSite &tip) {
-        const size_t s = size_t(tip.obj_layer_nr + 1);
-        if (tip.obj_layer_nr + 1 < 0 || s >= map.components.slab_range.size())
-            return size_t(-1);
-        for (size_t p = map.components.slab_range[s].first; p < map.components.slab_range[s].second; ++ p)
-            if (map.components.pieces[p].polygon.contains(tip.position))
-                return map.island_of_piece[p];
-        return size_t(-1);
-    };
     std::vector<std::vector<TipSite>> kept(map.islands.size()), spare(map.islands.size());
     for (const TipSite &tip : tips)
-        if (const size_t k = island_of(tip); k < kept.size())
+        if (const size_t k = island_of(map, tip); k < kept.size())
             kept[k].push_back(tip);
     for (const TipSite &tip : dropped)
-        if (const size_t k = island_of(tip); k < spare.size())
+        if (const size_t k = island_of(map, tip); k < spare.size())
             spare[k].push_back(tip);
 
-    const double min_spacing = scale_(pillar_diameter_mm);
-    const auto   xy_distance = [](const TipSite &a, const TipSite &b) { return (a.position - b.position).cast<double>().norm(); };
-    size_t       under_held  = 0;
-    for (size_t k = 0; k < map.islands.size(); ++ k) {
-        const IslandJoin &join   = map.islands[k];
-        const bool        joins  = join.join_slab < slabs.size();
-        const Slab       &birth  = slabs[join.birth_slab];
-        const IslandJoin &part   = map.islands[join.part];
-        const double      top_z  = slabs[part.top_slab].print_z;
-        const double      height = (joins ? slabs[join.join_slab].bottom_z : top_z) - birth.bottom_z;
-        if (! joins && top_z - slabs[part.birth_slab].bottom_z <= 1. + EPSILON) {
-            BOOST_LOG_TRIVIAL(debug) << "scaffold island skipped at " << birth.bottom_z << ": debris";
-            continue;
-        }
-        const size_t floor = hold_floor(height);
-        // The piece the island starts from: the one piece of its birth slab it owns, since that piece has nothing under
-        // it to share a set with.
-        const ExPolygon *birth_piece = nullptr;
-        for (size_t p = map.components.slab_range[join.birth_slab].first; p < map.components.slab_range[join.birth_slab].second; ++ p)
-            if (map.island_of_piece[p] == k)
-                birth_piece = &map.components.pieces[p].polygon;
-        if (kept[k].empty() && spare[k].empty() && birth_piece != nullptr) {
-            const TipSite seeded { inscribed_point(*birth_piece), birth.bottom_z, int(join.birth_slab) - 1 };
-            if (! at_wall(seeded)) {
-                const Vec2d xy = unscale(seeded.position);
-                BOOST_LOG_TRIVIAL(debug) << "scaffold tip seeded at (" << xy.x() << ", " << xy.y() << ", " << seeded.print_z << ")";
-                kept[k].push_back(seeded);
-                tips.push_back(seeded);
-            } else if (joins && height <= 1. + EPSILON) {
-                BOOST_LOG_TRIVIAL(debug) << "scaffold island held at " << birth.bottom_z << ": wall";
-                continue;
-            }
-        }
-        // Greedy, lowest first: a tip counts where it stands a pillar diameter from every tip counted before it.
-        std::vector<TipSite> counted;
-        const auto count = [&](const TipSite &tip) {
-            if (std::all_of(counted.begin(), counted.end(), [&](const TipSite &c) { return xy_distance(tip, c) >= min_spacing; }))
-                counted.push_back(tip);
-        };
-        std::sort(kept[k].begin(), kept[k].end(), [](const TipSite &a, const TipSite &b) {
-            return a.print_z != b.print_z ? a.print_z < b.print_z : a.seed < b.seed;
-        });
-        for (const TipSite &tip : kept[k])
-            if (counted.size() < floor)
-                count(tip);
-        // Short of the floor: the dropped contacts come back lowest first, among equals the one furthest from the
-        // tips the island already has.
-        std::vector<TipSite> &candidates = spare[k];
-        std::sort(candidates.begin(), candidates.end(), [](const TipSite &a, const TipSite &b) { return a.print_z < b.print_z; });
-        size_t next = 0;
-        while (counted.size() < floor && next < candidates.size()) {
-            size_t tie_end = next;
-            while (tie_end < candidates.size() && candidates[tie_end].print_z <= candidates[next].print_z + EPSILON)
-                ++ tie_end;
-            const auto nearest_kept = [&](const TipSite &tip) {
-                double d = std::numeric_limits<double>::max();
-                for (const TipSite &t : kept[k])
-                    d = std::min(d, xy_distance(tip, t));
-                return d;
-            };
-            size_t best = next;
-            double best_d = nearest_kept(candidates[next]);
-            for (size_t i = next + 1; i < tie_end; ++ i)
-                if (const double d = nearest_kept(candidates[i]); d > best_d) {
-                    best   = i;
-                    best_d = d;
-                }
-            std::swap(candidates[next], candidates[best]);
-            const TipSite restored = candidates[next ++];
-            kept[k].push_back(restored);
-            tips.push_back(restored);
-            count(restored);
-        }
-        // An island counts as under-held only where its birth piece has room for more tips than it got.
-        if (counted.size() < floor && (birth_piece == nullptr || counted.size() < tips_fitting(*birth_piece, pillar_diameter_mm)))
+    size_t under_held = 0;
+    for (size_t k = 0; k < map.islands.size(); ++ k)
+        if (hold_island(slabs, map, k, kept[k], spare[k], tips, pillar_diameter_mm, at_wall))
             ++ under_held;
-    }
     return under_held;
+}
+
+// The kept tips of `merge_aliases` by cell of its grid, each with its 3-D point and its index in `tips`.
+using AliasCell = std::array<int64_t, 3>;
+using AliasGrid = std::unordered_map<AliasCell, std::vector<std::pair<Vec3d, size_t>>, boost::hash<AliasCell>>;
+
+// The index of the kept tip `p` is an alias of, or npos.
+size_t alias_of(const AliasGrid &kept, const Vec3d &p, const AliasCell &c)
+{
+    for (int64_t dx = -1; dx <= 1; ++ dx)
+        for (int64_t dy = -1; dy <= 1; ++ dy)
+            for (int64_t dz = -1; dz <= 1; ++ dz)
+                if (const auto it = kept.find(AliasCell{c[0] + dx, c[1] + dy, c[2] + dz}); it != kept.end())
+                    for (const auto &[q, i] : it->second)
+                        if ((q - p).norm() <= sla::D_SP)
+                            return i;
+    return size_t(-1);
 }
 
 // Merges the tips standing within the builder's alias distance `sla::D_SP` of each other in 3-D, xy from the node's
@@ -239,19 +283,7 @@ size_t restore_hold_floor(const PrintObject &object, std::vector<TipSite> &tips,
 // order.
 void merge_aliases(std::vector<TipSite> &tips)
 {
-    using Cell = std::array<int64_t, 3>;
-    std::unordered_map<Cell, std::vector<std::pair<Vec3d, size_t>>, boost::hash<Cell>> kept;
-    // The index of the kept tip `p` is an alias of, or npos.
-    const auto alias_of = [&kept](const Vec3d &p, const Cell &c) {
-        for (int64_t dx = -1; dx <= 1; ++ dx)
-            for (int64_t dy = -1; dy <= 1; ++ dy)
-                for (int64_t dz = -1; dz <= 1; ++ dz)
-                    if (const auto it = kept.find(Cell{c[0] + dx, c[1] + dy, c[2] + dz}); it != kept.end())
-                        for (const auto &[q, i] : it->second)
-                            if ((q - p).norm() <= sla::D_SP)
-                                return i;
-        return size_t(-1);
-    };
+    AliasGrid kept;
     std::vector<size_t> order(tips.size());
     for (size_t i = 0; i < order.size(); ++ i)
         order[i] = i;
@@ -265,11 +297,11 @@ void merge_aliases(std::vector<TipSite> &tips)
     });
     std::vector<bool> keep(tips.size(), false);
     for (const size_t i : order) {
-        const Vec2d xy = unscale(tips[i].position);
-        const Vec3d p(xy.x(), xy.y(), tips[i].print_z);
-        const Cell  c{int64_t(std::floor(p.x() / sla::D_SP)), int64_t(std::floor(p.y() / sla::D_SP)),
-                      int64_t(std::floor(p.z() / sla::D_SP))};
-        if (const size_t into = alias_of(p, c); into != size_t(-1)) {
+        const Vec2d     xy = unscale(tips[i].position);
+        const Vec3d     p(xy.x(), xy.y(), tips[i].print_z);
+        const AliasCell c{int64_t(std::floor(p.x() / sla::D_SP)), int64_t(std::floor(p.y() / sla::D_SP)),
+                          int64_t(std::floor(p.z() / sla::D_SP))};
+        if (const size_t into = alias_of(kept, p, c); into != size_t(-1)) {
             BOOST_LOG_TRIVIAL(debug) << "scaffold tip merged at (" << p.x() << ", " << p.y() << ", " << p.z() << ")";
             tips[into].enforced = tips[into].enforced || tips[i].enforced;
             continue;
@@ -282,6 +314,31 @@ void merge_aliases(std::vector<TipSite> &tips)
         if (keep[i])
             tips[next ++] = tips[i];
     tips.resize(next);
+}
+
+// One tip per contact. An interior tip is kept only where its overhang holds a disc as wide as the longest bridge:
+// under a narrower overhang the tips on its rim already hold it.
+std::vector<TipSite> contact_tips(const std::vector<std::vector<SupportNode *>> &contacts, double max_bridge_length_mm)
+{
+    std::vector<TipSite> nodes;
+    for (const std::vector<SupportNode *> &layer : contacts)
+        for (const SupportNode *node : layer)
+            if (node->placement != SupportNode::Placement::Interior ||
+                (! node->overhang.empty() && ! offset_ex(node->overhang, -scale_(max_bridge_length_mm / 2.)).empty()))
+                nodes.push_back(site_of(*node));
+    return nodes;
+}
+
+// The first object layer at or above the bottom of `tip`'s neck, `neck_depth_mm` under the tip, or -1 where the neck
+// bottoms under the first layer.
+int reference_layer(const PrintObject &object, const TipSite &tip, double neck_depth_mm)
+{
+    const double z = tip.print_z - neck_depth_mm;
+    if (object.layer_count() == 0 || z <= object.get_layer(0)->bottom_z())
+        return -1;
+    const auto it = std::lower_bound(object.layers().begin(), object.layers().end(), z,
+                                     [](const Layer *layer, double z) { return layer->print_z < z; });
+    return it == object.layers().end() ? -1 : int(it - object.layers().begin());
 }
 
 // The leading planned layers whose base is the pad.
@@ -802,14 +859,7 @@ ExPolygons clip_base(const ExPolygons &base, const ExPolygons &enforced_heads, c
 Tips choose_tips(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts,
                  const std::vector<SupportNode *> &dropped, const Params &params)
 {
-    // One tip per contact. An interior tip is kept only where its overhang holds a disc as wide as the longest bridge:
-    // under a narrower overhang the tips on its rim already hold it.
-    std::vector<TipSite> nodes;
-    for (const std::vector<SupportNode *> &layer : contacts)
-        for (const SupportNode *node : layer)
-            if (node->placement != SupportNode::Placement::Interior ||
-                (! node->overhang.empty() && ! offset_ex(node->overhang, -scale_(params.max_bridge_length_mm / 2.)).empty()))
-                nodes.push_back(site_of(*node));
+    std::vector<TipSite> nodes = contact_tips(contacts, params.max_bridge_length_mm);
 
     // A tip whose centre stands within the xy distance of the model at its neck's bottom is skipped, and so is a
     // dropped contact the hold floor could restore there: the seam clips support inside that band, so the neck
@@ -819,23 +869,15 @@ Tips choose_tips(const PrintObject &object, const std::vector<std::vector<Suppor
     // by the pad and is kept, and so is an enforced tip: the enforcer asked for it there, and `clip_base` keeps its
     // head out of the model alone.
     const double neck_depth_mm = head_width_mm + params.toolpath_width_mm;
-    const auto   reference_layer = [&object, neck_depth_mm](const TipSite &tip) {
-        const double z = tip.print_z - neck_depth_mm;
-        if (object.layer_count() == 0 || z <= object.get_layer(0)->bottom_z())
-            return -1;
-        const auto it = std::lower_bound(object.layers().begin(), object.layers().end(), z,
-                                         [](const Layer *layer, double z) { return layer->print_z < z; });
-        return it == object.layers().end() ? -1 : int(it - object.layers().begin());
-    };
     std::vector<TipSite> spare;
     for (const SupportNode *node : dropped)
         spare.push_back(site_of(*node));
     std::vector<int> wall_layers;
     for (const TipSite &tip : nodes)
-        if (const int l = reference_layer(tip); l >= 0)
+        if (const int l = reference_layer(object, tip, neck_depth_mm); l >= 0)
             wall_layers.push_back(l);
     for (const TipSite &tip : spare)
-        if (const int l = reference_layer(tip); l >= 0)
+        if (const int l = reference_layer(object, tip, neck_depth_mm); l >= 0)
             wall_layers.push_back(l);
     std::sort(wall_layers.begin(), wall_layers.end());
     wall_layers.erase(std::unique(wall_layers.begin(), wall_layers.end()), wall_layers.end());
@@ -847,7 +889,7 @@ Tips choose_tips(const PrintObject &object, const std::vector<std::vector<Suppor
     });
     // A tip the hold floor seeds may stand over a layer no other tip does, so its band is offset on the spot.
     const auto at_wall = [&](const TipSite &tip) {
-        const int l = reference_layer(tip);
+        const int l = reference_layer(object, tip, neck_depth_mm);
         if (l < 0 || tip.enforced)
             return false;
         const auto        it     = std::lower_bound(wall_layers.begin(), wall_layers.end(), l);
