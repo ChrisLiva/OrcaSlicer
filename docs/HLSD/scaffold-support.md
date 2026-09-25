@@ -78,11 +78,13 @@ with the bottom-gap trim regions. It calls `ScaffoldSupport::draw` with the
 chosen tips, and the draw's neck check reads the same clips. `drop_nodes`,
 `smooth_nodes` and `draw_circles` do not run.
 
-For each planned layer `TreeSupport` then clips the returned base areas against
-the grown band and the machine border, and the interface areas against the
-model alone, since the rings fuse to it. The base areas become
-`BaseType` area groups with no infill and the interface areas become
-`Roof1stLayer` groups; a group on one of the pad's layers carries `pad = true`.
+For each planned layer `TreeSupport` then clips the returned areas.
+`ScaffoldSupport::clip_base` keeps the base out of the grown band and adds back
+the painted tips' heads kept out of the model alone, the machine border clips
+the result, and the interface areas stay out of the model alone, since the
+rings fuse to it. The base areas become `BaseType` area groups with no infill
+and the interface areas become `Roof1stLayer` groups; a group on one of the
+pad's layers carries `pad = true`.
 The shared members `finish_layer_areas`, `normalize_interface_ids` and
 `erase_empty_support_layers`, which `draw_circles` also calls, finish the
 layers, and the generator records one emitted layer per filled planned layer
@@ -114,7 +116,12 @@ them.
    has not. A skipped tip logs `scaffold tip skipped at (x, y, z): wall` at
    debug level and counts as neither placed nor dropped. The same test applies
    to the dropped contacts the hold floor may restore and to the tips it
-   seeds.
+   seeds. A painted tip is exempt: a contact the paint asked for,
+   `SupportNode::is_pinned`, which under Scaffold marks a painted area
+   enforcer's contacts and every vertical enforcer point, becomes a
+   `TipSite` with `painted` set, and the skip keeps it however close the wall
+   stands, so the tip fuses where the user painted and leaves its scar
+   there.
 3. The island hold floor. `SupportAnalysis::island_joins` maps every mid-air
    island of the model to the slab where it first meets the rooted body. An
    island needs one tip when its unjoined height is at most 1 mm, two up to
@@ -144,7 +151,8 @@ them.
    consecutive layers, and the builder keeps one point of each pair within
    `sla::D_SP`. The selection visits the tips lowest first, among equals by seed
    id, and merges a tip standing within `sla::D_SP` in 3-D of a tip already
-   kept into it, so no two tips it hands the builder are aliases. A merge logs
+   kept into it, so no two tips it hands the builder are aliases; a kept tip is
+   painted when any tip merged into it was. A merge logs
    `scaffold tip merged at (x, y, z)` at debug level and counts as neither
    placed nor dropped.
 5. Grading. A tip's head fuses to the model with a disc two support lines
@@ -164,10 +172,13 @@ them.
    The neck check then reads what the seam would print of the build on each
    planned layer above the pad, as the outlines its lines cover, since the
    floating pass reads `polygons_covered_by_width`. The areas are the cage
-   outside the clip's band and the rings outside the model, with the small
-   holes `TreeSupport::fill_small_holes` fills filled, as `finish_layer_areas`
-   fills them on every support layer. The base goes through
-   `Params::base_cover`, which under the default base pattern lays its walls
+   outside the clip's band with the painted heads outside the model, through
+   the `clip_base` the seam calls, and the rings outside the model, with the
+   small holes `TreeSupport::fill_small_holes` fills filled, as
+   `finish_layer_areas` fills them on every support layer, so a painted head's
+   neck beside a wall holds its rings and the head is not cut for it. The base
+   goes through `Params::base_cover`, which under the default base pattern
+   lays its walls
    through the same `tree_supports_generate_paths` call `generate_toolpaths`
    makes, so a wide area's inside and a sliver too short for a loop print
    nothing, and under a pattern with infill other than lightning reads the
@@ -186,24 +197,31 @@ them.
    wall of a cage hole, a gap among fused necks 2 mm across or wider whose
    narrower stretches on the layers around it are filled, has its hole filled
    instead, which removes a wall that stands over the unprinted inside of the
-   section below. The cut heads' points leave the point set, in order, and the
-   builder runs again, since a run re-routes the neighbours of what it lost
-   and can strand another ring. It repeats until no head is cut, at most six
-   runs (plate 3 of the corpus needs five), and the heads the sixth run still
-   cuts are dropped without another run, their rings left out of the output.
-   Each run logs `scaffold build <n>: <points> points, <cut> heads cut` and
+   section below. A painted head whose own neck under its rings lies in a
+   floating piece that holds no ring and walls no hole is cut as well: the
+   head runs through the model or narrows under a line there, so the neck the
+   paint exempts from the band would print in mid-air. The cut heads' points
+   leave the point set, in order, and the builder runs again, since a run
+   re-routes the neighbours of what it lost and can strand another ring. It
+   repeats until no head is cut, at most six runs (plate 3 of the corpus needs
+   five), and the heads the sixth run still cuts are dropped without another
+   run, their rings left out of the output. Each run logs
+   `scaffold build <n>: <points> points, <cut> heads cut` and
    each drop `scaffold tip dropped at (x, y, z): <reason>` at debug level,
    the reason `filtered`, `unrouted` (also for a cut head with no pillar and
    no bridge) or `neck`. When anything routed, `SupportTreeBuilder::add_pad`
    adds a pad of the pad thickness with a 1.6 mm brim and no wall.
 7. Slicing. Each run slices its cage at the middle of every planned layer,
-   and each routed head's own mesh at the tops of its top interface layer,
+   each routed head's own mesh at the tops of its top interface layer,
    the planned layer whose top is the tip's z, and of the layers under it up
-   to the interface count. The last run's slices are the output: the pad,
-   sliced on the layers it spans, joins the cage's sections as base areas, and
-   the rings become the layer's interface areas and leave its base.
+   to the interface count, and a painted tip's head at the middles of the
+   layers it reaches under those. The last run's slices are the output: the
+   pad, sliced on the layers it spans, joins the cage's sections as base
+   areas, the rings become the layer's interface areas and leave its base, and
+   the painted heads' slices go out apart for `clip_base`.
 
-The returned `Output` carries one `LayerAreas` per planned layer, the number of
+The returned `Output` carries one `LayerAreas` per planned layer (base,
+interface and painted heads), the number of
 leading layers that are pad, the five tip and pillar counts, and the
 milliseconds spent in the island map, in every build with the pad, and in the
 slicing with the neck checks, which
@@ -266,6 +284,13 @@ tip rings print as the top interface, in
 the interface pattern and flow; with no interface layers configured the rings
 stay in the base and print as base.
 
+Base stays out of the model grown by the xy distance, except a painted tip's
+own head under its rings, which stays out of the model alone: without it the
+band would cut the neck of a tip the user painted beside a wall and leave its
+rings over nothing. The exemption covers that head only; pillars, bridges and
+braces keep the band, and the neck check cuts a painted head whose own neck
+would print in mid-air.
+
 The floating pass runs on every pass that measures itself, and the scaffold
 always does, since it forces miniature contacts on. Under Scaffold the pass
 reads support as plate-only whatever `support_on_build_plate_only` says: a
@@ -317,8 +342,11 @@ left, interior tip thinning, the hold floor restoring contacts under tall
 islands and capped by what a birth piece fits, a tip seeded under an unseeded
 feature start with its ring on the layer its z tops and none under debris or
 under a sliver the wall beside it holds, a sliver joining too high for its
-wall counted under-held, and braces on slender pillars. The SLA builder changes
-are covered in `tests/sla_print/sla_print_tests.cpp`.
+wall counted under-held, braces on slender pillars, and a painted bar
+underside and a painted column face beside the column's wall printing their
+tips there at the corpus's widths and layer height, where the unpainted bar
+prints none. The SLA builder changes are covered in
+`tests/sla_print/sla_print_tests.cpp`.
 
 The hidden case "Scaffold support over corpus plate 3 in two poses"
 (`[ScaffoldSupport][.]`) needs `ORCA_MINIATURE_CORPUS` pointing at the

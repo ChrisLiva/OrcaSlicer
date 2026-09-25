@@ -69,7 +69,7 @@ sla::SupportTreeConfig tree_config(const Params &params)
 // The seed a contact was placed for, or the largest id for a node the seed pass never named.
 uint64_t seed_id(const SupportNode &node) { return node.source_ids.empty() ? std::numeric_limits<uint64_t>::max() : node.source_ids.front(); }
 
-TipSite site_of(const SupportNode &node) { return { node.position, node.print_z, node.obj_layer_nr, seed_id(node), &node }; }
+TipSite site_of(const SupportNode &node) { return { node.position, node.print_z, node.obj_layer_nr, seed_id(node), &node, node.is_pinned }; }
 
 // The tips a model island needs for its unjoined height: one for a sliver, two up to 5 mm, three above. A slab z is
 // a sum of layer heights, so a band edge carries an epsilon.
@@ -234,21 +234,23 @@ size_t restore_hold_floor(const PrintObject &object, std::vector<TipSite> &tips,
 // equals by seed id, and a tip within the distance of a tip already kept merges into it; a merged tip absorbs none.
 // A chain at the layer pitch therefore keeps every tip standing further than the distance from the kept tips under
 // it, and three tips all within the distance of each other keep one where the builder's pairs would keep two: no
-// two kept tips are aliases, so the builder filters none. The kept tips sit in a grid of cells the distance wide,
-// so a tip reads the 27 cells around its own. `tips` keeps its order.
+// two kept tips are aliases, so the builder filters none. A kept tip is painted when a tip merged into it was. The
+// kept tips sit in a grid of cells the distance wide, so a tip reads the 27 cells around its own. `tips` keeps its
+// order.
 void merge_aliases(std::vector<TipSite> &tips)
 {
     using Cell = std::array<int64_t, 3>;
-    std::unordered_map<Cell, std::vector<Vec3d>, boost::hash<Cell>> kept;
-    const auto aliased = [&kept](const Vec3d &p, const Cell &c) {
-        const auto within = [&p](const Vec3d &q) { return (q - p).norm() <= sla::D_SP; };
+    std::unordered_map<Cell, std::vector<std::pair<Vec3d, size_t>>, boost::hash<Cell>> kept;
+    // The index of the kept tip `p` is an alias of, or npos.
+    const auto alias_of = [&kept](const Vec3d &p, const Cell &c) {
         for (int64_t dx = -1; dx <= 1; ++ dx)
             for (int64_t dy = -1; dy <= 1; ++ dy)
                 for (int64_t dz = -1; dz <= 1; ++ dz)
-                    if (const auto it = kept.find(Cell{c[0] + dx, c[1] + dy, c[2] + dz});
-                        it != kept.end() && std::any_of(it->second.begin(), it->second.end(), within))
-                        return true;
-        return false;
+                    if (const auto it = kept.find(Cell{c[0] + dx, c[1] + dy, c[2] + dz}); it != kept.end())
+                        for (const auto &[q, i] : it->second)
+                            if ((q - p).norm() <= sla::D_SP)
+                                return i;
+        return size_t(-1);
     };
     std::vector<size_t> order(tips.size());
     for (size_t i = 0; i < order.size(); ++ i)
@@ -267,12 +269,13 @@ void merge_aliases(std::vector<TipSite> &tips)
         const Vec3d p(xy.x(), xy.y(), tips[i].print_z);
         const Cell  c{int64_t(std::floor(p.x() / sla::D_SP)), int64_t(std::floor(p.y() / sla::D_SP)),
                       int64_t(std::floor(p.z() / sla::D_SP))};
-        if (aliased(p, c)) {
+        if (const size_t into = alias_of(p, c); into != size_t(-1)) {
             BOOST_LOG_TRIVIAL(debug) << "scaffold tip merged at (" << p.x() << ", " << p.y() << ", " << p.z() << ")";
+            tips[into].painted = tips[into].painted || tips[i].painted;
             continue;
         }
         keep[i] = true;
-        kept[c].push_back(p);
+        kept[c].emplace_back(p, i);
     }
     size_t next = 0;
     for (size_t i = 0; i < tips.size(); ++ i)
@@ -282,6 +285,14 @@ void merge_aliases(std::vector<TipSite> &tips)
 }
 
 } // namespace
+
+ExPolygons clip_base(const ExPolygons &base, const ExPolygons &painted_heads, const LayerClip &clip)
+{
+    ExPolygons out = diff_ex(base, clip.band);
+    if (! painted_heads.empty())
+        out = union_ex(out, diff_ex(painted_heads, clip.model));
+    return out;
+}
 
 Tips choose_tips(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts,
                  const std::vector<SupportNode *> &dropped, const Params &params)
@@ -300,7 +311,8 @@ Tips choose_tips(const PrintObject &object, const std::vector<std::vector<Suppor
     // would be cut while its ring survived. Under a slope the head tilts along the underside's normal and the
     // slope recedes at least its rise by that depth, so the neck clears the band; beside a wall it does not, and
     // the wall anchors that band as it does under the legacy tree. A neck bottoming under the first layer stands
-    // by the pad and is kept.
+    // by the pad and is kept, and so is a painted tip: the paint asked for it there, and `clip_base` keeps its head
+    // out of the model alone.
     const double neck_depth_mm = head_width_mm + params.toolpath_width_mm;
     const auto   reference_layer = [&object, neck_depth_mm](const TipSite &tip) {
         const double z = tip.print_z - neck_depth_mm;
@@ -331,7 +343,7 @@ Tips choose_tips(const PrintObject &object, const std::vector<std::vector<Suppor
     // A tip the hold floor seeds may stand over a layer no other tip does, so its band is offset on the spot.
     const auto at_wall = [&](const TipSite &tip) {
         const int l = reference_layer(tip);
-        if (l < 0)
+        if (l < 0 || tip.painted)
             return false;
         const auto        it     = std::lower_bound(wall_layers.begin(), wall_layers.end(), l);
         const bool        listed = it != wall_layers.end() && *it == l;
@@ -426,14 +438,16 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
                                        [](double z, const LayerHeightData &plan) { return z < plan.print_z; }) -
                       layer_heights.begin());
     };
-    // A build's slices: the cage through each planned layer's middle, and each routed head's own head through the
-    // tops of its ring layers, `first` the lowest. The rings are indexed as the build's heads.
-    struct Rings { size_t first = 0; std::vector<ExPolygons> slices; };
+    // A build's slices: the cage through each planned layer's middle, each routed head's own head through the tops of
+    // its ring layers, `first` the lowest, and a painted tip's own head through the middles of the layers it reaches
+    // under its rings, `neck_first` the lowest. The rings are indexed as the build's heads, whose ids index `tip_of`.
+    struct Rings { size_t first = 0; std::vector<ExPolygons> slices; size_t neck_first = 0; std::vector<ExPolygons> neck; };
     std::vector<float> middles;
     middles.reserve(layer_heights.size());
     for (const LayerHeightData &plan : layer_heights)
         middles.push_back(float(plan.print_z - 0.5 * plan.height - params.z_offset_mm));
-    const auto slice_build = [&](const sla::SupportTreeBuilder &builder, std::vector<ExPolygons> &cage, std::vector<Rings> &rings) {
+    const auto slice_build = [&](const sla::SupportTreeBuilder &builder, const std::vector<size_t> &tip_of,
+                                 std::vector<ExPolygons> &cage, std::vector<Rings> &rings) {
         const indexed_triangle_set &merged = builder.retrieve_mesh(sla::MeshType::Support);
         cage = merged.indices.empty() ? std::vector<ExPolygons>() : slice_mesh_ex(merged, middles, 0.f, throw_on_cancel);
         cage.resize(layer_heights.size());
@@ -443,24 +457,43 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
             for (size_t i = range.begin(); i < range.end(); ++ i)
                 cage[i] = union_ex(cage[i]);
         });
-        if (params.interface_layers == 0)
-            return;
         tbb::parallel_for(tbb::blocked_range<size_t>(0, heads.size()), [&](const tbb::blocked_range<size_t> &range) {
             for (size_t h = range.begin(); h < range.end(); ++ h) {
                 if (! heads[h].is_valid())
                     continue;
                 const size_t above = layers_under_tip(heads[h]);
                 const size_t count = std::min(above, params.interface_layers);
-                if (count == 0)
+                rings[h].first     = above - count;
+                const bool painted = nodes[tip_of[size_t(heads[h].id)]].painted;
+                if (count == 0 && ! painted)
                     continue;
+                const indexed_triangle_set head = sla::get_mesh(heads[h], 45);
                 // The slicer wants its heights ascending.
-                rings[h].first = above - count;
-                std::vector<float> zs;
-                for (size_t i = rings[h].first; i < above; ++ i)
-                    zs.push_back(float(layer_heights[i].print_z - params.z_offset_mm));
-                rings[h].slices = slice_mesh_ex(sla::get_mesh(heads[h], 45), zs, 0.f);
+                if (count > 0) {
+                    std::vector<float> zs;
+                    for (size_t i = rings[h].first; i < above; ++ i)
+                        zs.push_back(float(layer_heights[i].print_z - params.z_offset_mm));
+                    rings[h].slices = slice_mesh_ex(head, zs, 0.f);
+                }
+                if (painted) {
+                    const float bottom = std::min_element(head.vertices.begin(), head.vertices.end(),
+                                                          [](const Vec3f &a, const Vec3f &b) { return a.z() < b.z(); })->z();
+                    rings[h].neck_first = std::min(size_t(std::lower_bound(middles.begin(), middles.end(), bottom) - middles.begin()),
+                                                   rings[h].first);
+                    if (rings[h].neck_first < rings[h].first)
+                        rings[h].neck = slice_mesh_ex(head, std::vector<float>(middles.begin() + rings[h].neck_first,
+                                                                               middles.begin() + rings[h].first), 0.f);
+                }
             }
         });
+    };
+    // The painted heads' slices per planned layer.
+    const auto painted_heads = [&layer_heights](const std::vector<Rings> &rings) {
+        std::vector<ExPolygons> out(layer_heights.size());
+        for (const Rings &r : rings)
+            for (size_t k = 0; k < r.neck.size(); ++ k)
+                append(out[r.neck_first + k], r.neck[k]);
+        return out;
     };
     // The heads whose rings would print over nothing, and the cage holes whose walls would. What the seam lays on
     // each planned layer above the pad, its areas with the holes `TreeSupport::fill_small_holes` fills filled, goes
@@ -478,10 +511,12 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
     // A head is cut where one of its rings lies in a floating piece. A floating piece that holds no ring and is the
     // wall of a hole in the cage's section stands over the unprinted inside of the section below: a gap among fused
     // necks 2 mm across or wider keeps its hole while the same gap narrower on the layers around it is filled. That
-    // hole is filled too, which removes the wall and nothing a rooted piece stands on.
+    // hole is filled too, which removes the wall and nothing a rooted piece stands on. A painted head is cut where its
+    // own neck under its rings lies in a floating piece that holds no ring and walls no hole: the head runs through the
+    // model or narrows under a line there, so the neck the paint exempts from the band would print in mid-air.
     const float half_line = float(scale_(0.5 * params.toolpath_width_mm));
     const auto find_stranded = [&](const std::vector<sla::Head> &heads, std::vector<ExPolygons> &cage,
-                                   const std::vector<Rings> &rings) {
+                                   const std::vector<Rings> &rings, const std::vector<ExPolygons> &painted) {
         std::vector<char> cut(heads.size(), 0);
         const size_t lowest = out.pad_layers;
         if (lowest >= layer_heights.size())
@@ -497,7 +532,7 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
             for (size_t s = range.begin(); s < range.end(); ++ s) {
                 const size_t     i       = lowest + s;
                 ExPolygons       rings_i = diff_ex(union_ex(interface_[s]), clips[i].model);
-                ExPolygons       base_i  = diff_ex(diff_ex(cage[i], clips[i].band), rings_i);
+                ExPolygons       base_i  = diff_ex(clip_base(cage[i], painted[i], clips[i]), rings_i);
                 for (ExPolygon &area : base_i)
                     TreeSupport::fill_small_holes(area);
                 for (ExPolygon &area : rings_i)
@@ -552,8 +587,10 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
                 ringed[s][j] = 1;
         }
         // A hole's wall covers from the hole's edge to a line into the section.
+        std::vector<std::vector<char>> walls(slabs.size());
         tbb::parallel_for(tbb::blocked_range<size_t>(0, slabs.size()), [&](const tbb::blocked_range<size_t> &range) {
-            for (size_t s = range.begin(); s < range.end(); ++ s)
+            for (size_t s = range.begin(); s < range.end(); ++ s) {
+                walls[s].assign(adrift[s].size(), 0);
                 for (size_t j = 0; j < adrift[s].size(); ++ j) {
                     if (ringed[s][j])
                         continue;
@@ -567,8 +604,25 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
                                 return false;
                             Polygon gap = hole;
                             gap.make_counter_clockwise();
-                            return ! intersection_ex(offset_ex(ExPolygon(gap), 2.f * half_line), ExPolygons{ piece }).empty();
+                            const bool wall = ! intersection_ex(offset_ex(ExPolygon(gap), 2.f * half_line), ExPolygons{ piece }).empty();
+                            walls[s][j] = walls[s][j] || wall;
+                            return wall;
                         }), section.holes.end());
+                }
+            }
+        });
+        // The painted heads whose own neck lies in a floating piece that holds no ring and walls no hole.
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, heads.size()), [&](const tbb::blocked_range<size_t> &range) {
+            for (size_t h = range.begin(); h < range.end(); ++ h)
+                for (size_t k = 0; k < rings[h].neck.size() && ! cut[h]; ++ k) {
+                    if (rings[h].neck_first + k < lowest || rings[h].neck[k].empty())
+                        continue;
+                    const size_t      s   = rings[h].neck_first + k - lowest;
+                    const BoundingBox box = get_extents(rings[h].neck[k]);
+                    for (size_t j = 0; j < adrift[s].size() && ! cut[h]; ++ j)
+                        if (! ringed[s][j] && ! walls[s][j] && adrift[s][j].first.overlap(box) &&
+                            ! intersection_ex(rings[h].neck[k], ExPolygons{ *adrift[s][j].second }).empty())
+                            cut[h] = 1;
                 }
         });
         return cut;
@@ -576,8 +630,8 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
 
     // What became of each tip. A head the builder kept carries its point's index as its id; one it gave up on
     // lost the id and is found by the position it was built at; a point with no head was filtered out. A head
-    // whose rings would float is cut: `Unrouted` where the builder left it with no pillar and no bridge, which a
-    // side head whose ground pillar fails keeps, else `Neck`.
+    // whose rings, or painted neck, would float is cut: `Unrouted` where the builder left it with no pillar and no
+    // bridge, which a side head whose ground pillar fails keeps, else `Neck`.
     enum class Tip : uint8_t { Filtered, Unrouted, Neck, Routed };
     const auto outcomes = [](const sla::SupportTreeBuilder &builder, const sla::SupportPoints &pts) {
         std::vector<Tip>    tips(pts.size(), Tip::Filtered);
@@ -627,8 +681,9 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
         builder              = build(left);
         build_ms += ms_since(run_start);
         const auto slice_start = std::chrono::steady_clock::now();
-        slice_build(*builder, cage, rings);
-        cut = params.interface_layers > 0 ? find_stranded(builder->heads(), cage, rings) : std::vector<char>(builder->heads().size(), 0);
+        slice_build(*builder, index_of, cage, rings);
+        cut = params.interface_layers > 0 ? find_stranded(builder->heads(), cage, rings, painted_heads(rings))
+                                          : std::vector<char>(builder->heads().size(), 0);
         out.stage_ms.slice += ms_since(slice_start);
         const size_t cut_count = size_t(std::count(cut.begin(), cut.end(), char(1)));
         BOOST_LOG_TRIVIAL(debug) << "scaffold build " << run << ": " << left.size() << " points, " << cut_count << " heads cut";
@@ -658,6 +713,7 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
         if (cut[h]) {
             tips[index_of[size_t(builder->heads()[h].id)]] = cut_reason(builder->heads()[h]);
             rings[h].slices.clear();
+            rings[h].neck.clear();
         }
     out.counts.pillars_unbraced = builder->unbraced_pillars;
     static constexpr const char *reason[] = { "filtered", "unrouted", "neck" };
@@ -687,7 +743,8 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
     out.stage_ms.build = build_ms + ms_since(pad_start);
 
     // The last build's slices are the output: each planned layer is the cage's and the pad's section through the
-    // layer's middle, and each routed head's rings print as interface.
+    // layer's middle, each routed head's rings print as interface, and the painted heads under their rings go out
+    // apart for `clip_base`.
     const auto output_start = std::chrono::steady_clock::now();
     if (! pad_mesh.indices.empty()) {
         const float  pad_top = std::max_element(pad_mesh.vertices.begin(), pad_mesh.vertices.end(),
@@ -701,8 +758,11 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
                 cage[i] = union_ex(cage[i]);
             }
     }
-    for (size_t i = 0; i < out.layers.size(); ++ i)
-        out.layers[i].base = std::move(cage[i]);
+    std::vector<ExPolygons> necks = painted_heads(rings);
+    for (size_t i = 0; i < out.layers.size(); ++ i) {
+        out.layers[i].base          = std::move(cage[i]);
+        out.layers[i].painted_heads = std::move(necks[i]);
+    }
     for (const Rings &r : rings)
         for (size_t k = 0; k < r.slices.size(); ++ k)
             append(out.layers[r.first + k].interface_, r.slices[k]);

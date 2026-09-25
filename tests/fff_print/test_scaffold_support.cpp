@@ -779,6 +779,112 @@ TEST_CASE("A routed head whose neck the xy band would cut is dropped and no ring
     }
 }
 
+TEST_CASE("A painted enforcer beside a wall fuses its tip where the paint asks", "[ScaffoldSupport]")
+{
+    // At the corpus's 0.22 mm support line, 0.5 mm xy distance, 0.06 mm layers and two interface layers, a bar tip within
+    // 0.5 mm of the column face stands in the column's band at its neck's bottom, and a tip on the column's face always
+    // does, so the wall skip takes both. Painting the bar's underside pins every contact on it, and painting the column's
+    // +y face puts a vertical enforcer point at the centroid of each of its two facets. A pinned tip is not skipped, and
+    // its own head below its rings is clipped by the model alone: under two 0.06 mm rings the band would cut a tilted
+    // neck and strand the rings. Support layers follow the object's layers, as the corpus's dense contacts plan them
+    // under most tips; a lone tip here would get 0.29 mm layers, and its tilted neck clears the band under two rings
+    // that deep.
+    const DynamicPrintConfig config = scaffold_config({ { "support_line_width", "0.22" },
+                                                        { "support_object_xy_distance", "0.5" },
+                                                        { "layer_height", "0.06" },
+                                                        { "independent_support_layer_height", "0" },
+                                                        { "support_interface_top_layers", "2" } });
+    const auto run = [&config](Model &model, Print &print, bool painted) {
+        init_print({ shelf_fixture() }, print, model, config);
+        if (painted) {
+            // add_volume centred the mesh on its bounding box, whose minimum is the fixture's (0, -3, 0).
+            ModelVolume &mv    = *model.objects.front()->volumes.front();
+            const Vec3f  shift = mv.mesh().bounding_box().min.cast<float>() - Vec3f(0.f, -3.f, 0.f);
+            const auto   all   = [&shift](const Vec3f &a, const Vec3f &b, const Vec3f &c, int axis, float value) {
+                return std::abs(a[axis] - shift[axis] - value) < 1e-3f && std::abs(b[axis] - shift[axis] - value) < 1e-3f &&
+                       std::abs(c[axis] - shift[axis] - value) < 1e-3f;
+            };
+            // The bar's underside at z 4 and the column's +y face at y 6, two facets each.
+            REQUIRE(paint_enforcers(mv, [&all](const Vec3f &a, const Vec3f &b, const Vec3f &c) {
+                        return all(a, b, c, 2, 4.f) || all(a, b, c, 1, 6.f);
+                    }) == 4);
+            // Print::apply keeps a copy of the model, so the paint reaches it the way the GUI's does: through a second
+            // apply of the config init_print built, which differs from the first in the paint alone.
+            DynamicPrintConfig full = DynamicPrintConfig::full_print_config();
+            full.apply(config);
+            full.set_key_value("gcode_comments", new ConfigOptionBool(true));
+            REQUIRE(print.apply(model, full) != Print::APPLY_STATUS_UNCHANGED);
+        }
+        print.process();
+        REQUIRE(print.objects().size() == 1);
+        REQUIRE(print.objects().front()->support_analysis() != nullptr);
+        return print.objects().front();
+    };
+    // The interface polygons on the layer the bar's underside tops whose centroid stands under the bar within 0.4 mm of
+    // the column face, inside the 0.5 mm band. The column's first layer places the fixture in the object's centred frame.
+    const auto in_band_under_bar = [](const PrintObject &object) {
+        const auto   layers = object.support_layers();
+        const size_t top    = top_layer_under(layers, 4.);
+        REQUIRE(top != size_t(-1));
+        const Point      origin = get_extents(object.layers().front()->lslices).min;
+        const FixtureBox band { origin, 6., 2.4, 6.4, 3.6 };
+        size_t           count = 0;
+        for (const ExPolygon &poly : role_footprint(*layers[top], erSupportMaterialInterface)) {
+            const Vec2d q = (poly.contour.centroid() - origin).cast<double>() * SCALING_FACTOR;
+            UNSCOPED_INFO("interface polygon centroid (" << q.x() << ", " << q.y() << ") on print_z " << layers[top]->print_z);
+            if (band.contains(poly.contour.centroid()))
+                ++ count;
+        }
+        return count;
+    };
+
+    Model plain_model;
+    Print plain_print;
+    const PrintObject &plain = *run(plain_model, plain_print, false);
+    CHECK(in_band_under_bar(plain) == 0);
+
+    Model painted_model;
+    Print painted_print;
+    const PrintObject             &painted = *run(painted_model, painted_print, true);
+    const SupportAnalysis::Report &report  = *painted.support_analysis();
+    INFO("painted: tips placed " << report.tips_placed << " routed " << report.tips_routed << " dropped " << report.tips_dropped
+                                 << " floating removed " << report.floating_pieces_removed);
+    CHECK(in_band_under_bar(painted) >= 1);
+    CHECK(report.floating_pieces_removed == 0);
+    CHECK(report.tips_placed == report.tips_routed + report.tips_dropped);
+
+    // Each vertical enforcer point is a contact on the first object layer whose top reaches it, at that layer's bottom,
+    // and its tip's top ring prints on the support layer that z tops, against the face. The points carry the slicer's
+    // scaled xy and z in mm.
+    std::vector<Polygons>                enforcers;
+    std::vector<std::pair<Vec3f, Vec3f>> vertical_points;
+    painted.project_and_append_custom_facets(false, EnforcerBlockerType::ENFORCER, enforcers, &vertical_points);
+    REQUIRE(vertical_points.size() == 2);
+    const auto layers = painted.support_layers();
+    for (const std::pair<Vec3f, Vec3f> &pt_and_normal : vertical_points) {
+        const Vec3f &pt = pt_and_normal.first;
+        const auto   it = std::find_if(painted.layers().begin(), painted.layers().end(),
+                                       [&pt](const Layer *layer) { return float(layer->print_z) >= pt.z(); });
+        REQUIRE(it != painted.layers().end());
+        const double tip_z = (*it)->bottom_z();
+        const size_t top   = top_layer_under(layers, tip_z);
+        REQUIRE(top != size_t(-1));
+        const Point  spot(coord_t(pt.x()), coord_t(pt.y()));
+        const Vec2d  xy = unscale(spot);
+        INFO("vertical enforcer point (" << xy.x() << ", " << xy.y() << ", " << pt.z() << "), tip z " << tip_z << ", support layer print_z "
+                                         << layers[top]->print_z);
+        CHECK_THAT(layers[top]->print_z, WithinAbs(tip_z, 1e-4));
+        size_t at_spot = 0;
+        for (const ExPolygon &poly : role_footprint(*layers[top], erSupportMaterialInterface)) {
+            const Vec2d c = unscale(poly.contour.centroid());
+            UNSCOPED_INFO("interface polygon centroid (" << c.x() << ", " << c.y() << ")");
+            if ((poly.contour.centroid() - spot).cast<double>().norm() <= scale_(1.))
+                ++ at_spot;
+        }
+        CHECK(at_spot >= 1);
+    }
+}
+
 TEST_CASE("Interior tips survive only where a bridge span fits", "[ScaffoldSupport]")
 {
     // A 12 mm wide slab holds no 14 mm disc, so at a 14 mm bridge length every tip under it stands on the rim; a 10 mm
