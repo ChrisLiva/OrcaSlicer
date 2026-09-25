@@ -230,6 +230,26 @@ TriangleMesh fin_fixture()
     return base;
 }
 
+// One hex nibble per original triangle, "4" being an unsplit leaf whose state is EnforcerBlockerType::ENFORCER
+// (TriangleSelector::serialize writes a leaf as xxyy, xx the state and yy the number of split sides).
+size_t paint_enforcers(ModelVolume &mv, const std::function<bool(const Vec3f &, const Vec3f &, const Vec3f &)> &pick)
+{
+    const indexed_triangle_set &its     = mv.mesh().its;
+    size_t                      painted = 0;
+    mv.supported_facets.reset();
+    for (int i = 0; i < int(its.indices.size()); ++ i) {
+        const Vec3f &a = its.vertices[its.indices[i](0)];
+        const Vec3f &b = its.vertices[its.indices[i](1)];
+        const Vec3f &c = its.vertices[its.indices[i](2)];
+        if (a == b || a == c || b == c || ! pick(a, b, c))
+            continue;
+        mv.supported_facets.set_triangle_from_string(i, "4");
+        ++ painted;
+    }
+    mv.supported_facets.shrink_to_fit();
+    return painted;
+}
+
 // Every .stl and .3mf directly under `dir`, in name order, so two runs walk the same models in the
 // same order. A corpus directory that has gone missing yields nothing rather than throwing.
 std::vector<std::filesystem::path> corpus_files(const std::string &dir)

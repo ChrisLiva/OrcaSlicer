@@ -435,28 +435,6 @@ void run_analysis(AnalysisRun &run, TriangleMesh &&shape, const DynamicPrintConf
     run.print.process();
 }
 
-// Paints every facet of `mv` that `pick` selects as a support enforcer, through the encoding 3MF
-// loading uses: one hex nibble per original triangle, "4" being an unsplit leaf whose state is
-// EnforcerBlockerType::ENFORCER (TriangleSelector::serialize writes a leaf as xxyy, xx the state and
-// yy the number of split sides). Degenerate facets are skipped. Returns how many facets were painted.
-size_t paint_enforcers(ModelVolume &mv, const std::function<bool(const Vec3f &, const Vec3f &, const Vec3f &)> &pick)
-{
-    const indexed_triangle_set &its     = mv.mesh().its;
-    size_t                      painted = 0;
-    mv.supported_facets.reset();
-    for (int i = 0; i < int(its.indices.size()); ++ i) {
-        const Vec3f &a = its.vertices[its.indices[i](0)];
-        const Vec3f &b = its.vertices[its.indices[i](1)];
-        const Vec3f &c = its.vertices[its.indices[i](2)];
-        if (a == b || a == c || b == c || ! pick(a, b, c))
-            continue;
-        mv.supported_facets.set_triangle_from_string(i, "4");
-        ++ painted;
-    }
-    mv.supported_facets.shrink_to_fit();
-    return painted;
-}
-
 // Paints every vertical facet of `mv` as a support enforcer. Verticality is the test slice_mesh_slabs
 // applies, a triangle whose projection onto the bed has no signed area, so this paint produces
 // vertical enforcer points and nothing else: a vertical facet projects to nothing downwards, and

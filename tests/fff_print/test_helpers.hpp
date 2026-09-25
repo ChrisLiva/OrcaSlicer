@@ -9,6 +9,7 @@
 #include "libslic3r/TriangleMesh.hpp"
 
 #include <filesystem>
+#include <functional>
 #include <initializer_list>
 #include <set>
 #include <string>
@@ -76,6 +77,10 @@ DynamicPrintConfig fixture_config(std::initializer_list<Slic3r::ConfigBase::SetD
 
 // An 8 mm square column carrying an 8 x 1.5 x 44 mm fin leaning 40 deg off vertical.
 TriangleMesh fin_fixture();
+
+// Paints every facet of `mv` that `pick` selects as a support enforcer, the way 3MF loading does, skipping degenerate
+// facets, and returns how many facets were painted.
+size_t paint_enforcers(ModelVolume &mv, const std::function<bool(const Vec3f &, const Vec3f &, const Vec3f &)> &pick);
 
 // Every .stl and .3mf directly under `dir`, in name order; a missing directory yields nothing.
 std::vector<std::filesystem::path> corpus_files(const std::string &dir);
