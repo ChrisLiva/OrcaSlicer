@@ -74,7 +74,12 @@ TriangleMesh islands_fixture()
 // the front half seeds nothing under it. A 0.3 x 0.3 x 0.2 mm speck at x 35..35.3, y 5..5.3, z 3..3.2 fills one
 // slab and never joins. A 4 x 0.2 x 0.6 mm sliver at x 3..7, y 10.15..10.35, z 5..5.6 hangs 0.15 mm off the block's
 // +y face, inside its 0.35 mm xy band, until a 4 x 0.45 x 0.2 mm ledge at y 9.9..10.35, z 5.6..5.8 joins it to the
-// block 0.6 mm up.
+// block 0.6 mm up. A floating part that never meets the rooted body stands at x 37..48: a 4 x 4 x 3 mm cube at
+// x 40..44, y 3..7, z 3..6 carries off its +x face a 4 x 0.4 x 0.4 mm arm at x 44..48, y 4.8..5.2, z 5.6..6, and under
+// the arm's end a 0.4 x 0.4 x 0.4 mm leg at x 47.4..47.8, y 4.8..5.2, z 5.2..5.6 starts an island that the arm merges
+// into the cube's 0.4 mm up. Arm and leg are too thin for a line, so the front half seeds nothing under them. A
+// 3 x 3 x 0.4 mm flange off the cube's -x face at x 37..40, y 3.5..6.5, z 5.6..6 does get contacts, and they carry
+// the planned support layers, which end at the highest contact, above the leg.
 TriangleMesh seeded_islands_fixture()
 {
     TriangleMesh block = make_cube(10., 10., 8.);
@@ -90,12 +95,24 @@ TriangleMesh seeded_islands_fixture()
     sliver.translate(3.f, 10.15f, 5.f);
     TriangleMesh ledge = make_cube(4., 0.45, 0.2);
     ledge.translate(3.f, 9.9f, 5.6f);
+    TriangleMesh part = make_cube(4., 4., 3.);
+    part.translate(40.f, 3.f, 3.f);
+    TriangleMesh arm = make_cube(4., 0.4, 0.4);
+    arm.translate(44.f, 4.8f, 5.6f);
+    TriangleMesh leg = make_cube(0.4, 0.4, 0.4);
+    leg.translate(47.4f, 4.8f, 5.2f);
+    TriangleMesh flange = make_cube(3., 3., 0.4);
+    flange.translate(37.f, 3.5f, 5.6f);
     block.merge(cube);
     block.merge(bar);
     block.merge(spike);
     block.merge(debris);
     block.merge(sliver);
     block.merge(ledge);
+    block.merge(part);
+    block.merge(arm);
+    block.merge(leg);
+    block.merge(flange);
     return block;
 }
 
@@ -386,10 +403,14 @@ TEST_CASE("Island joins name the slab each mid-air island first meets the rooted
     CHECK(map.islands[b].join_slab == slabs.size());
     CHECK(map.islands[c].birth_slab == 15);
     CHECK(map.islands[c].join_slab == slabs.size());
-    // A owns its pieces until the bar roots it at slab 30; B and C end at z 5, the top of slab 24.
+    // A owns its pieces until the bar roots it at slab 30; B and C end at z 5, the top of slab 24. None merges into
+    // another, so each is its own part.
     CHECK(map.islands[a].top_slab == 29);
     CHECK(map.islands[b].top_slab == 24);
     CHECK(map.islands[c].top_slab == 24);
+    CHECK(map.islands[a].part == a);
+    CHECK(map.islands[b].part == b);
+    CHECK(map.islands[c].part == c);
 
     // The piece of slab `s` whose outline holds `point`, or npos.
     const auto piece_holding = [&](size_t s, const Point &point) {
@@ -844,7 +865,9 @@ TEST_CASE("Unseeded feature starts get a scaffold tip while floating debris and 
     // on the body the bar roots. The spike's island joins 0.6 mm up and wants one tip, which the hold floor seeds at
     // the spike's middle. The speck never joins and its own height is one 0.2 mm slab: debris, left alone. The
     // sliver's seed stands inside the block's xy band, where the wall skip removes it, and the sliver joins the
-    // block 0.6 mm up: the wall holds it, so it gets no tip and is not under-held.
+    // block 0.6 mm up: the wall holds it, so it gets no tip and is not under-held. The floating part's leg reaches
+    // 0.4 mm to the arm that merges it into the cube's island, but the part it ends up in stands 3 mm tall and its top
+    // sits 0.8 mm over the leg's bottom: the leg is no debris and gets its seed.
     Print print;
     init_and_process_print({ seeded_islands_fixture() }, print, scaffold_config({ { "support_remove_small_overhang", "1" } }));
     REQUIRE(print.objects().size() == 1);
@@ -861,17 +884,35 @@ TEST_CASE("Unseeded feature starts get a scaffold tip while floating debris and 
     const Point                              origin = get_extents(object.layers().front()->lslices).min;
     const std::vector<SupportAnalysis::Slab> slabs  = SupportAnalysis::model_slabs_of(object);
     REQUIRE_FALSE(slabs.empty());
-    const SupportAnalysis::IslandMap map          = SupportAnalysis::island_joins(slabs, slabs.front().bottom_z);
-    const Point                      speck_middle = origin + Point::new_scale(35.15, 5.15);
-    size_t                           speck        = size_t(-1);
-    for (size_t s = 0; s < slabs.size() && speck == size_t(-1); ++ s)
-        for (size_t p = map.components.slab_range[s].first; p < map.components.slab_range[s].second; ++ p)
-            if (map.components.pieces[p].polygon.contains(speck_middle))
-                speck = map.island_of_piece[p];
+    const SupportAnalysis::IslandMap map = SupportAnalysis::island_joins(slabs, slabs.front().bottom_z);
+    // The island owning the lowest piece that holds the fixture's point (x, y), or npos.
+    const auto island_under = [&](double x, double y) {
+        const Point point = origin + Point::new_scale(x, y);
+        for (size_t s = 0; s < slabs.size(); ++ s)
+            for (size_t p = map.components.slab_range[s].first; p < map.components.slab_range[s].second; ++ p)
+                if (map.components.pieces[p].polygon.contains(point))
+                    return map.island_of_piece[p];
+        return size_t(-1);
+    };
+    const size_t speck = island_under(35.15, 5.15);
     REQUIRE(speck < map.islands.size());
     CHECK(map.islands[speck].birth_slab == 15);
     CHECK(map.islands[speck].join_slab == slabs.size());
     CHECK(map.islands[speck].top_slab == map.islands[speck].birth_slab);
+    // The leg is born on slab 26 (z 5.2..5.4) and owns its pieces up to slab 27; on slab 28 the arm merges it into the
+    // older cube's island, which owns the part up to its top, slab 29 (z 5.8..6.0). Neither meets the rooted body.
+    const size_t leg = island_under(47.6, 5.), part = island_under(42., 5.);
+    REQUIRE(leg < map.islands.size());
+    REQUIRE(part < map.islands.size());
+    CHECK(map.islands[leg].birth_slab == 26);
+    CHECK(map.islands[leg].join_slab == slabs.size());
+    CHECK(map.islands[leg].top_slab == 27);
+    CHECK(map.islands[leg].part == part);
+    CHECK(map.islands[part].birth_slab == 15);
+    CHECK(map.islands[part].join_slab == slabs.size());
+    CHECK(map.islands[part].top_slab == 29);
+    CHECK(map.islands[part].part == part);
+    CHECK(map.islands[speck].part == speck);
 
     // The seeded tip stands at the spike's bottom, z 3, and prints its disc on the highest planned layer whose top is
     // at or under it.
@@ -891,6 +932,18 @@ TEST_CASE("Unseeded feature starts get a scaffold tip while floating debris and 
             ++ at_spike;
     }
     CHECK(at_spike >= 1);
+    // The leg's seeded tip stands at its bottom, z 5.2, and prints its disc on the highest planned layer at or under it,
+    // one of the layers the flange's contacts plan at most 0.3 mm apart.
+    const size_t under_leg_top = top_layer_under(layers, 5.2);
+    REQUIRE(under_leg_top != size_t(-1));
+    INFO("the layer under the leg prints at z " << layers[under_leg_top]->print_z);
+    CHECK(layers[under_leg_top]->print_z > 5.2 - 0.3);
+    const FixtureBox under_leg { origin, 47.1, 4.5, 48.1, 5.5 };
+    size_t at_leg = 0;
+    for (const ExPolygon &poly : role_footprint(*layers[under_leg_top], erSupportMaterialInterface))
+        if (under_leg.contains(poly.contour.centroid()))
+            ++ at_leg;
+    CHECK(at_leg >= 1);
     size_t at_debris = 0, at_sliver = 0;
     for (const SupportLayer *layer : layers)
         for (const ExPolygon &poly : role_footprint(*layer, erSupportMaterialInterface)) {

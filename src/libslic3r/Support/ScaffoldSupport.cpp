@@ -127,10 +127,11 @@ size_t tips_fitting(const ExPolygon &piece, double pillar_diameter_mm)
 // Holds each mid-air island of the model with its floor of tips a pillar diameter apart, and returns how many islands
 // stay short of the floor or of the tips their birth piece fits, whichever is fewer. A tip belongs to the island that
 // owns the model piece over it, on the overhang's own layer, one above the node's. An island that never joins measures
-// to its own top, and one at most 1 mm tall is mesh debris: no floor, no tip, not counted. An island with no tip and
-// no dropped contact gets one tip seeded at the deepest point of its birth piece, at the piece's bottom, unless
-// `at_wall` skips it; an island `at_wall` skips that joins within 1 mm hangs from that wall and is not counted. Short
-// of the floor, the dropped contacts under it come back.
+// to the top of the part it ends up in, and a whole part at most 1 mm tall is mesh debris: no floor, no tip, not
+// counted, so a short leg merging into a taller floating part keeps its floor. An island with no tip and no dropped
+// contact gets one tip seeded at the deepest point of its birth piece, at the piece's bottom, unless `at_wall` skips
+// it; an island `at_wall` skips that joins within 1 mm hangs from that wall and is not counted. Short of the floor,
+// the dropped contacts under it come back.
 size_t restore_hold_floor(const PrintObject &object, std::vector<TipSite> &tips, const std::vector<TipSite> &dropped,
                           double pillar_diameter_mm, const std::function<bool(const TipSite &)> &at_wall)
 {
@@ -165,8 +166,10 @@ size_t restore_hold_floor(const PrintObject &object, std::vector<TipSite> &tips,
         const IslandJoin &join   = map.islands[k];
         const bool        joins  = join.join_slab < slabs.size();
         const Slab       &birth  = slabs[join.birth_slab];
-        const double      height = (joins ? slabs[join.join_slab].bottom_z : slabs[join.top_slab].print_z) - birth.bottom_z;
-        if (! joins && height <= 1. + EPSILON) {
+        const IslandJoin &part   = map.islands[join.part];
+        const double      top_z  = slabs[part.top_slab].print_z;
+        const double      height = (joins ? slabs[join.join_slab].bottom_z : top_z) - birth.bottom_z;
+        if (! joins && top_z - slabs[part.birth_slab].bottom_z <= 1. + EPSILON) {
             BOOST_LOG_TRIVIAL(debug) << "scaffold island skipped at " << birth.bottom_z << ": debris";
             continue;
         }

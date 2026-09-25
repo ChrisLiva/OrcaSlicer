@@ -110,6 +110,7 @@ struct IslandJoin
     size_t birth_slab = 0;
     size_t join_slab  = 0; // the slab count when the island never joins
     size_t top_slab   = 0; // the highest slab holding a piece the island owns
+    size_t part       = 0; // the oldest open island of its set at its last open slab, itself unless it merged
 };
 
 struct IslandMap
@@ -121,7 +122,8 @@ struct IslandMap
 
 // The islands of `model_slabs` walked bottom-up: each piece with nothing below it whose connected set is
 // not yet rooted at `ground_z` starts an island, which joins at the first slab whose overlaps connect it
-// to a rooted set. A piece belongs to the oldest island still open in its set at its own slab.
+// to a rooted set. A piece belongs to the oldest island still open in its set at its own slab, so the `part`
+// of an island that never joins owns the top of the part it ends up in, and its birth is that part's bottom.
 IslandMap island_joins(const std::vector<Slab> &model_slabs, double ground_z);
 
 } // namespace SupportAnalysis

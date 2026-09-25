@@ -108,9 +108,12 @@ counts what it did with them. It runs seven steps.
    island needs one tip when its unjoined height is at most 1 mm, two up to
    5 mm and three above, counted greedily from the lowest tip and only where a
    tip stands a pillar diameter from every tip counted before it. A
-   never-joining island's height runs to its own top, the highest slab holding
-   a piece it owns, so one at most 1 mm tall is mesh debris at any height: it
-   gets no floor, no tip and no count, and logs
+   never-joining island's height runs to the top of the part it ends up in:
+   where two such islands meet in mid-air the older owns the pieces above the
+   merge, so a short leg of a taller floating part measures to that part's top
+   and keeps its floor and its seed. Only a whole never-joining part at most
+   1 mm tall is mesh debris, at any height: its islands get no floor, no tip
+   and no count, and log
    `scaffold island skipped at z: debris` at debug level. An island with no tip
    and no dropped contact under it gets one tip seeded at the deepest point of
    its birth piece, at that piece's bottom, in the small grade. When the wall

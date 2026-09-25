@@ -215,6 +215,7 @@ IslandMap island_joins(const std::vector<Slab> &model_slabs, double ground_z)
             size_t &oldest = oldest_open[sets.find(birth_piece[i])];
             if (oldest == npos)
                 oldest = i;
+            map.islands[i].part = oldest;
         }
         for (size_t p = first; p < last; ++ p)
             if ((map.island_of_piece[p] = oldest_open[sets.find(p)]) != npos)
