@@ -83,15 +83,16 @@ generator's output. The pass costs the union of every layer's footprints: `STAGE
 Gate on Catch2 case counts, not assertion counts: `fff_print_tests "[MiniatureContacts]~[.]"` reported
 102184, 103169, 104814, 106441 and 106975 assertions across five runs of one binary while its case count held
 (2026-09-08/09).
-Under `ctest -j5` a test process occasionally stalls with every thread in `condition_variable::wait`: 2 of
-about 25 suite runs stalled one `fff_print_tests` case, and one run stalled five cases at once
-from four unrelated suites (`SLASupportGeneration`, `MultiFilament`, `AutoTilt`, `MiniatureContacts`), each of
-which passes alone in under 22 s (2026-09-09). `orcaslicer_discover_tests` in `tests/CMakeLists.txt` sets
-`TIMEOUT 300` on every registered case so a stall fails at 300 s instead of holding the run for ten minutes;
-re-run once before reading a lone timeout as a regression. A binary run alone by name can stall the same way: one
-`[ScaffoldSupport]` case sat 5 min at 0.03 s of CPU with every thread waiting in
-`name_tbb_thread_pool_threads_set_locale`, and its re-run passed in 3.1 s (2026-09-25); a direct run has no
-timeout, so kill it and re-run.
+A TBB task must never wait for another task of its own loop to start. When a task is spawned, oneTBB 2021.5 may miss
+the wakeup of a sleeping worker, as the comment in `advertise_new_work` in its `src/tbb/arena.h` states, and then
+relies on the spawning thread to run the task itself, which a thread blocked in such a wait never does.
+`name_tbb_thread_pool_threads_set_locale` used a barrier of that kind over all `max_concurrency()` threads. On
+2026-09-25 it froze the GUI on the first slice of a session, with 9 of 10 threads in the barrier and one worker
+asleep, and held a lone `[ScaffoldSupport]` run for 5 min. A `tbb::task_scheduler_observer` has set up the workers
+instead since 2026-09-25. The `ctest -j5` stalls of 2026-09-09 match that barrier's signature, with every thread in
+`condition_variable::wait` in 2 of about 25 suite runs and five cases from four unrelated suites stalled in one run.
+`orcaslicer_discover_tests` in `tests/CMakeLists.txt` sets `TIMEOUT 300` on every registered case so a stall fails
+at 300 s instead of holding the run for ten minutes; a direct run of a binary has no timeout.
 ClipperLib's output is not invariant under removing clip polygons that are provably disjoint from the subject: on
 plate 3 of a 36 MB miniature project, clipping 61082 attributed support areas against a bbox-prefiltered clip
 changed the result on 32894 of them by up to 7.4e-7 mm² and joined or split two pieces meeting at a one-unit

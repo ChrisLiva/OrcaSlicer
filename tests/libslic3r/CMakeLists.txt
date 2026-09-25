@@ -46,6 +46,7 @@ add_executable(${_TEST_NAME}_tests
     test_support_analysis.cpp
     test_utils.cpp
     test_timeutils.cpp
+    test_thread.cpp
     test_voronoi.cpp
     test_wipe_tower_estimate.cpp
     test_wipe_tower.cpp

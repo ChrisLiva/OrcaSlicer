@@ -38,8 +38,8 @@ bool is_main_thread_active();
 // Naming threads is only supported on newer Windows 10.
 std::optional<std::string> get_current_thread_name();
 
-// To be called somewhere before the TBB threads are spinned for the first time, to
-// give them names recognizible in the debugger.
+// To be called on each thread that runs a Print, before it spawns TBB work, to give the TBB workers that join it
+// names recognizible in the debugger.
 // Also it sets locale of the worker threads to "C" for the G-code generator to produce "." as a decimal separator.
 void name_tbb_thread_pool_threads_set_locale();
 
