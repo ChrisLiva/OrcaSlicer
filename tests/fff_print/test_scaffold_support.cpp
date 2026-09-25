@@ -1147,6 +1147,56 @@ TEST_CASE("Slender scaffold pillars get braces and unreachable ones stand unbrac
     CHECK(b.volume_mm3 >= 0.98 * d.volume_mm3);
 }
 
+TEST_CASE("A scaffold under an object lifted off the bed stands on the bed and holds the underside", "[ScaffoldSupport]")
+{
+    // The shelf fixture lifted 1.5 mm with auto-drop off: the column's 6 x 6 mm underside at z 1.5 is an overhang
+    // too near the bed for a head, which needs 2.62 mm above the pad's top, so its tips stand on posts.
+    const double lift = 1.5;
+    Print print;
+    Model model;
+    const DynamicPrintConfig config = scaffold_config();
+    init_print({ shelf_fixture() }, print, model, config);
+    ModelInstance &instance = *model.objects.front()->instances.front();
+    instance.auto_drop      = false;
+    instance.set_offset(Z, lift);
+    DynamicPrintConfig full = DynamicPrintConfig::full_print_config();
+    full.apply(config);
+    print.apply(model, full);
+    // An object with no support under its lowest layer fails G-code layer collection with an empty first layer.
+    REQUIRE_NOTHROW(print.process());
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    REQUIRE(object.support_analysis() != nullptr);
+    const SupportAnalysis::Report &report = *object.support_analysis();
+    INFO("tips placed " << report.tips_placed << " routed " << report.tips_routed << " dropped " << report.tips_dropped);
+    CHECK(report.tips_placed > 0);
+    CHECK(report.tips_dropped == 0);
+    CHECK(report.floating_pieces_removed == 0);
+
+    // The pad prints on the bed, not on a ground raised by the lift.
+    const auto layers = object.support_layers();
+    REQUIRE(layers.size() > 0);
+    CHECK_THAT(layers.front()->print_z, WithinAbs(0.2, EPSILON));
+    CHECK(layers.front()->has_extrusions());
+
+    // Under the column's underside every support layer from the pad's top up prints inside the column's footprint,
+    // and the one the underside rests on prints interface there.
+    const auto first_solid = std::find_if(object.layers().begin(), object.layers().end(),
+                                          [](const Layer *l) { return ! l->lslices.empty(); });
+    REQUIRE(first_solid != object.layers().end());
+    const FixtureBox column { get_extents((*first_solid)->lslices).min, 0., 0., 6., 6. };
+    const ExPolygons underside { ExPolygon(column.polygon()) };
+    const size_t     top = top_layer_under(layers, lift + 0.2);
+    REQUIRE(top != size_t(-1));
+    for (size_t i = 0; i <= top; ++ i) {
+        if (layers[i]->print_z < 0.6 + EPSILON)
+            continue;
+        INFO("print_z " << layers[i]->print_z);
+        CHECK_FALSE(intersection_ex(union_ex(layers[i]->support_fills.polygons_covered_by_width(0.f)), underside).empty());
+    }
+    CHECK_FALSE(intersection_ex(role_footprint(*layers[top], erSupportMaterialInterface), underside).empty());
+}
+
 // Hidden ([.]): four full Print::process() passes over a 993k-facet miniature at 0.06 mm layers, minutes in
 // total, and the model lives outside the repo under $ORCA_MINIATURE_CORPUS (docs/miniature_support_validation.md).
 // It gates the style on plate 3 of the corpus against a tree-slim slice measured in the same run.

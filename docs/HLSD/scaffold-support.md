@@ -12,8 +12,8 @@ broad scars a tree roof leaves on a figure's underside.
 The style reuses the legacy tree's front half: overhang detection, contact
 seeding, the miniature contact selection, the model risk field and the planned
 support layer heights. It replaces only the body. `ScaffoldSupport::draw` builds
-the SLA tree on the object mesh at zero elevation, adds a pad and slices both
-into the planned layers, and `TreeSupport` prints those areas through the
+the SLA tree on the object mesh with its ground on the bed, adds a pad and
+slices both into the planned layers, and `TreeSupport` prints those areas through the
 legacy tree's toolpath, floating-removal and measurement tail. The style
 generates FFF support only; nothing in the SLA printing pipeline changes.
 
@@ -164,12 +164,33 @@ them.
    object's slices use, to `sla::SupportTreeBuildsteps::execute` with the
    configuration `tree_config` writes: head front, penetration and fallback
    radius at one toolpath width, pillar radius at half the pillar diameter,
-   zero elevation, no model anchors, bridge and pillar-link lengths at the
+   no model anchors, bridge and pillar-link lengths at the
    scaffold bridge length, a 45 degree bridge slope, the object's xy distance
-   as the safety distance and the scaffold brace slenderness. The mesh's
-   ground level sits at the pad's top, so pillars end on it. A head the
+   as the safety distance and the scaffold brace slenderness. The draw sets
+   the elevation to the mesh's lowest z: the builder grounds pillars at that z
+   less the elevation, so the ground sits at the pad's top on the bed for an
+   object standing on it and for one lifted off it with auto-drop off. A
+   lifted object's positive elevation also turns off the zero-elevation walk
+   that steers a pillar's foot out from under the model, so a pillar drops
+   straight under the underside. A head the
    builder kept is a routed tip; a head it built and gave up on is an
    unrouted drop; a point that never got a head is a filtered drop.
+   A head pointing straight down needs its whole length above the pad's top,
+   the 1 mm head width plus twice each radius less the penetration, 2.62 mm
+   at a 0.42 mm line and a 1.2 mm pillar, so a tip lower than that, such as
+   the underside of an object lifted 1 mm, gets no head. After each run such a
+   point stands on a post instead when it is no more than that length plus the
+   0.5 mm pillar base above the pad's top and its disc stays out of the clip's
+   band on every planned layer under its rings and on every pad layer, where
+   the seam would cut the post or the pad under it: a pillar as wide as the
+   tip's disc from the pad's top to the tip, added to the builder so the cage
+   and the pad take it in. A post's rings are its disc on the layers a head's
+   rings would take, and the neck check reads them with the heads' rings: a
+   post whose rings float is cut as a `neck` drop and leaves the point set for
+   the next run. A posted tip counts as routed. The band test matters beside
+   a model standing on the bed: a tip in a crevice there has rings the model
+   alone clips, over pad layers the band cuts away, and the neck check reads
+   no pad layer.
    The neck check then reads what the seam would print of the build on each
    planned layer above the pad, as the outlines its lines cover, since the
    floating pass reads `polygons_covered_by_width`. The areas are the cage
@@ -224,7 +245,8 @@ them.
    to the interface count, and an enforced tip's head at the middles of the
    layers it reaches under those. The last run's slices are the output: the
    pad, sliced on the layers it spans, joins the cage's sections as base
-   areas, the rings become the layer's interface areas and leave its base, and
+   areas, the rings and each post's disc on the layers a head's rings would
+   take become the layer's interface areas and leave its base, and
    the enforced heads' slices go out apart for `clip_base`.
 
 The returned `Output` carries one `LayerAreas` per planned layer (base,
