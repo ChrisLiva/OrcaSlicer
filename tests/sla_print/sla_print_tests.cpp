@@ -253,13 +253,6 @@ TEST_CASE("FloorSupportsDoNotPierceModel", "[SLASupportGeneration]") {
 }
 
 TEST_CASE("A model-facing head is dropped when model anchors are forbidden", "[SLASupportGeneration]") {
-    using Catch::Matchers::WithinAbs;
-
-    REQUIRE_THAT(sla::SupportTreeConfig{}.safety_distance_mm, WithinAbs(0.5, 1e-12));
-    sla::SupportTreeConfig clearance;
-    clearance.safety_distance_mm = 1.0;
-    REQUIRE_THAT(clearance.safety_distance_mm, WithinAbs(1.0, 1e-12));
-
     indexed_triangle_set mesh = blocked_lip_mesh();
 
     sla::SupportTreeConfig forbidden = blocked_lip_config();
@@ -307,12 +300,14 @@ TEST_CASE("A stop condition halts the builder between steps", "[SLASupportGenera
 TEST_CASE("A zero-elevation corrector bridge walks no further than its drop allows", "[SLASupportGeneration]") {
     // A corrector bridge is the walk create_ground_pillar lays at polar PI - bridge_slope: its XY moves and
     // its descent is its length times cos(slope). Its length may pass the drop over cos(slope) by one walk
-    // step (the loop tests t < tmax and then adds the radius), never more. This fixture lays no corrector
-    // at pi/6 (measured 2026-09-24), so only pi/4 requires one.
-    const auto [slope, min_correctors] = GENERATE(table<double, size_t>({{M_PI / 4, 1}, {M_PI / 6, 0}}));
+    // step (the loop tests t < tmax and then adds the radius), never more. At pi/3 the walk descends half its
+    // length, so it may run sideways up to tan(pi/3) times its drop, and the sweep lays walks that run further
+    // sideways than their drop plus one step; a cap by the sine of the slope would stop every walk within one
+    // step of its drop. At pi/4 the two caps agree and no walk runs sideways past its drop by a step.
+    const auto [slope, min_wide] = GENERATE(table<double, size_t>({{M_PI / 4, 0}, {M_PI / 3, 1}}));
     const double cs = std::cos(slope);
 
-    size_t correctors = 0;
+    size_t correctors = 0, wide = 0;
     for (int hi = 0; hi <= 8; ++hi) {
         const double h  = 6. + 1. * hi;
         const double zj = h - 1.3, jx = 3.5; // the junction under the point, read off the default head
@@ -337,15 +332,54 @@ TEST_CASE("A zero-elevation corrector bridge walks no further than its drop allo
                 if (xy < 1e-6) continue;
                 if (std::abs(descent - b.get_length() * cs) > 1e-6) continue;
                 ++correctors;
-                const double bound = (b.startp.z() - builder.ground_level) / cs + b.r + 1e-6;
+                const double drop  = b.startp.z() - builder.ground_level;
+                const double bound = drop / cs + b.r + 1e-6;
                 INFO("slope " << slope << " h " << h << " plate_x_end " << plate_x_end << " length "
                      << b.get_length() << " bound " << bound);
                 CHECK(b.get_length() <= bound);
+                if (xy > drop + b.r)
+                    ++wide;
             }
         }
     }
-    INFO("slope " << slope);
-    CHECK(correctors >= min_correctors);
+    INFO("slope " << slope << " correctors " << correctors);
+    CHECK(correctors >= 1);
+    CHECK(wide >= min_wide);
+}
+
+TEST_CASE("A pillar stands at least the safety distance clear of the model", "[SLASupportGeneration]") {
+    // The point under the corrector sweep's slab walks out past the ground plate's edge in steps of the bridge
+    // radius until the ray casts, widened by the safety distance, clear the plate. At the default 0.5 mm the walk
+    // stops with the pillar under 1 mm from the plate; at 1 mm it walks on and keeps 1 mm.
+    const auto pillar_clearance = [](const sla::SupportTreeConfig &cfg) {
+        indexed_triangle_set mesh = corrector_sweep_mesh(11., 10.2);
+        sla::IndexedMesh emesh(mesh);
+        const sla::SupportPoints points = {sla::SupportPoint(Vec3f(3.f, 20.f, 11.f), 0.2f)};
+        sla::SupportTreeBuilder builder;
+        sla::SupportableMesh sm{mesh, points, cfg};
+        sla::SupportTreeBuildsteps::execute(builder, sm);
+        REQUIRE(builder.pillars().size() == 1);
+        // Samples along the pillar's axis, both ends left out, less its radius.
+        const sla::Pillar &pillar = builder.pillars().front();
+        double clearance = std::numeric_limits<double>::max();
+        for (int k = 1; k < 20; ++k) {
+            const Vec3d p = pillar.endpt + (pillar.startpoint() - pillar.endpt) * (k / 20.);
+            clearance = std::min(clearance, std::sqrt(emesh.squared_distance(p)) - pillar.r);
+        }
+        return clearance;
+    };
+
+    sla::SupportTreeConfig cfg;
+    cfg.object_elevation_mm  = 0.;
+    cfg.max_bridge_length_mm = 30.;
+    cfg.allow_model_anchors  = false;
+    const double at_default = pillar_clearance(cfg);
+    cfg.safety_distance_mm = 1.;
+    const double at_one = pillar_clearance(cfg);
+    INFO("pillar clearance " << at_default << " mm at the default, " << at_one << " mm at 1 mm");
+    CHECK(at_default >= 0.5);
+    CHECK(at_default < 1.);
+    CHECK(at_one >= 1.);
 }
 
 TEST_CASE("Slender pillars get one brace and no helper pillar", "[SLASupportGeneration]") {
