@@ -4,12 +4,12 @@
 #include "ModelSupportRisk.hpp"
 namespace Slic3r::ScaffoldSupport {
 struct Params {   // filled by TreeSupport from its config and support params
-    double toolpath_width_mm, pillar_diameter_mm, xy_distance_mm, bridge_length_mm, brace_slenderness,
-           max_bridge_length_mm,
-           pad_thickness_mm,    // 0.6 mm rounded up to whole planned layers by TreeSupport
-           z_offset_mm,         // m_slicing_params.object_print_z_min: print z minus mesh z
-           interface_width_mm;  // the interface flow's line width, the width a ring's loop prints at
-    size_t interface_layers;    // support_interface_top_layers
+    double toolpath_width_mm = 0., pillar_diameter_mm = 0., xy_distance_mm = 0., bridge_length_mm = 0.,
+           brace_slenderness = 0., max_bridge_length_mm = 0.,
+           pad_thickness_mm = 0.,    // 0.6 mm rounded up to whole planned layers by TreeSupport
+           z_offset_mm = 0.,         // m_slicing_params.object_print_z_min: print z minus mesh z
+           interface_width_mm = 0.;  // the interface flow's line width, the width a ring's loop prints at
+    size_t interface_layers = 0;     // support_interface_top_layers
     // What the lines TreeSupport lays on base areas of a layer this high cover, as the floating pass reads them.
     std::function<Polygons(const ExPolygons &base, double height)> base_cover;
 };
