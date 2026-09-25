@@ -6,8 +6,11 @@ struct Params {   // filled by TreeSupport from its config and support params
     double toolpath_width_mm, pillar_diameter_mm, xy_distance_mm, bridge_length_mm, brace_slenderness,
            max_bridge_length_mm,
            pad_thickness_mm,    // 0.6 mm rounded up to whole planned layers by TreeSupport
-           z_offset_mm;         // m_slicing_params.object_print_z_min: print z minus mesh z
+           z_offset_mm,         // m_slicing_params.object_print_z_min: print z minus mesh z
+           interface_width_mm;  // the interface flow's line width, the width a ring's loop prints at
     size_t interface_layers;    // support_interface_top_layers
+    // What the lines TreeSupport lays on base areas of a layer this high cover, as the floating pass reads them.
+    std::function<Polygons(const ExPolygons &base, double height)> base_cover;
 };
 struct LayerAreas { ExPolygons base; ExPolygons interface_; };   // before the 2D clip TreeSupport runs
 // The 2D clip TreeSupport runs on a planned layer, computed once for `draw` and the seam: interface stays out of

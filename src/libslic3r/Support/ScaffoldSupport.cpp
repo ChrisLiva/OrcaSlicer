@@ -10,6 +10,7 @@
 #include <unordered_map>
 
 #include "ClipperUtils.hpp"
+#include "ExtrusionEntity.hpp"
 #include "Model.hpp"
 #include "Print.hpp"
 #include "TriangleMesh.hpp"
@@ -456,15 +457,26 @@ Output draw(const PrintObject &object, const std::vector<std::vector<SupportNode
             }
         });
     };
-    // The heads whose rings would print over nothing. What the seam lays on each planned layer above the pad, the
-    // cage outside the band opened by half a support line and the rings outside the model, goes through the
-    // connectivity rule the floating pass applies, with the pad's top as the ground every pillar stands on: a base
-    // sliver no line fits prints nothing and holds nothing up, while the interface prints what is left of a ring
-    // however small. The floating pass reads the scaffold as rooted on the plate alone, and with that flag the rule
-    // reads no model slab. A head is cut where one of its rings lies in a floating piece.
-    const float half_line   = float(scale_(0.5 * params.toolpath_width_mm));
-    const auto  cut_by_neck = [&](const std::vector<sla::Head> &heads, const std::vector<ExPolygons> &cage,
-                                  const std::vector<Rings> &rings) {
+    // The heads whose rings would print over nothing, and the cage holes whose walls would. What the seam lays on
+    // each planned layer above the pad, its areas with the holes `TreeSupport::fill_small_holes` fills filled, goes
+    // through the connectivity rule the floating pass applies, as the outlines the printed lines cover, since that
+    // pass reads `polygons_covered_by_width`; the pad's top is the ground every pillar stands on. The floating pass
+    // reads the scaffold as rooted on the plate alone, and with that flag the rule reads no model slab.
+    // - Base prints walls and no infill: `Params::base_cover` lays them through the call generate_toolpaths makes,
+    //   a loop on each contour and hole of the area closed inward by half a support line with its seam anchor, so
+    //   a wide area's inside prints nothing and a loop too short for its seam clip prints nothing either.
+    // - A ring prints through `make_perimeter_and_infill` with the interface flow: one loop on the ring shrunk by half
+    //   the interface spacing, laid through `extrusion_entities_append_loops` as here, with its infill inside, which
+    //   is counted as solid since its angle comes later from `normalize_interface_ids`. A part of a ring narrower
+    //   than one spacing prints nothing, and a ring that touches a neighbour only across such a neck prints apart
+    //   from it.
+    // A head is cut where one of its rings lies in a floating piece. A floating piece that holds no ring and is the
+    // wall of a hole in the cage's section stands over the unprinted inside of the section below: a gap among fused
+    // necks 2 mm across or wider keeps its hole while the same gap narrower on the layers around it is filled. That
+    // hole is filled too, which removes the wall and nothing a rooted piece stands on.
+    const float half_line = float(scale_(0.5 * params.toolpath_width_mm));
+    const auto find_stranded = [&](const std::vector<sla::Head> &heads, std::vector<ExPolygons> &cage,
+                                   const std::vector<Rings> &rings) {
         std::vector<char> cut(heads.size(), 0);
         const size_t lowest = out.pad_layers;
         if (lowest >= layer_heights.size())
@@ -479,15 +491,28 @@ Output draw(const PrintObject &object, const std::vector<std::vector<SupportNode
         tbb::parallel_for(tbb::blocked_range<size_t>(0, slabs.size()), [&](const tbb::blocked_range<size_t> &range) {
             for (size_t s = range.begin(); s < range.end(); ++ s) {
                 const size_t     i       = lowest + s;
-                const ExPolygons rings_i = diff_ex(union_ex(interface_[s]), clips[i].model);
-                ExPolygons       printed = opening_ex(diff_ex(diff_ex(cage[i], clips[i].band), rings_i), half_line);
-                append(printed, rings_i);
+                ExPolygons       rings_i = diff_ex(union_ex(interface_[s]), clips[i].model);
+                ExPolygons       base_i  = diff_ex(diff_ex(cage[i], clips[i].band), rings_i);
+                for (ExPolygon &area : base_i)
+                    TreeSupport::fill_small_holes(area);
+                for (ExPolygon &area : rings_i)
+                    TreeSupport::fill_small_holes(area);
+                const float      inset   = float(scale_(0.5 * Flow::rounded_rectangle_extrusion_spacing(
+                                                        float(params.interface_width_mm), float(layer_heights[i].height))));
+                Polygons         printed = params.base_cover(base_i, layer_heights[i].height);
+                const ExPolygons loop_area = offset_ex(rings_i, -inset, jtSquare);
+                ExtrusionEntityCollection loops;
+                extrusion_entities_append_loops(loops.entities, to_polygons(loop_area), erSupportMaterialInterface, 0.,
+                                                float(params.interface_width_mm), float(layer_heights[i].height));
+                loops.polygons_covered_by_width(printed, 0.f);
+                polygons_append(printed, to_polygons(offset_ex(loop_area, -0.5f * float(scale_(params.interface_width_mm)))));
                 slabs[s].bottom_z = layer_heights[i].print_z - layer_heights[i].height - ground;
                 slabs[s].print_z  = layer_heights[i].print_z - ground;
                 slabs[s].polygons = union_ex(printed);
             }
         });
         const std::vector<std::vector<bool>> floating = SupportAnalysis::floating_pieces(slabs, {}, true, 0.);
+
         std::vector<std::vector<std::pair<BoundingBox, const ExPolygon *>>> adrift(slabs.size());
         bool any = false;
         for (size_t s = 0; s < slabs.size(); ++ s)
@@ -498,17 +523,47 @@ Output draw(const PrintObject &object, const std::vector<std::vector<SupportNode
                 }
         if (! any)
             return cut;
+        // The floating pieces each head's rings lie in, as (layer above the pad, index into `adrift`).
+        std::vector<std::vector<std::pair<size_t, size_t>>> holds(heads.size());
         tbb::parallel_for(tbb::blocked_range<size_t>(0, heads.size()), [&](const tbb::blocked_range<size_t> &range) {
             for (size_t h = range.begin(); h < range.end(); ++ h)
-                for (size_t k = 0; k < rings[h].slices.size() && ! cut[h]; ++ k) {
+                for (size_t k = 0; k < rings[h].slices.size(); ++ k) {
                     if (rings[h].first + k < lowest || rings[h].slices[k].empty())
                         continue;
+                    const size_t      s   = rings[h].first + k - lowest;
                     const BoundingBox box = get_extents(rings[h].slices[k]);
-                    for (const auto &[piece_box, piece] : adrift[rings[h].first + k - lowest])
-                        if (piece_box.overlap(box) && ! intersection_ex(rings[h].slices[k], ExPolygons{ *piece }).empty()) {
-                            cut[h] = 1;
-                            break;
-                        }
+                    for (size_t j = 0; j < adrift[s].size(); ++ j)
+                        if (adrift[s][j].first.overlap(box) &&
+                            ! intersection_ex(rings[h].slices[k], ExPolygons{ *adrift[s][j].second }).empty())
+                            holds[h].emplace_back(s, j);
+                }
+        });
+        std::vector<std::vector<char>> ringed(slabs.size());
+        for (size_t s = 0; s < slabs.size(); ++ s)
+            ringed[s].assign(adrift[s].size(), 0);
+        for (size_t h = 0; h < heads.size(); ++ h) {
+            cut[h] = ! holds[h].empty();
+            for (const auto &[s, j] : holds[h])
+                ringed[s][j] = 1;
+        }
+        // A hole's wall covers from the hole's edge to a line into the section.
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, slabs.size()), [&](const tbb::blocked_range<size_t> &range) {
+            for (size_t s = range.begin(); s < range.end(); ++ s)
+                for (size_t j = 0; j < adrift[s].size(); ++ j) {
+                    if (ringed[s][j])
+                        continue;
+                    const BoundingBox &piece_box = adrift[s][j].first;
+                    const ExPolygon   &piece     = *adrift[s][j].second;
+                    for (ExPolygon &section : cage[lowest + s])
+                        section.holes.erase(std::remove_if(section.holes.begin(), section.holes.end(), [&](const Polygon &hole) {
+                            BoundingBox box = get_extents(hole);
+                            box.offset(2 * half_line);
+                            if (! box.overlap(piece_box))
+                                return false;
+                            Polygon gap = hole;
+                            gap.make_counter_clockwise();
+                            return ! intersection_ex(offset_ex(ExPolygon(gap), 2.f * half_line), ExPolygons{ piece }).empty();
+                        }), section.holes.end());
                 }
         });
         return cut;
@@ -568,7 +623,7 @@ Output draw(const PrintObject &object, const std::vector<std::vector<SupportNode
         build_ms += ms_since(run_start);
         const auto slice_start = std::chrono::steady_clock::now();
         slice_build(*builder, cage, rings);
-        cut = params.interface_layers > 0 ? cut_by_neck(builder->heads(), cage, rings) : std::vector<char>(builder->heads().size(), 0);
+        cut = params.interface_layers > 0 ? find_stranded(builder->heads(), cage, rings) : std::vector<char>(builder->heads().size(), 0);
         out.stage_ms.slice += ms_since(slice_start);
         const size_t cut_count = size_t(std::count(cut.begin(), cut.end(), char(1)));
         BOOST_LOG_TRIVIAL(debug) << "scaffold build " << run << ": " << left.size() << " points, " << cut_count << " heads cut";

@@ -404,6 +404,10 @@ public:
     // as resting on nothing; everything else it does is measurement.
     void request_analysis(bool on) { m_analysis_requested = on; }
 
+    // Fills the holes of a support area under 2 mm across in both directions, as every support layer's area groups
+    // are filled before their toolpaths are laid.
+    static void fill_small_holes(ExPolygon &area);
+
     SupportNode* create_node(const Point  position,
         const int    distance_to_top,
         const int    obj_layer_nr,

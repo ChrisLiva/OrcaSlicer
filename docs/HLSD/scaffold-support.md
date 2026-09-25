@@ -142,14 +142,29 @@ counts what it did with them. It runs seven steps.
    builder kept is a routed tip; a head it built and gave up on is an
    unrouted drop; a point that never got a head is a filtered drop.
    The neck check then reads what the seam would print of the build on each
-   planned layer above the pad: the cage outside the clip's band, opened by
-   half a support line since a sliver no line fits prints nothing, and the
-   rings outside the model. `SupportAnalysis::floating_pieces`, the rule the
-   floating pass applies, finds the pieces with no chain of overlaps down to
-   the pad's top, and a head one of whose rings lies in such a piece is cut:
-   its tilted neck crosses the band under its rings, or the builder left it
-   with no pillar and no bridge, which a side head whose ground pillar fails
-   keeps. The cut heads' points leave the point set, in order, and the
+   planned layer above the pad, as the outlines its lines cover, since the
+   floating pass reads `polygons_covered_by_width`. The areas are the cage
+   outside the clip's band and the rings outside the model, with the small
+   holes `TreeSupport::fill_small_holes` fills filled, as `finish_layer_areas`
+   fills them on every support layer. The base goes through
+   `Params::base_cover`, which lays its walls through the same
+   `tree_supports_generate_paths` call `generate_toolpaths` makes, so a wide
+   area's inside and a sliver too short for a loop print nothing. A ring
+   prints one interface loop on its area shrunk by half the interface
+   spacing, laid through `extrusion_entities_append_loops` as
+   `make_perimeter_and_infill` lays it, with its infill counted as solid, so a
+   part of a ring narrower than one spacing prints nothing and a ring touching
+   a neighbour only across such a neck prints apart from it.
+   `SupportAnalysis::floating_pieces`, the rule the floating pass applies,
+   finds the pieces with no chain of overlaps down to the pad's top, and a
+   head one of whose rings lies in such a piece is cut: its tilted neck
+   crosses the band under its rings, the base under them prints nothing, or
+   the builder left it with no pillar and no bridge, which a side head whose
+   ground pillar fails keeps. A floating piece that holds no ring and is the
+   wall of a cage hole, a gap among fused necks 2 mm across or wider whose
+   narrower stretches on the layers around it are filled, has its hole filled
+   instead, which removes a wall that stands over the unprinted inside of the
+   section below. The cut heads' points leave the point set, in order, and the
    builder runs again, since a run re-routes the neighbours of what it lost
    and can strand another ring. It repeats until no head is cut, at most six
    runs (plate 3 of the corpus needs five), and the heads the sixth run still

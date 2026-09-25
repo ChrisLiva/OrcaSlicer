@@ -2026,6 +2026,22 @@ void TreeSupport::generate()
                 break;
             }
         params.z_offset_mm          = m_slicing_params.object_print_z_min;
+        params.interface_width_mm   = support_material_interface_flow(m_object, float(m_slicing_params.layer_height)).width();
+        // The base walls generate_toolpaths lays above the pad, through the same call; a base pattern with infill
+        // covers about the area opened by half a line.
+        const float nozzle_diameter = float(m_print_config->nozzle_diameter.get_at(m_object_config->support_filament - 1));
+        params.base_cover           = [this, nozzle_diameter, width = float(params.toolpath_width_mm)](const ExPolygons &base,
+                                                                                                        double            height) {
+            if (with_infill && m_support_params.base_fill_pattern != ipLightning)
+                return to_polygons(opening_ex(base, 0.5f * float(scale_(width))));
+            const Flow                flow(width, float(height), nozzle_diameter);
+            ExtrusionEntityCollection walls;
+            for (const ExPolygon &area : base)
+                tree_supports_generate_paths(walls.entities, to_polygons(area), flow, m_support_params);
+            Polygons cover;
+            collect_support_footprints(walls, cover);
+            return cover;
+        };
         params.interface_layers     = m_support_params.num_top_interface_layers;
 
         // The clip the seam runs on each planned layer, computed once, since draw's neck check applies it the same way:
@@ -3284,17 +3300,22 @@ size_t TreeSupport::brim_skirt_layer_count() const
     return brim_skirt_layers;
 }
 
+void TreeSupport::fill_small_holes(ExPolygon &area)
+{
+    area.holes.erase(std::remove_if(area.holes.begin(), area.holes.end(),
+                                    [](auto &hole) {
+                                        auto bbox_size = get_extents(hole).size();
+                                        return bbox_size[0] < scale_(2) && bbox_size[1] < scale_(2);
+                                    }),
+                     area.holes.end());
+}
+
 void TreeSupport::finish_layer_areas(SupportLayer *ts_layer, size_t layer_nr, size_t brim_skirt_layers)
 {
     auto &area_groups = ts_layer->area_groups;
     for (auto &area_group : area_groups) {
         auto& expoly = area_group.area;
-        expoly->holes.erase(std::remove_if(expoly->holes.begin(), expoly->holes.end(),
-                                           [](auto &hole) {
-                                               auto bbox_size = get_extents(hole).size();
-                                               return bbox_size[0] < scale_(2) && bbox_size[1] < scale_(2);
-                                           }),
-                            expoly->holes.end());
+        fill_small_holes(*expoly);
 
         if (layer_nr < brim_skirt_layers)
             ts_layer->lslices.emplace_back(*expoly);

@@ -214,17 +214,17 @@ TriangleMesh floating_slab_fixture()
 }
 
 // A 6 x 6 x 14 mm column at x 0..6, y 0..6 carrying off its +x face a plank 2 mm thick whose underside falls at
-// 45 degrees from z 10 at the face to z 8 at x 8, across y 0..6. A head on the underside aims along the underside's
-// normal, down and back toward the column, so a tip under a millimetre from the face tilts its neck into the
-// column's xy band a few layers under its rings.
-TriangleMesh slope_fixture()
+// 45 degrees from z 10 at the face, `length_mm` along x, across y 0..6. A head on the underside aims along the
+// underside's normal, down and back toward the column, so a tip under a millimetre from the face tilts its neck into
+// the column's xy band a few layers under its rings.
+TriangleMesh slope_fixture(double length_mm)
 {
     TriangleMesh       column = make_cube(6., 6., 14.);
     std::vector<Vec3f> corners;
     for (const float y : { 0.f, 6.f })
         for (const float z : { 0.f, 2.f }) {
             corners.emplace_back(5.f, y, 11.f + z);
-            corners.emplace_back(8.f, y, 8.f + z);
+            corners.emplace_back(float(6. + length_mm), y, float(10. - length_mm) + z);
         }
     column.merge(TriangleMesh(its_convex_hull(corners)));
     return column;
@@ -707,15 +707,23 @@ TEST_CASE("A routed head whose neck the xy band would cut is dropped and no ring
     // At the corpus's 0.22 mm support line and 0.5 mm xy distance a small-grade neck, 0.44 mm across under its pin, fits
     // wholly inside the column's band. The seam clips base by that band and the rings by the model alone, so a head
     // whose neck crosses the band keeps its rings over nothing; such a head is dropped and the cage is built without it.
+    // The 4 mm plank at the corpus's 0.06 mm layers and two interface layers adds rings whose printed loop stops short
+    // of a neighbour the drawn ring touches, and base whose printed walls leave its inside and its slivers bare: the
+    // drop reads the rings and the base as their lines cover them.
+    const auto [length_mm, layer_height, interface_layers] =
+        GENERATE(table<double, std::string, std::string>({ { 2., "0.2", "3" }, { 4., "0.06", "2" } }));
     Print print;
-    init_and_process_print({ slope_fixture() }, print,
-                           scaffold_config({ { "support_line_width", "0.22" }, { "support_object_xy_distance", "0.5" } }));
+    init_and_process_print({ slope_fixture(length_mm) }, print,
+                           scaffold_config({ { "support_line_width", "0.22" },
+                                             { "support_object_xy_distance", "0.5" },
+                                             { "layer_height", layer_height },
+                                             { "support_interface_top_layers", interface_layers } }));
     REQUIRE(print.objects().size() == 1);
     const PrintObject &object = *print.objects().front();
     REQUIRE(object.support_analysis() != nullptr);
     const SupportAnalysis::Report &report = *object.support_analysis();
-    INFO("tips placed " << report.tips_placed << " routed " << report.tips_routed << " dropped " << report.tips_dropped
-                        << " floating removed " << report.floating_pieces_removed);
+    INFO("plank " << length_mm << " mm at " << layer_height << " mm layers: tips placed " << report.tips_placed << " routed "
+                  << report.tips_routed << " dropped " << report.tips_dropped << " floating removed " << report.floating_pieces_removed);
     CHECK(report.floating_pieces_removed == 0);
     CHECK(report.tips_dropped >= 1);
     CHECK(report.tips_routed > 0);
