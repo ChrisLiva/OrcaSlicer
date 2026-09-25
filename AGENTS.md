@@ -88,7 +88,10 @@ about 25 suite runs stalled one `fff_print_tests` case, and one run stalled five
 from four unrelated suites (`SLASupportGeneration`, `MultiFilament`, `AutoTilt`, `MiniatureContacts`), each of
 which passes alone in under 22 s (2026-09-09). `orcaslicer_discover_tests` in `tests/CMakeLists.txt` sets
 `TIMEOUT 300` on every registered case so a stall fails at 300 s instead of holding the run for ten minutes;
-re-run once before reading a lone timeout as a regression.
+re-run once before reading a lone timeout as a regression. A binary run alone by name can stall the same way: one
+`[ScaffoldSupport]` case sat 5 min at 0.03 s of CPU with every thread waiting in
+`name_tbb_thread_pool_threads_set_locale`, and its re-run passed in 3.1 s (2026-09-25); a direct run has no
+timeout, so kill it and re-run.
 ClipperLib's output is not invariant under removing clip polygons that are provably disjoint from the subject: on
 plate 3 of a 36 MB miniature project, clipping 61082 attributed support areas against a bbox-prefiltered clip
 changed the result on 32894 of them by up to 7.4e-7 mm² and joined or split two pieces meeting at a one-unit
@@ -126,7 +129,9 @@ The hidden `[ScaffoldSupport][.]` case "Scaffold support over corpus plate 3 in 
 `floating_pieces_removed == 0` leg at `2 == 0` in about 2 of 5 runs of one binary: the SLA builder's routing on the
 upright pose varies between runs, and only the variant reading `routed 1373 / dropped 286` leaves two cage pieces of
 1.85 mm2 at z 2.84 and 2.96 near (10.4, -12.4), which the floating pass removes, while `1375 / 284` reads 0
-(2026-09-24). Re-run the case once before reading an upright count of 2 as a regression.
+(2026-09-24). Once painted enforcers fused beside walls (6514376583), one of about ten upright runs read 18,
+unclassified and not seen again after `cbf397a7a5` fixed an enforced-neck miss (2026-09-25). Re-run the case once
+before reading a non-zero upright count as a regression.
 The legacy tree's own floating pass is not idle on the corpus: a tree-slim slice of plate 3 strips 123 printed
 pieces in the stored pose and 97 upright, every one a base shard of 0.002 to 0.59 mm2 (a temporary role log in
 `remove_floating_toolpaths`, 2026-09-24), so an oracle expecting `floating_pieces_removed == 0` from a legacy style
