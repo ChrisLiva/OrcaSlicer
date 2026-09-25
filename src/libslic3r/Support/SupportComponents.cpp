@@ -8,6 +8,9 @@
 
 #include <algorithm>
 
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
+
 namespace Slic3r {
 namespace SupportAnalysis {
 
@@ -36,24 +39,30 @@ Components build_components(const std::vector<Slab> &slabs, double ground_z)
 
     // Two pieces whose boxes do not overlap intersect in nothing, so the clip runs on the pairs whose
     // boxes do: a few per piece on a layer of hundreds, where the pairwise clip is hundreds per piece.
+    // The pairs of each two touching slabs are found in parallel and joined in slab order afterwards,
+    // so the pieces' lists and the components come out as a serial walk would leave them.
     std::vector<BoundingBox> boxes;
     boxes.reserve(out.pieces.size());
     for (const Piece &piece : out.pieces)
         boxes.push_back(get_extents(piece.polygon));
-    for (size_t s = 0; s + 1 < slabs.size(); ++ s) {
-        if (slabs[s + 1].bottom_z > slabs[s].print_z + 1e-6)
-            continue; // the two slabs do not touch: nothing printed between them
-        for (size_t i = out.slab_range[s].first; i < out.slab_range[s].second; ++ i)
-            for (size_t j = out.slab_range[s + 1].first; j < out.slab_range[s + 1].second; ++ j) {
-                if (! boxes[i].overlap(boxes[j]))
-                    continue;
-                if (intersection_ex(ExPolygons{ out.pieces[i].polygon }, ExPolygons{ out.pieces[j].polygon }).empty())
-                    continue;
-                out.pieces[i].above.push_back(j);
-                out.pieces[j].below.push_back(i);
-                sets.join(j, i);
-            }
-    }
+    std::vector<std::vector<std::pair<size_t, size_t>>> joins(slabs.empty() ? 0 : slabs.size() - 1);
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, joins.size()), [&](const tbb::blocked_range<size_t> &range) {
+        for (size_t s = range.begin(); s < range.end(); ++ s) {
+            if (slabs[s + 1].bottom_z > slabs[s].print_z + 1e-6)
+                continue; // the two slabs do not touch: nothing printed between them
+            for (size_t i = out.slab_range[s].first; i < out.slab_range[s].second; ++ i)
+                for (size_t j = out.slab_range[s + 1].first; j < out.slab_range[s + 1].second; ++ j)
+                    if (boxes[i].overlap(boxes[j]) &&
+                        ! intersection_ex(ExPolygons{ out.pieces[i].polygon }, ExPolygons{ out.pieces[j].polygon }).empty())
+                        joins[s].emplace_back(i, j);
+        }
+    });
+    for (const std::vector<std::pair<size_t, size_t>> &pairs : joins)
+        for (const auto &[i, j] : pairs) {
+            out.pieces[i].above.push_back(j);
+            out.pieces[j].below.push_back(i);
+            sets.join(j, i);
+        }
 
     std::vector<size_t> label(out.pieces.size(), size_t(-1));
     for (size_t i = 0; i < out.pieces.size(); ++ i) {
