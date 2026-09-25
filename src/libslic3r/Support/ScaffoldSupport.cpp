@@ -382,6 +382,31 @@ ExPolygons post_disc(const sla::SupportPoint &pt)
     return ExPolygons{ ExPolygon(std::move(disc)) };
 }
 
+// Every pillar the builder stood on the pad's top widens toward it over its whole height by the taper, as a tree
+// branch widens by the branch diameter angle: a sideways push on the model bends a pillar most at its foot, the more
+// so the taller it stands. A foot reaches half a line past the midpoint to its nearest pillar or post, so neighbouring
+// feet fuse along a line: a wider foot would take its neighbour in, and the base walls, laid along the union's outline
+// only, would leave that neighbour nothing to stand on where the feet part higher up. A pillar the builder gave no
+// base, one whose foot stands too near the model, runs down into the pad and stays straight, and so do the posts,
+// the pillars from `built` on.
+void taper_pillars(sla::SupportTreeBuilder &builder, size_t built, const Params &params)
+{
+    if (params.taper <= 0.)
+        return;
+    const std::vector<sla::Pillar> &pillars = builder.pillars();
+    for (size_t pid = 0; pid < built; ++ pid) {
+        const sla::Pillar &pillar = pillars[pid];
+        if (std::abs(pillar.endpt.z() - builder.ground_level) >= EPSILON)
+            continue;
+        double foot = pillar.r + pillar.height * params.taper;
+        for (size_t other = 0; other < pillars.size(); ++ other)
+            if (other != pid)
+                foot = std::min(foot, 0.5 * ((pillars[other].endpt - pillar.endpt).head<2>().norm() + params.toolpath_width_mm));
+        if (foot > pillar.r)
+            builder.add_pillar_base(long(pid), pillar.height, foot);
+    }
+}
+
 // A build's slices: the cage through each planned layer's middle, each routed head's own head through the tops of
 // its ring layers, `first` the lowest, and an enforced tip's own head through the middles of the layers it reaches
 // under its rings, `neck_first` the lowest. The rings are indexed as the build's heads, whose ids index `tip_of`,
@@ -1002,7 +1027,9 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
     for (size_t run = 1;; ++ run) {
         const auto run_start = std::chrono::steady_clock::now();
         builder              = build(left);
+        const size_t built   = builder->pillars().size();
         posted               = ctx.add_posts(*builder, left);
+        taper_pillars(*builder, built, params);
         build_ms += ms_since(run_start);
         const auto slice_start = std::chrono::steady_clock::now();
         ctx.slice_build(*builder, index_of, left, posted, cage, rings);

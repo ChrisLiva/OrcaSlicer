@@ -6899,8 +6899,8 @@ void PrintConfigDef::init_fff_params()
     def = this->add("scaffold_brace_slenderness", coFloat);
     def->label    = L("Scaffold brace slenderness");
     def->category = L("Support");
-    def->tooltip  = L("A Tree Scaffold pillar whose unbraced height exceeds this multiple of its diameter gets a zigzag brace "
-                      "to a neighbouring pillar.");
+    def->tooltip  = L("A Tree Scaffold pillar whose unbraced height exceeds this multiple of its diameter gets zigzag braces "
+                      "to neighbouring pillars in two directions.");
     def->min      = 5;
     def->max      = 40;
     def->mode     = comAdvanced;

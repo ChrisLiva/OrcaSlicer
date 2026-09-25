@@ -1171,12 +1171,14 @@ TEST_CASE("Unseeded feature starts get a scaffold tip while floating debris and 
 TEST_CASE("Slender scaffold pillars get braces and unreachable ones stand unbraced", "[ScaffoldSupport]")
 {
     // Runs that share a bridge length share their pillars: the key also bounds head clustering and routing, and only
-    // the linking pass after routing reads the slenderness.
+    // the linking pass after routing reads the slenderness. The pillars stand straight, so a brace shows as a section
+    // of its own between them rather than inside a widened foot.
     struct Reading { size_t unbraced = 0, floating = 0, mid_polygons = 0; double volume_mm3 = 0.; };
     const auto read = [](const char *slenderness, const char *bridge_length) {
         Print print;
         init_and_process_print({ tall_shelf_fixture() }, print,
-                               scaffold_config({ { "scaffold_brace_slenderness", slenderness }, { "scaffold_bridge_length", bridge_length } }));
+                               scaffold_config({ { "scaffold_brace_slenderness", slenderness }, { "scaffold_bridge_length", bridge_length },
+                                                 { "tree_support_branch_diameter_angle", "0" } }));
         REQUIRE(print.objects().size() == 1);
         const PrintObject &object = *print.objects().front();
         REQUIRE(object.support_analysis() != nullptr);
@@ -1208,6 +1210,46 @@ TEST_CASE("Slender scaffold pillars get braces and unreachable ones stand unbrac
     CHECK(b.unbraced >= 1);
     CHECK(d.unbraced == 0);
     CHECK(b.volume_mm3 >= 0.98 * d.volume_mm3);
+}
+
+TEST_CASE("Scaffold pillars widen toward the pad by the branch diameter angle", "[ScaffoldSupport]")
+{
+    // Under the tall shelf's slab the pillars stand about 27 mm, from the pad's top at 0.6 mm to the heads under z 28.
+    // At 5 degrees a pillar gains 0.087 mm of radius per mm below its top, so its 0.6 mm radius reaches about 1.7 mm
+    // at z 15 and would reach 2.8 mm at z 2, 22 times the straight disc's area, had the feet not stopped where they
+    // meet their neighbours; at 0 degrees it keeps its width down to its base cone. The taper widens the cage the
+    // builder routed, so the same tips route under both.
+    struct Reading { size_t routed = 0, floating = 0; std::map<int, double> base_mm2; };
+    const auto read = [](const char *angle) {
+        Print print;
+        init_and_process_print({ tall_shelf_fixture() }, print, scaffold_config({ { "tree_support_branch_diameter_angle", angle } }));
+        REQUIRE(print.objects().size() == 1);
+        const PrintObject &object = *print.objects().front();
+        REQUIRE(object.support_analysis() != nullptr);
+        const SupportAnalysis::Report &report = *object.support_analysis();
+        Reading r { report.tips_routed, report.floating_pieces_removed, {} };
+        // The area inside the printed outlines under the slab: a pillar prints a ring, so its hole counts.
+        const FixtureBox under_slab { get_extents(object.layers().front()->lslices).min, 6.5, -3., 18., 9. };
+        const auto       layers = object.support_layers();
+        for (int z : { 2, 15, 25 }) {
+            const size_t i = top_layer_under(layers, z);
+            REQUIRE(i != size_t(-1));
+            r.base_mm2[z] = area_mm2(intersection_ex(layers[i]->base_areas, { ExPolygon(under_slab.polygon()) }));
+        }
+        INFO("angle " << angle << ": routed " << r.routed << " floating removed " << r.floating << " base at z 2, 15, 25: "
+                      << r.base_mm2[2] << ", " << r.base_mm2[15] << ", " << r.base_mm2[25] << " mm2");
+        CHECK(r.floating == 0);
+        return r;
+    };
+
+    // A factor of 4 at z 2 leaves room for the feet stopping at their neighbours and for the band beside the column.
+    const Reading straight = read("0");
+    const Reading tapered  = read("5");
+    INFO("base at z 2: " << straight.base_mm2.at(2) << " mm2 straight, " << tapered.base_mm2.at(2) << " mm2 tapered");
+    CHECK(tapered.routed == straight.routed);
+    CHECK(tapered.base_mm2.at(2) > tapered.base_mm2.at(15));
+    CHECK(tapered.base_mm2.at(15) > tapered.base_mm2.at(25));
+    CHECK(tapered.base_mm2.at(2) > 4. * straight.base_mm2.at(2));
 }
 
 TEST_CASE("A scaffold under an object lifted off the bed stands on the bed and holds the underside", "[ScaffoldSupport]")

@@ -30,10 +30,13 @@ Two settings belong to the style and show only under it:
   bridge from a tip to its pillar and every brace between pillars.
 - `scaffold_brace_slenderness`, 5 to 40 with a 15 default, is the unbraced
   height of a pillar, in pillar diameters, above which the builder braces it
-  to a neighbour.
+  to its neighbours.
 
 `tree_support_branch_diameter` sets the pillar diameter, as it sets the branch
-diameter of the slim, strong and hybrid styles.
+diameter of the slim, strong and hybrid styles, and
+`tree_support_branch_diameter_angle` sets how fast a pillar widens toward the
+pad, as it sets how fast a tree branch widens toward its root. The settings
+panel shows the angle under Scaffold as well as under the organic style.
 
 Under Scaffold three settings the style depends on read fixed, and the
 settings panel greys their fields out. The constructor of `TreeSupport` forces
@@ -191,6 +194,21 @@ them.
    a model standing on the bed: a tip in a crevice there has rings the model
    alone clips, over pad layers the band cuts away, and the neck check reads
    no pad layer.
+   Every pillar the builder stood on the pad's top then widens toward it over
+   its whole height: a cone from the pillar's radius at its top to that
+   radius plus its height times the branch diameter angle, in radians, at
+   the pad. A sideways push on the model, a nozzle catching an edge high up,
+   bends each pillar most at its foot, and the more so the taller the pillar
+   stands, while a straight pillar's foot is no stronger than its top. A foot
+   stops half a toolpath width past the midpoint to its nearest pillar or
+   post, so neighbouring feet fuse along a line. A foot that took its
+   neighbour in would leave that neighbour nothing printed to stand on: the
+   base walls follow the outline of the union, and where the feet part higher
+   up the neighbour's wall would start over the union's empty inside. A pillar
+   the builder gave no base, one whose foot stands too near the model, runs
+   down into the pad and stays straight, and so do the posts. The cones go on
+   after routing, so the taper moves no pillar and no bridge; the seam's band
+   clips a foot that reaches toward the model as it clips any base.
    The neck check then reads what the seam would print of the build on each
    planned layer above the pad, as the outlines its lines cover, since the
    floating pass reads `polygons_covered_by_width`. The areas are the cage
@@ -282,11 +300,17 @@ tolerates.
   layer.
 - Brace on demand. With `pillar_link_slenderness` above zero,
   `interconnect_pillars` measures each pillar's longest unbraced run between
-  its ends and the bridge ends on its axis. A pillar whose run exceeds the
-  slenderness times its diameter gets one chain to the nearest pillar within
-  the link distance that `interconnect` can reach; a pillar no neighbour
-  reaches stays up and counts in `SupportTreeBuilder::unbraced_pillars`. The
-  classic cascade and its helper pillars do not run under a slenderness.
+  its ends and the ends of the pillar-to-pillar chains on its axis. A head's
+  bridge into a pillar does not count: it ties the pillar to the model
+  through a neck meant to snap. A pillar taller than the slenderness times
+  its diameter takes chains to its nearest pillars within the link distance
+  that `interconnect` can reach until its run fits and its chains lie in two
+  vertical planes at least 45 degrees apart, since a zigzag chain stiffens a
+  pillar only in the plane of the pair. A neighbour in a plane the pillar
+  already has is taken only while the run is still too long. A pillar left
+  with a run over the ratio or with its chains in one plane stays up and
+  counts in `SupportTreeBuilder::unbraced_pillars`. The classic cascade and
+  its helper pillars do not run under a slenderness.
 
 ## Emission and removal contract
 
@@ -372,7 +396,8 @@ left, interior tip thinning, the hold floor restoring contacts under tall
 islands and capped by what a birth piece fits, a tip seeded under an unseeded
 feature start with its ring on the layer its z tops and none under debris or
 under a sliver the wall beside it holds, a sliver joining too high for its
-wall counted under-held, braces on slender pillars, and a painted bar
+wall counted under-held, braces on slender pillars, pillars widening toward
+the pad by the branch diameter angle with the same tips routed, and a painted bar
 underside and a painted column face beside the column's wall printing their
 tips there at the corpus's widths and layer height, with two interface layers
 and with none, where the unpainted bar prints none and no base but those

@@ -382,21 +382,57 @@ TEST_CASE("A pillar stands at least the safety distance clear of the model", "[S
     CHECK(at_one >= 1.);
 }
 
-TEST_CASE("Slender pillars get one brace and no helper pillar", "[SLASupportGeneration]") {
+TEST_CASE("Slender pillars braced in one plane or none count as unbraced and get no helper pillar", "[SLASupportGeneration]") {
     indexed_triangle_set mesh = two_plates_mesh();
 
+    // The pair 5 mm apart chains to itself, one plane, and the pair 16 mm
+    // apart is past the 12 mm link distance, so all four stand unbraced.
     sla::SupportTreeBuilder braced;
     sla::SupportableMesh braced_sm{mesh, TWO_PLATES_POINTS, two_plates_config(15.)};
     REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(braced, braced_sm));
     CHECK(braced.pillars().size() == 4);
     CHECK(braced.crossbridges().size() >= 1);
-    CHECK(braced.unbraced_pillars == 2);
+    CHECK(braced.unbraced_pillars == 4);
 
     sla::SupportTreeBuilder cascaded;
     sla::SupportableMesh cascaded_sm{mesh, TWO_PLATES_POINTS, two_plates_config(0.)};
     REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(cascaded, cascaded_sm));
     CHECK(cascaded.pillars().size() >= 6);
     CHECK(cascaded.unbraced_pillars == 0);
+}
+
+TEST_CASE("Slender pillars with neighbours in two planes are braced from both", "[SLASupportGeneration]") {
+    // Three points 6 mm apart in a triangle under the small plate: each
+    // pillar's two neighbours lie 60 degrees apart, so each takes chains in
+    // two planes and none stands unbraced.
+    const sla::SupportPoints points = {
+        sla::SupportPoint(Vec3f(2.f, 2.f, 30.f), 0.2f),
+        sla::SupportPoint(Vec3f(8.f, 2.f, 30.f), 0.2f),
+        sla::SupportPoint(Vec3f(5.f, 7.2f, 30.f), 0.2f),
+    };
+    indexed_triangle_set mesh = two_plates_mesh();
+
+    sla::SupportTreeBuilder builder;
+    sla::SupportableMesh sm{mesh, points, two_plates_config(15.)};
+    REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(builder, sm));
+    REQUIRE(builder.pillars().size() == 3);
+    CHECK(builder.unbraced_pillars == 0);
+
+    for (const sla::Pillar &pillar : builder.pillars()) {
+        const Vec2d axis = pillar.endpt.head<2>();
+        std::vector<Vec2d> dirs;
+        for (const sla::Bridge &br : builder.crossbridges())
+            for (const auto &[on, off] : {std::pair{br.startp, br.endp}, std::pair{br.endp, br.startp}})
+                if ((on.head<2>() - axis).norm() <= pillar.r)
+                    dirs.emplace_back((off - on).head<2>().normalized());
+
+        bool two_planes = false;
+        for (const Vec2d &a : dirs)
+            for (const Vec2d &b : dirs)
+                two_planes = two_planes || std::abs(cross2(a, b)) >= std::sqrt(0.5) - EPSILON;
+        INFO("pillar at " << axis.x() << ", " << axis.y() << " with " << dirs.size() << " brace ends");
+        CHECK(two_planes);
+    }
 }
 
 TEST_CASE("InitializedRasterShouldBeNONEmpty", "[SLARasterOutput]") {

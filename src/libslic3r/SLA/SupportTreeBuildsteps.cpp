@@ -1065,35 +1065,58 @@ void SupportTreeBuildsteps::routing_to_model()
 
 void SupportTreeBuildsteps::interconnect_pillars()
 {
-    // Under a slenderness ratio a pillar is braced only when its unbraced
-    // run, the longest z gap between its ends and the bridge endpoints on its
-    // axis, exceeds the ratio times its diameter. Such a pillar gets one
-    // chain to its nearest reachable neighbour; no cascade and no helper
-    // pillars. A pillar no neighbour can brace counts as unbraced.
+    // Under a slenderness ratio a pillar is braced when its unbraced run, the
+    // longest z gap between its ends and the pillar links on its axis, exceeds
+    // the ratio times its diameter. A head's bridge into the pillar is no brace:
+    // it ties the pillar to the model through a neck meant to snap. Such a
+    // pillar takes chains to its nearest reachable neighbours until its run
+    // fits and its links lie in two vertical planes at least 45 degrees apart,
+    // since a chain stiffens a pillar only in the plane of the pair. No cascade
+    // and no helper pillars. A pillar left with a run over the ratio or its
+    // links in one plane counts as unbraced.
     if (m_cfg.pillar_link_slenderness > 0.) {
-        auto attach_z = [](const Pillar &p, const std::vector<Bridge> &brs,
-                           std::vector<double> &zs) {
+        auto run_of = [this](const Pillar &p) {
+            std::vector<double> zs = {p.endpt.z(), p.startpoint().z()};
             Vec2d axis = p.endpt.head<2>();
-            for (const Bridge &br : brs)
+            for (const Bridge &br : m_builder.crossbridges())
                 for (const Vec3d &e : {br.startp, br.endp})
                     if ((e.head<2>() - axis).norm() <= p.r)
                         zs.emplace_back(e.z());
-        };
-
-        for (size_t pid = 0; pid < m_builder.pillarcount(); ++pid) {
-            const Pillar &pillar = m_builder.pillar(pid);
-
-            std::vector<double> zs = {pillar.endpt.z(),
-                                      pillar.startpoint().z()};
-            attach_z(pillar, m_builder.bridges(), zs);
-            attach_z(pillar, m_builder.crossbridges(), zs);
             std::sort(zs.begin(), zs.end());
 
             double run = 0.;
             for (size_t i = 1; i < zs.size(); ++i)
                 run = std::max(run, zs[i] - zs[i - 1]);
+            return run;
+        };
 
-            if (run <= m_cfg.pillar_link_slenderness * 2. * pillar.r)
+        // Each pillar's links as the linked pillar and the horizontal direction
+        // to it. Two directions lie in planes at least 45 degrees apart when
+        // their cross product is at least sin 45 degrees, whichever way each
+        // points.
+        struct Link { size_t id; Vec2d dir; };
+        std::vector<std::vector<Link>> links(m_builder.pillarcount());
+        auto apart = [](const Vec2d &a, const Vec2d &b) {
+            return std::abs(cross2(a, b)) >= std::sqrt(0.5) - EPSILON;
+        };
+        auto in_new_plane = [&](size_t pid, const Vec2d &d) {
+            return std::all_of(links[pid].begin(), links[pid].end(),
+                               [&](const Link &l) { return apart(l.dir, d); });
+        };
+        auto two_planes = [&](size_t pid) {
+            const std::vector<Link> &ls = links[pid];
+            return std::any_of(ls.begin(), ls.end(), [&](const Link &l) {
+                return std::any_of(ls.begin(), ls.end(), [&](const Link &m) { return apart(l.dir, m.dir); });
+            });
+        };
+
+        for (size_t pid = 0; pid < m_builder.pillarcount(); ++pid) {
+            const Pillar &pillar = m_builder.pillar(pid);
+            const double  limit  = m_cfg.pillar_link_slenderness * 2. * pillar.r;
+            auto braced = [&] { return run_of(pillar) <= limit && two_planes(pid); };
+
+            // A pillar no taller than the ratio needs no brace.
+            if (pillar.height <= limit || braced())
                 continue;
 
             Vec3d qp = pillar.endpoint();
@@ -1108,16 +1131,26 @@ void SupportTreeBuildsteps::interconnect_pillars()
                                  distance(e2.first, qp);
                       });
 
-            bool linked = false;
             for (const PointIndexEl &re : qres) {
-                if (re.second == pid) continue;
-                if (interconnect(pillar, m_builder.pillar(re.second))) {
-                    linked = true;
-                    break;
+                if (braced()) break;
+                if (re.second == pid ||
+                    std::any_of(links[pid].begin(), links[pid].end(),
+                                [&re](const Link &l) { return l.id == re.second; }))
+                    continue;
+
+                const Pillar &next = m_builder.pillar(re.second);
+                Vec2d d = (next.endpt - pillar.endpt).head<2>().normalized();
+                // A neighbour in a plane the pillar already has helps only a run
+                // that is still too long.
+                if (!in_new_plane(pid, d) && run_of(pillar) <= limit) continue;
+
+                if (interconnect(pillar, next)) {
+                    links[pid].push_back({re.second, d});
+                    links[re.second].push_back({pid, -d});
                 }
             }
 
-            if (!linked) ++m_builder.unbraced_pillars;
+            if (!braced()) ++m_builder.unbraced_pillars;
         }
 
         return;

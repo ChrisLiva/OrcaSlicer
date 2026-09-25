@@ -2019,6 +2019,7 @@ void TreeSupport::generate()
         params.xy_distance_mm       = m_ts_data->m_xy_distance;
         params.bridge_length_mm     = m_object_config->scaffold_bridge_length.value;
         params.brace_slenderness    = m_object_config->scaffold_brace_slenderness.value;
+        params.taper                = diameter_angle_scale_factor;
         params.max_bridge_length_mm = m_object_config->max_bridge_length.value;
         params.z_offset_mm          = m_slicing_params.object_print_z_min;
         params.interface_width_mm   = support_material_interface_flow(m_object, float(m_slicing_params.layer_height)).width();
