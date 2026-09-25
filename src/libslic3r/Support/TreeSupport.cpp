@@ -30,7 +30,6 @@
 
 #include <boost/log/trivial.hpp>
 #include <algorithm>
-#include <functional>
 #include <limits>
 
 #ifndef M_PI
@@ -662,6 +661,40 @@ static void collect_support_footprints(const ExtrusionEntityCollection &collecti
     }
 }
 
+// Whether an extrusion's footprint lies in one of a layer's floating pieces. The pieces are disjoint
+// parts of the union of every footprint on the layer, so an extrusion's footprint has area in exactly
+// one of them: the one it is part of.
+static bool in_floating(const ExtrusionEntity &entity, const ExPolygons &pieces, const std::vector<BoundingBox> &boxes)
+{
+    Polygons footprint;
+    entity.polygons_covered_by_width(footprint, 0.f);
+    const BoundingBox box = get_extents(footprint);
+    for (size_t i = 0; i < pieces.size(); ++ i)
+        if (boxes[i].overlap(box) && ! intersection_ex(footprint, ExPolygons{ pieces[i] }).empty())
+            return true;
+    return false;
+}
+
+// Deletes the support extrusions in the floating pieces, and every nested collection they leave empty.
+static void prune_floating(ExtrusionEntityCollection &collection, const ExPolygons &pieces, const std::vector<BoundingBox> &boxes)
+{
+    ExtrusionEntitiesPtr kept;
+    for (ExtrusionEntity *entity : collection.entities) {
+        bool drop;
+        if (entity->is_collection()) {
+            auto *nested = static_cast<ExtrusionEntityCollection *>(entity);
+            prune_floating(*nested, pieces, boxes);
+            drop = nested->entities.empty();
+        } else
+            drop = is_support(entity->role()) && in_floating(*entity, pieces, boxes);
+        if (drop)
+            delete entity;
+        else
+            kept.push_back(entity);
+    }
+    collection.entities = std::move(kept);
+}
+
 // Takes out of every support layer the extrusions the print would lay in mid-air. A branch drawn
 // along the model inside the xy distance loses its whole section to the collision clip in
 // draw_circles on some layers and keeps a sliver on others, and an area too narrow for one line makes
@@ -713,35 +746,7 @@ std::vector<ExPolygons> TreeSupport::remove_floating_toolpaths()
         if (pieces.empty())
             continue;
         m_floating_pieces_removed += pieces.size();
-        // The pieces are disjoint parts of the union of every footprint on the layer, so an extrusion's
-        // footprint has area in exactly one of them: the one it is part of.
-        const auto in_floating = [&pieces, &boxes](const ExtrusionEntity &entity) {
-            Polygons footprint;
-            entity.polygons_covered_by_width(footprint, 0.f);
-            const BoundingBox box = get_extents(footprint);
-            for (size_t i = 0; i < pieces.size(); ++ i)
-                if (boxes[i].overlap(box) && ! intersection_ex(footprint, ExPolygons{ pieces[i] }).empty())
-                    return true;
-            return false;
-        };
-        std::function<void(ExtrusionEntityCollection &)> prune = [&](ExtrusionEntityCollection &collection) {
-            ExtrusionEntitiesPtr kept;
-            for (ExtrusionEntity *entity : collection.entities) {
-                bool drop;
-                if (entity->is_collection()) {
-                    auto *nested = static_cast<ExtrusionEntityCollection *>(entity);
-                    prune(*nested);
-                    drop = nested->entities.empty();
-                } else
-                    drop = is_support(entity->role()) && in_floating(*entity);
-                if (drop)
-                    delete entity;
-                else
-                    kept.push_back(entity);
-            }
-            collection.entities = std::move(kept);
-        };
-        prune(layers[slab_layer[s]]->support_fills);
+        prune_floating(layers[slab_layer[s]]->support_fills, pieces, boxes);
         printed[slab_layer[s]] = std::move(kept_pieces);
     }
     return printed;
