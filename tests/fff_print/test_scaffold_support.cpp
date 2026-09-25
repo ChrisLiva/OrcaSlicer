@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
@@ -217,6 +218,138 @@ struct FixtureBox
         return poly;
     }
 };
+
+// The object's slices on every object layer that overlaps the height `sl` prints across.
+ExPolygons model_over(const PrintObject &object, const SupportLayer &sl)
+{
+    ExPolygons model;
+    for (const Layer *layer : object.layers())
+        if (std::min(layer->print_z, sl.print_z) - std::max(layer->bottom_z(), sl.print_z - sl.height) > EPSILON)
+            append(model, layer->lslices);
+    return model;
+}
+
+// Every extrusion role the support layers print.
+template<class Layers> std::set<ExtrusionRole> support_roles(const Layers &layers)
+{
+    std::set<ExtrusionRole> roles;
+    for (const SupportLayer *sl : layers) {
+        std::vector<const ExtrusionEntity *> entities;
+        collect_entities(sl->support_fills, entities);
+        for (const ExtrusionEntity *e : entities)
+            roles.insert(e->role());
+    }
+    return roles;
+}
+
+// What a support layer's extrusions cover.
+ExPolygons footprint(const SupportLayer &sl) { return union_ex(sl.support_fills.polygons_covered_by_width(0.f)); }
+
+double area_mm2(const ExPolygons &polys)
+{
+    double a = 0.;
+    for (const ExPolygon &p : polys)
+        a += p.area() * SCALING_FACTOR * SCALING_FACTOR;
+    return a;
+}
+
+// How many of a support layer's extrusions reach further into its base area than a second wall of width `w` would.
+size_t reaches_inside(const SupportLayer &sl, double w)
+{
+    const ExPolygons interior = offset_ex(sl.base_areas, -scale_(2.5 * w));
+    std::vector<const ExtrusionEntity *> entities;
+    collect_entities(sl.support_fills, entities);
+    size_t count = 0;
+    for (const ExtrusionEntity *e : entities) {
+        Polygons covered;
+        e->polygons_covered_by_width(covered, 0.f);
+        if (! intersection_ex(covered, interior).empty())
+            ++ count;
+    }
+    return count;
+}
+
+// A disc's width is the diameter of the largest circle its outer contour inscribes; holes are ignored on purpose,
+// since a printed disc is a ring. The inscribed circle is one disc's whatever fused with it, and a tilted head's
+// slice, an ellipse along the tilt, inscribes its short axis, the sphere chord the grade sets. The contour is
+// closed by half a line width first: the line ends notch it, and a notch shrinks the circle a whole disc holds.
+struct Disc { double width_mm, box_min_mm, box_max_mm; Point centroid; };
+std::vector<Disc> discs(const SupportLayer &sl, double w)
+{
+    std::vector<Disc> out;
+    for (const ExPolygon &poly : role_footprint(sl, erSupportMaterialInterface)) {
+        const BoundingBox box    = get_extents(poly.contour);
+        const Polygons    closed = offset(offset(poly.contour, scale_(0.5 * w)), -scale_(0.5 * w));
+        double lo = 0., hi = 0.5 * unscale<double>(std::max(box.size().x(), box.size().y()));
+        for (int i = 0; i < 24; ++ i) {
+            const double mid = 0.5 * (lo + hi);
+            (offset(closed, -scale_(mid)).empty() ? hi : lo) = mid;
+        }
+        out.push_back({ 2. * lo, unscale<double>(std::min(box.size().x(), box.size().y())),
+                        unscale<double>(std::max(box.size().x(), box.size().y())), poly.contour.centroid() });
+    }
+    return out;
+}
+
+// The interface discs on one of the four support layers under a tip: how many stand in the tip's region, and on the
+// tip's own layer how many of those are graded, standing outside the excluded box, with the narrowest and the widest.
+struct RingLayer
+{
+    double print_z;
+    size_t in_region = 0, graded = 0;
+    Disc   narrowest { std::numeric_limits<double>::max(), 0., 0., Point() };
+    Disc   widest { std::numeric_limits<double>::lowest(), 0., 0., Point() };
+};
+
+// The rings on `layers[top]`, the highest support layer whose top reaches the tip, and the three layers below it, in
+// that order. `top` must be 3 or more.
+template<class Layers>
+std::vector<RingLayer> rings_under(const Layers &layers, size_t top, const FixtureBox &region, const FixtureBox *excluded, double w)
+{
+    std::vector<RingLayer> out;
+    for (size_t k = 0; k < 4; ++ k) {
+        const SupportLayer &sl = *layers[top - k];
+        RingLayer           ring { sl.print_z };
+        for (const Disc &disc : discs(sl, w)) {
+            if (! region.contains(disc.centroid))
+                continue;
+            ++ ring.in_region;
+            if (k == 0 && ! (excluded != nullptr && excluded->contains(disc.centroid))) {
+                ++ ring.graded;
+                if (disc.width_mm < ring.narrowest.width_mm)
+                    ring.narrowest = disc;
+                if (disc.width_mm > ring.widest.width_mm)
+                    ring.widest = disc;
+            }
+        }
+        out.push_back(ring);
+    }
+    return out;
+}
+
+// Where an enforced tip's head may enter the xy band: `area` on the layers at most a reach under `tip_z`.
+struct Reach { Polygon area; double tip_z; };
+
+// The areas of the reaches whose tip stands at or over `print_z` and at most `reach_z` above it.
+Polygons reach_at(const std::vector<Reach> &reaches, double print_z, double reach_z)
+{
+    Polygons reach;
+    for (const Reach &spot : reaches)
+        if (print_z <= spot.tip_z + EPSILON && print_z > spot.tip_z - reach_z)
+            reach.push_back(spot.area);
+    return reach;
+}
+
+// Stands every object of `model` in its mesh's own orientation, centred on the bed and resting on it.
+void stand_upright(Model &model, const DynamicPrintConfig &config)
+{
+    for (ModelObject *mo : model.objects)
+        for (ModelInstance *instance : mo->instances)
+            instance->set_rotation(Vec3d::Zero());
+    model.center_instances_around_point(unscale(BoundingBox(get_bed_shape(config)).center()));
+    for (ModelObject *mo : model.objects)
+        mo->ensure_on_bed();
+}
 
 // A 40 x 40 x 4 mm block, a 4 x 4 x 10 mm post on it at x 18..22, y 0..4, z 4..14, and a 4 x 40 x 2 mm lip off the
 // post's top at x 18..22, y 0..40, z 12..14: the lip's underside hangs 8 mm over the block, which reaches 18 mm past
@@ -505,23 +638,7 @@ TEST_CASE("A scaffold on the shelf fixture prints a pad with dense faces and cle
     const auto layers = object.support_layers();
     REQUIRE(layers.size() > 0);
     CHECK_FALSE(layers.front()->lslices.empty());
-    std::set<ExtrusionRole> roles;
-    for (const SupportLayer *sl : layers) {
-        std::vector<const ExtrusionEntity *> entities;
-        collect_entities(sl->support_fills, entities);
-        for (const ExtrusionEntity *e : entities)
-            roles.insert(e->role());
-    }
-    CHECK(roles == std::set<ExtrusionRole>{ erSupportMaterial, erSupportMaterialInterface });
-
-    // What each support layer's extrusions cover.
-    const auto footprint = [](const SupportLayer &sl) { return union_ex(sl.support_fills.polygons_covered_by_width(0.f)); };
-    const auto area_mm2 = [](const ExPolygons &polys) {
-        double a = 0.;
-        for (const ExPolygon &p : polys)
-            a += p.area() * SCALING_FACTOR * SCALING_FACTOR;
-        return a;
-    };
+    CHECK(support_roles(layers) == std::set<ExtrusionRole>{ erSupportMaterial, erSupportMaterialInterface });
 
     // The pad is 0.6 mm rounded up to whole planned layers: the layers up to the first whose top reaches 0.6 mm.
     // The tree plans its own support layer heights, so that is three layers here, and the layer above it holds
@@ -557,10 +674,7 @@ TEST_CASE("A scaffold on the shelf fixture prints a pad with dense faces and cle
     // interface fuses to the model and is held to not entering it further down.
     const Point shift = object.instances().front().shift;
     for (const SupportLayer *sl : layers) {
-        ExPolygons model;
-        for (const Layer *layer : object.layers())
-            if (std::min(layer->print_z, sl->print_z) - std::max(layer->bottom_z(), sl->print_z - sl->height) > EPSILON)
-                append(model, layer->lslices);
+        const ExPolygons model   = model_over(object, *sl);
         const ExPolygons printed = footprint(*sl);
         INFO("print_z " << sl->print_z);
         CHECK(intersection_ex(role_footprint(*sl, erSupportMaterial), offset_ex(union_ex(model), scale_(0.35 - 0.02))).empty());
@@ -576,24 +690,11 @@ TEST_CASE("A scaffold on the shelf fixture prints a pad with dense faces and cle
 
     // The pad prints through the sheath and the cage above it prints walls only: no extrusion above the pad
     // reaches further into its layer's base area than a second wall would, while the pad's infill does.
-    const auto reaches_inside = [w](const SupportLayer &sl) {
-        const ExPolygons interior = offset_ex(sl.base_areas, -scale_(2.5 * w));
-        std::vector<const ExtrusionEntity *> entities;
-        collect_entities(sl.support_fills, entities);
-        size_t count = 0;
-        for (const ExtrusionEntity *e : entities) {
-            Polygons covered;
-            e->polygons_covered_by_width(covered, 0.f);
-            if (! intersection_ex(covered, interior).empty())
-                ++ count;
-        }
-        return count;
-    };
     for (size_t i = pad_top + 1; i < layers.size(); ++ i) {
         INFO("print_z " << layers[i]->print_z);
-        CHECK(reaches_inside(*layers[i]) == 0);
+        CHECK(reaches_inside(*layers[i], w) == 0);
     }
-    CHECK(reaches_inside(*layers[1]) > 0);
+    CHECK(reaches_inside(*layers[1], w) > 0);
 
     // Each tip fuses to its overhang through a ring of interface on the three layers under it: the highest layer
     // whose top reaches the tip and the two below, and the layer under those carries none. A tip on the bar's 0.6 mm
@@ -604,62 +705,35 @@ TEST_CASE("A scaffold on the shelf fixture prints a pad with dense faces and cle
     const FixtureBox slab_box  { origin, 6., -3., 18., 9. };
     // A head at the bar's 0.6 mm edge tilts, so its lower rings stand up to half a millimetre off the bar's side.
     const FixtureBox bar_rings { origin, 6., 2.1, 12., 3.9 };
-    // A disc's width is the diameter of the largest circle its outer contour inscribes; holes are ignored on purpose,
-    // since a printed disc is a ring. The inscribed circle is one disc's whatever fused with it, and a tilted head's
-    // slice, an ellipse along the tilt, inscribes its short axis, the sphere chord the grade sets. The contour is
-    // closed by half a line width first: the line ends notch it, and a notch shrinks the circle a whole disc holds.
-    struct Disc { double width_mm, box_min_mm, box_max_mm; Point centroid; };
-    const auto discs = [w](const SupportLayer &sl) {
-        std::vector<Disc> out;
-        for (const ExPolygon &poly : role_footprint(sl, erSupportMaterialInterface)) {
-            const BoundingBox box    = get_extents(poly.contour);
-            const Polygons    closed = offset(offset(poly.contour, scale_(0.5 * w)), -scale_(0.5 * w));
-            double lo = 0., hi = 0.5 * unscale<double>(std::max(box.size().x(), box.size().y()));
-            for (int i = 0; i < 24; ++ i) {
-                const double mid = 0.5 * (lo + hi);
-                (offset(closed, -scale_(mid)).empty() ? hi : lo) = mid;
-            }
-            out.push_back({ 2. * lo, unscale<double>(std::min(box.size().x(), box.size().y())),
-                            unscale<double>(std::max(box.size().x(), box.size().y())), poly.contour.centroid() });
-        }
-        return out;
-    };
-    const auto rings_under = [&](double tip_z, const FixtureBox &region, const FixtureBox *excluded, double min_w, double max_w) {
+    const auto check_rings = [&](double tip_z, const FixtureBox &region, const FixtureBox *excluded, double min_w, double max_w) {
         const size_t top = top_layer_under(layers, tip_z);
         REQUIRE(top != size_t(-1));
         REQUIRE(top >= 3);
-        for (size_t k = 0; k < 4; ++ k) {
-            const SupportLayer &sl = *layers[top - k];
-            INFO("tip z " << tip_z << " layer " << k << " under the tip, print_z " << sl.print_z);
-            size_t in_region = 0, graded = 0;
-            for (const Disc &disc : discs(sl)) {
-                INFO("disc inscribes " << disc.width_mm << " mm, bounding box " << disc.box_min_mm << " x " << disc.box_max_mm << " mm");
-                if (! region.contains(disc.centroid))
-                    continue;
-                ++ in_region;
-                if (k == 0 && ! (excluded != nullptr && excluded->contains(disc.centroid))) {
-                    ++ graded;
-                    CHECK(disc.width_mm >= min_w);
-                    CHECK(disc.width_mm <= max_w);
-                }
-            }
+        const std::vector<RingLayer> rings = rings_under(layers, top, region, excluded, w);
+        for (size_t k = 0; k < rings.size(); ++ k) {
+            INFO("tip z " << tip_z << " layer " << k << " under the tip, print_z " << rings[k].print_z);
             if (k < 3)
-                CHECK(in_region > 0);
+                CHECK(rings[k].in_region > 0);
             else
-                CHECK(in_region == 0);
-            if (k == 0)
-                CHECK(graded > 0);
+                CHECK(rings[k].in_region == 0);
         }
+        const Disc &narrowest = rings.front().narrowest, &widest = rings.front().widest;
+        INFO("tip z " << tip_z << ": graded discs inscribe " << narrowest.width_mm << " mm (bounding box " << narrowest.box_min_mm << " x "
+                      << narrowest.box_max_mm << " mm) to " << widest.width_mm << " mm (bounding box " << widest.box_min_mm << " x "
+                      << widest.box_max_mm << " mm)");
+        CHECK(rings.front().graded > 0);
+        CHECK(narrowest.width_mm >= min_w);
+        CHECK(widest.width_mm <= max_w);
     };
-    rings_under(4., bar_rings, nullptr, 1.8 * w, 2.2 * w);
-    rings_under(12., slab_box, &bar_strip, 3.4 * w, 4.2 * w);
+    check_rings(4., bar_rings, nullptr, 1.8 * w, 2.2 * w);
+    check_rings(12., slab_box, &bar_strip, 3.4 * w, 4.2 * w);
 
     // A bar tip within the xy distance of the column face is skipped, since its neck would be clipped there while
     // its ring survived; the bar keeps the tips further out.
     {
         const SupportLayer &sl = *layers[top_layer_under(layers, 4.)];
         size_t under_bar = 0;
-        for (const Disc &disc : discs(sl)) {
+        for (const Disc &disc : discs(sl, w)) {
             const double x = unscale<double>(disc.centroid.x() - origin.x());
             INFO("interface centroid at fixture x " << x << " on print_z " << sl.print_z);
             CHECK(x >= 6.35);
@@ -672,12 +746,9 @@ TEST_CASE("A scaffold on the shelf fixture prints a pad with dense faces and cle
     // The interface fuses to the model but never enters it. What its extrusions cover reaches under 0.04 mm past
     // the drawn area.
     for (const SupportLayer *sl : layers) {
-        ExPolygons model;
-        for (const Layer *layer : object.layers())
-            if (std::min(layer->print_z, sl->print_z) - std::max(layer->bottom_z(), sl->print_z - sl->height) > EPSILON)
-                append(model, layer->lslices);
         INFO("print_z " << sl->print_z);
-        CHECK(intersection_ex(role_footprint(*sl, erSupportMaterialInterface), offset_ex(union_ex(model), -scale_(0.05))).empty());
+        const ExPolygons inside = offset_ex(union_ex(model_over(object, *sl)), -scale_(0.05));
+        CHECK(intersection_ex(role_footprint(*sl, erSupportMaterialInterface), inside).empty());
     }
 
     // The cage roots on the plate and the floating pass finds nothing to take out of it.
@@ -864,8 +935,7 @@ TEST_CASE("A painted enforcer beside a wall fuses its tip where the paint asks",
     // at most `reach_z` under its tip. The heads here enter it up to 0.6 mm off their spot and 1.1 mm under their tip.
     // The bar's painted underside tops its tips at z 4.
     const double reach_xy = 1.5, reach_z = 2.5;
-    struct Reach { Polygon area; double tip_z; };
-    const Point        origin = get_extents(painted.layers().front()->lslices).min;
+    const Point       origin = get_extents(painted.layers().front()->lslices).min;
     std::vector<Reach> reaches { { FixtureBox{ origin, 6. - reach_xy, 2.7 - reach_xy, 12. + reach_xy, 3.3 + reach_xy }.polygon(), 4. } };
     for (const std::pair<Vec3f, Vec3f> &pt_and_normal : vertical_points) {
         const Vec3f &pt = pt_and_normal.first;
@@ -896,17 +966,10 @@ TEST_CASE("A painted enforcer beside a wall fuses its tip where the paint asks",
     // the model over the layer's height grown by the xy distance stands within an enforced spot's reach. A clip that
     // skipped the band for all of a layer's base would print the heads' spheres beside the bar above its underside.
     for (const SupportLayer *sl : layers) {
-        ExPolygons model;
-        for (const Layer *layer : painted.layers())
-            if (std::min(layer->print_z, sl->print_z) - std::max(layer->bottom_z(), sl->print_z - sl->height) > EPSILON)
-                append(model, layer->lslices);
-        const ExPolygons in_band = intersection_ex(role_footprint(*sl, erSupportMaterial), offset_ex(union_ex(model), scale_(0.5 - 0.02)));
-        Polygons         reach;
-        for (const Reach &spot : reaches)
-            if (sl->print_z <= spot.tip_z + EPSILON && sl->print_z > spot.tip_z - reach_z)
-                reach.push_back(spot.area);
+        const ExPolygons in_band =
+            intersection_ex(role_footprint(*sl, erSupportMaterial), offset_ex(union_ex(model_over(painted, *sl)), scale_(0.5 - 0.02)));
         INFO("support layer at print_z " << sl->print_z);
-        CHECK(diff_ex(in_band, reach).empty());
+        CHECK(diff_ex(in_band, reach_at(reaches, sl->print_z, reach_z)).empty());
     }
 }
 
@@ -1237,14 +1300,8 @@ TEST_CASE("Scaffold support over corpus plate 3 in two poses", "[ScaffoldSupport
             SupportValidation::CorpusObject object = SupportValidation::case_object(m, c, fixture_config({ { "support_top_z_distance", "0.2" } }), style, "on");
             // The project's own settings carry 0.06 mm layers; the base's 0.2 means the file's config never loaded.
             REQUIRE_THAT(object.config.opt_float("layer_height"), WithinAbs(0.06, 1e-9));
-            if (pose == "upright") {
-                for (ModelObject *mo : object.model.objects)
-                    for (ModelInstance *instance : mo->instances)
-                        instance->set_rotation(Vec3d::Zero());
-                object.model.center_instances_around_point(unscale(BoundingBox(get_bed_shape(object.config)).center()));
-                for (ModelObject *mo : object.model.objects)
-                    mo->ensure_on_bed();
-            }
+            if (pose == "upright")
+                stand_upright(object.model, object.config);
 
             Print print;
             print.set_status_silent();
