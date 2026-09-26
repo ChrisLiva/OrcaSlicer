@@ -519,16 +519,16 @@ struct DrawContext
     void                    slice_build(const sla::SupportTreeBuilder &builder, const std::vector<size_t> &tip_of,
                                         const sla::SupportPoints &pts, const std::vector<size_t> &posts,
                                         std::vector<ExPolygons> &cage, std::vector<Rings> &rings) const;
-    std::vector<ExPolygons> enforced_heads(const std::vector<Rings> &rings) const;
+    std::vector<ExPolygons> exempt_heads(const std::vector<Rings> &rings) const;
     std::vector<char>       find_stranded(std::vector<ExPolygons> &cage, const std::vector<Rings> &rings,
-                                          const std::vector<ExPolygons> &enforced) const;
-    std::pair<ExPolygons, ExPolygons> seam_areas(const ExPolygons &section, const ExPolygons &enforced, const ExPolygons &interface_,
+                                          const std::vector<ExPolygons> &exempt) const;
+    std::pair<ExPolygons, ExPolygons> seam_areas(const ExPolygons &section, const ExPolygons &exempt, const ExPolygons &interface_,
                                                  size_t i) const;
     SupportAnalysis::Slab   seam_slab(size_t i, const ExPolygons &base_i, const ExPolygons &rings_i, double ground) const;
     Adrift                  adrift_pieces(const std::vector<SupportAnalysis::Slab> &slabs, const std::vector<std::vector<bool>> &floating) const;
     std::vector<std::vector<std::pair<size_t, size_t>>> ring_holds(const std::vector<Rings> &rings, const Adrift &adrift) const;
     std::vector<std::vector<char>> hole_walls(std::vector<ExPolygons> &cage, const std::vector<ExPolygons> &interface_,
-                                              const std::vector<ExPolygons> &enforced, const Adrift &adrift,
+                                              const std::vector<ExPolygons> &exempt, const Adrift &adrift,
                                               const std::vector<std::vector<char>> &ringed) const;
     void                    neck_adrift(const std::vector<Rings> &rings, const Adrift &adrift, const std::vector<std::vector<char>> &ringed,
                                         const std::vector<std::vector<char>> &walls, std::vector<char> &cut) const;
@@ -624,8 +624,8 @@ void DrawContext::slice_build(const sla::SupportTreeBuilder &builder, const std:
     });
 }
 
-// The enforced heads' slices per planned layer.
-std::vector<ExPolygons> DrawContext::enforced_heads(const std::vector<Rings> &rings) const
+// The heads exempt from the band's slices per planned layer, today the enforced heads.
+std::vector<ExPolygons> DrawContext::exempt_heads(const std::vector<Rings> &rings) const
 {
     std::vector<ExPolygons> out(layer_heights.size());
     for (const Rings &r : rings)
@@ -655,7 +655,7 @@ std::vector<ExPolygons> DrawContext::enforced_heads(const std::vector<Rings> &ri
 // head runs through the model or narrows under a line there, so the neck the enforcer exempts from the band would
 // print in mid-air.
 std::vector<char> DrawContext::find_stranded(std::vector<ExPolygons> &cage, const std::vector<Rings> &rings,
-                                             const std::vector<ExPolygons> &enforced) const
+                                             const std::vector<ExPolygons> &exempt) const
 {
     std::vector<char> cut(rings.size(), 0);
     const size_t lowest = pad_layers;
@@ -671,7 +671,7 @@ std::vector<char> DrawContext::find_stranded(std::vector<ExPolygons> &cage, cons
     tbb::parallel_for(tbb::blocked_range<size_t>(0, slabs.size()), [&](const tbb::blocked_range<size_t> &range) {
         for (size_t s = range.begin(); s < range.end(); ++ s) {
             const size_t i                 = lowest + s;
-            const auto   [base_i, rings_i] = seam_areas(cage[i], enforced[i], interface_[s], i);
+            const auto   [base_i, rings_i] = seam_areas(cage[i], exempt[i], interface_[s], i);
             slabs[s]                       = seam_slab(i, base_i, rings_i, ground);
         }
     });
@@ -689,17 +689,17 @@ std::vector<char> DrawContext::find_stranded(std::vector<ExPolygons> &cage, cons
         for (const auto &[s, j] : holds[h])
             ringed[s][j] = 1;
     }
-    const std::vector<std::vector<char>> walls = hole_walls(cage, interface_, enforced, adrift, ringed);
+    const std::vector<std::vector<char>> walls = hole_walls(cage, interface_, exempt, adrift, ringed);
     neck_adrift(rings, adrift, ringed, walls, cut);
     return cut;
 }
 
 // The base and the rings the seam lays on the planned layer `i` above the pad, with their small holes filled.
-std::pair<ExPolygons, ExPolygons> DrawContext::seam_areas(const ExPolygons &section, const ExPolygons &enforced,
+std::pair<ExPolygons, ExPolygons> DrawContext::seam_areas(const ExPolygons &section, const ExPolygons &exempt,
                                                           const ExPolygons &interface_, size_t i) const
 {
     ExPolygons rings_i = diff_ex(union_ex(interface_), clips[i].model);
-    ExPolygons base_i  = diff_ex(clip_base(section, enforced, clips[i]), rings_i);
+    ExPolygons base_i  = diff_ex(clip_base(section, exempt, clips[i]), rings_i);
     for (ExPolygon &area : base_i)
         TreeSupport::fill_small_holes(area);
     for (ExPolygon &area : rings_i)
@@ -762,7 +762,7 @@ std::vector<std::vector<std::pair<size_t, size_t>>> DrawContext::ring_holds(cons
 // and the wall around it stays in mid-air: there a piece counts as a hole's wall only when the base the seam
 // prints after the fill borders no hole at the piece.
 std::vector<std::vector<char>> DrawContext::hole_walls(std::vector<ExPolygons> &cage, const std::vector<ExPolygons> &interface_,
-                                                       const std::vector<ExPolygons> &enforced, const Adrift &adrift,
+                                                       const std::vector<ExPolygons> &exempt, const Adrift &adrift,
                                                        const std::vector<std::vector<char>> &ringed) const
 {
     const size_t lowest    = pad_layers;
@@ -791,9 +791,9 @@ std::vector<std::vector<char>> DrawContext::hole_walls(std::vector<ExPolygons> &
                         return wall;
                     }), section.holes.end());
             }
-            if (enforced[lowest + s].empty() || std::find(walls[s].begin(), walls[s].end(), char(1)) == walls[s].end())
+            if (exempt[lowest + s].empty() || std::find(walls[s].begin(), walls[s].end(), char(1)) == walls[s].end())
                 continue;
-            const ExPolygons base = seam_areas(cage[lowest + s], enforced[lowest + s], interface_[s], lowest + s).first;
+            const ExPolygons base = seam_areas(cage[lowest + s], exempt[lowest + s], interface_[s], lowest + s).first;
             for (size_t j = 0; j < adrift[s].size(); ++ j)
                 for (const ExPolygon &area : base)
                     for (const Polygon &hole : area.holes)
@@ -842,8 +842,8 @@ void DrawContext::write_output(sla::SupportTreeBuilder &builder, std::vector<ExP
     out.stage_ms.build = build_ms + ms_since(pad_start);
 
     // The last build's slices are the output: each planned layer is the cage's and the pad's section through the
-    // layer's middle, each routed head's rings print as interface, and the enforced heads under their rings go out
-    // apart for `clip_base`.
+    // layer's middle, each routed head's rings print as interface, and the heads exempt from the band under their
+    // rings go out apart for `clip_base`.
     const auto output_start = std::chrono::steady_clock::now();
     if (! pad_mesh.indices.empty()) {
         const float  pad_top = std::max_element(pad_mesh.vertices.begin(), pad_mesh.vertices.end(),
@@ -857,10 +857,10 @@ void DrawContext::write_output(sla::SupportTreeBuilder &builder, std::vector<ExP
                 cage[i] = union_ex(cage[i]);
             }
     }
-    std::vector<ExPolygons> necks = enforced_heads(rings);
+    std::vector<ExPolygons> necks = exempt_heads(rings);
     for (size_t i = 0; i < out.layers.size(); ++ i) {
-        out.layers[i].base           = std::move(cage[i]);
-        out.layers[i].enforced_heads = std::move(necks[i]);
+        out.layers[i].base         = std::move(cage[i]);
+        out.layers[i].exempt_heads = std::move(necks[i]);
     }
     for (const Rings &r : rings)
         for (size_t k = 0; k < r.slices.size(); ++ k)
@@ -875,11 +875,11 @@ void DrawContext::write_output(sla::SupportTreeBuilder &builder, std::vector<ExP
 
 } // namespace
 
-ExPolygons clip_base(const ExPolygons &base, const ExPolygons &enforced_heads, const LayerClip &clip)
+ExPolygons clip_base(const ExPolygons &base, const ExPolygons &exempt_heads, const LayerClip &clip)
 {
     ExPolygons out = diff_ex(base, clip.band);
-    if (! enforced_heads.empty())
-        out = union_ex(out, diff_ex(enforced_heads, clip.model));
+    if (! exempt_heads.empty())
+        out = union_ex(out, diff_ex(exempt_heads, clip.model));
     return out;
 }
 
@@ -1033,7 +1033,7 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
         build_ms += ms_since(run_start);
         const auto slice_start = std::chrono::steady_clock::now();
         ctx.slice_build(*builder, index_of, left, posted, cage, rings);
-        cut = check ? ctx.find_stranded(cage, rings, ctx.enforced_heads(rings)) : std::vector<char>(rings.size(), 0);
+        cut = check ? ctx.find_stranded(cage, rings, ctx.exempt_heads(rings)) : std::vector<char>(rings.size(), 0);
         out.stage_ms.slice += ms_since(slice_start);
         const size_t cut_count = size_t(std::count(cut.begin(), cut.end(), char(1)));
         BOOST_LOG_TRIVIAL(debug) << "scaffold build " << run << ": " << left.size() << " points, " << cut_count << " heads cut";

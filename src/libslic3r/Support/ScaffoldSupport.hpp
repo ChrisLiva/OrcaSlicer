@@ -14,16 +14,16 @@ struct Params {   // filled by TreeSupport from its config and support params
     // What the lines TreeSupport lays on base areas of a layer this high cover, as the floating pass reads them.
     std::function<Polygons(const ExPolygons &base, double height)> base_cover;
 };
-// Before the 2D clip TreeSupport runs. `enforced_heads` are the heads of the enforced tips, sliced like the base on the
-// layers below their rings.
-struct LayerAreas { ExPolygons base; ExPolygons interface_; ExPolygons enforced_heads; };
+// Before the 2D clip TreeSupport runs. `exempt_heads` are the heads exempt from the band, today the enforced tips'
+// heads, sliced like the base on the layers below their rings.
+struct LayerAreas { ExPolygons base; ExPolygons interface_; ExPolygons exempt_heads; };
 // The 2D clip TreeSupport runs on a planned layer, computed once for `draw` and the seam: interface stays out of
 // `model`, the object over the layer's whole height, and base stays out of `band`, that model grown by the xy distance
 // together with the bottom gap's trim.
 struct LayerClip { ExPolygons model, band; };
 // The base the seam prints on a planned layer before the bed clip, which the neck check reads the same way: `base`
-// outside the band, and the enforced heads outside the model alone, so an enforced tip fuses beside a wall.
-ExPolygons clip_base(const ExPolygons &base, const ExPolygons &enforced_heads, const LayerClip &clip);
+// outside the band, and the heads exempt from the band outside the model alone, so an enforced tip fuses beside a wall.
+ExPolygons clip_base(const ExPolygons &base, const ExPolygons &exempt_heads, const LayerClip &clip);
 struct Counts { size_t tips_placed = 0, tips_routed = 0, tips_dropped = 0, islands_under_held = 0,
                 pillars_unbraced = 0; };
 struct StageMs { uint32_t island_joins = 0, build = 0, slice = 0; };   // for TreeSupport's profiler
