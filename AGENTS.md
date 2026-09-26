@@ -133,10 +133,9 @@ upright pose varies between runs, and only the variant reading `routed 1373 / dr
 (2026-09-24). Once painted enforcers fused beside walls (6514376583), one of about ten upright runs read 18,
 unclassified and not seen again after `cbf397a7a5` fixed an enforced-neck miss (2026-09-25). Re-run the case once
 before reading a non-zero upright count as a regression.
-The same case fails its stored-pose `tips_dropped <= tips_placed / 5` leg at `95 <= 59` (95 of 299 dropped) on the
-`elf_test.3mf` rewritten at 14:02 on 2026-09-25 (sha256 `201c5418…`), on `4f15936795`'s code and on the refactor after
-it alike; the case pins sha256 `0252d6eb…` in its manifest but never checks it, so a corpus rewrite reads as a code
-regression. Hash the corpus before reading a hidden-case failure (2026-09-25).
+The corpus `elf_test.3mf` carries no painted enforcers since its intentional rewrite at 14:02 on 2026-09-25 (sha256
+`201c5418…`). The hidden case pins that hash in its manifest but never checks it, so a corpus rewrite reads as a code
+regression. Hash the corpus with `shasum -a 256` before reading a hidden-case failure (2026-09-26).
 The legacy tree's own floating pass is not idle on the corpus: a tree-slim slice of plate 3 strips 123 printed
 pieces in the stored pose and 97 upright, every one a base shard of 0.002 to 0.59 mm2 (a temporary role log in
 `remove_floating_toolpaths`, 2026-09-24), so an oracle expecting `floating_pieces_removed == 0` from a legacy style

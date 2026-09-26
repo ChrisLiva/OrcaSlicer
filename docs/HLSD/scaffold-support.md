@@ -83,7 +83,8 @@ chosen tips, and the draw's neck check reads the same clips. `drop_nodes`,
 
 For each planned layer `TreeSupport` then clips the returned areas.
 `ScaffoldSupport::clip_base` keeps the base out of the grown band and adds back
-the enforced tips' heads kept out of the model alone, the machine border clips
+the exempt heads, the enforced tips' heads and the heads the neck check
+exempted, kept out of the model alone; the machine border clips
 the result, and the interface areas stay out of the model alone, since the
 rings fuse to it. The base areas become `BaseType` area groups with no infill
 and the interface areas become `Roof1stLayer` groups; a group on one of the
@@ -115,17 +116,19 @@ them.
    lies within the xy distance of that layer's slices; the wall anchors that
    band as it does under the legacy tree. The layer just under the overhang is
    the wrong reference: on a sloped underside every contact sits a fraction of
-   a layer past it, while a slope has receded by the neck's bottom and a wall
-   has not. A skipped tip logs `scaffold tip skipped at (x, y, z): wall` at
-   debug level and counts as neither placed nor dropped. The same test applies
-   to the dropped contacts the hold floor may restore and to the tips it
-   seeds. An enforced tip is exempt: a contact a support enforcer asked for,
-   `SupportNode::is_pinned`, which under Scaffold marks every contact on an
-   overhang an enforcer covers, whether painted facets or an enforcer
-   modifier volume, and every vertical enforcer point painted facets place,
-   becomes a `TipSite` with `enforced` set, and the skip keeps it however
-   close the wall stands, so the tip fuses where the user asked for support
-   and leaves its scar there.
+   a layer past it. The skip reads the tip's centre at the depth of the neck's
+   bottom, not the built neck: under a slope the head tilts along the
+   underside's normal, and the neck check in step 6 exempts a cut head whose
+   tilted neck bottoms outside the band. A skipped tip logs
+   `scaffold tip skipped at (x, y, z): wall` at debug level and counts as
+   neither placed nor dropped. The same test applies to the dropped contacts
+   the hold floor may restore and to the tips it seeds. An enforced tip is
+   exempt: a contact a support enforcer asked for, `SupportNode::is_pinned`,
+   which under Scaffold marks every contact on an overhang an enforcer
+   covers, whether painted facets or an enforcer modifier volume, and every
+   vertical enforcer point painted facets place, becomes a `TipSite` with
+   `enforced` set, and the skip keeps it however close the wall stands, so
+   the tip fuses where the user asked for support and leaves its scar there.
 3. The island hold floor. `SupportAnalysis::island_joins` maps every mid-air
    island of the model to the slab where it first meets the rooted body. An
    island needs one tip when its unjoined height is at most 1 mm, two up to
@@ -212,10 +215,10 @@ them.
    The neck check then reads what the seam would print of the build on each
    planned layer above the pad, as the outlines its lines cover, since the
    floating pass reads `polygons_covered_by_width`. The areas are the cage
-   outside the clip's band with the enforced heads outside the model, through
+   outside the clip's band with the exempt heads outside the model, through
    the `clip_base` the seam calls, and the rings outside the model, with the
    small holes `TreeSupport::fill_small_holes` fills filled, as
-   `finish_layer_areas` fills them on every support layer, so an enforced head's
+   `finish_layer_areas` fills them on every support layer, so an exempt head's
    neck beside a wall holds its rings and the head is not cut for it. The base
    goes through `Params::base_cover`, which under the default base pattern
    lays its walls
@@ -237,21 +240,29 @@ them.
    wall of a cage hole, a gap among fused necks 2 mm across or wider whose
    narrower stretches on the layers around it are filled, has its hole filled
    instead, which removes a wall that stands over the unprinted inside of the
-   section below. An enforced head whose own neck under its rings lies in a
+   section below. An exempt head whose own neck under its rings lies in a
    floating piece that holds no ring and walls no hole is cut as well: the
-   head runs through the model or narrows under a line there, so the neck the
-   enforcer exempts from the band would print in mid-air. On a layer with an
-   enforced head a piece counts as a hole's wall only when the base the seam
+   head runs through the model or narrows under a line there, so the neck
+   exempt from the band would print in mid-air. On a layer with an
+   exempt head a piece counts as a hole's wall only when the base the seam
    prints after the fill borders no hole at it, since the band or the model
    can cut the filled hole out of that base again and leave the wall in
-   mid-air. With no interface layers there is no ring to check, but the check
+   mid-air. An enforced tip's head is exempt from the start. A head the check
+   cuts for its neck, not for want of a pillar and a bridge, becomes exempt
+   when its lowest neck slice clears the band, and the check reads the same
+   build once more with that head's neck outside the model alone, which cuts
+   it only where its rings or its own neck still float. A head whose lowest
+   neck slice meets the band keeps no neck and stays cut, and a head the check
+   never cuts keeps its neck clipped by the band.
+   With no interface layers there is no ring to check, but the check
    still runs while any tip is enforced, since an enforced head prints its
    neck up to its tip. The cut heads' points
    leave the point set, in order, and the builder runs again, since a run
    re-routes the neighbours of what it lost and can strand another ring. It
    repeats until no head is cut, at most six runs (plate 3 of the corpus needs
-   five), and the heads the sixth run still cuts are dropped without another
-   run, their rings left out of the output. Each run logs
+   two, the first on 299 points cutting 12 heads and the second on 287 points
+   cutting none), and the heads the sixth run still cuts are dropped without
+   another run, their rings left out of the output. Each run logs
    `scaffold build <n>: <points> points, <cut> heads cut` and
    each drop `scaffold tip dropped at (x, y, z): <reason>` at debug level,
    the reason `filtered`, `unrouted` (also for a cut head with no pillar and
@@ -260,15 +271,23 @@ them.
 7. Slicing. Each run slices its cage at the middle of every planned layer,
    each routed head's own mesh at the tops of its top interface layer,
    the planned layer whose top is the tip's z, and of the layers under it up
-   to the interface count, and an enforced tip's head at the middles of the
-   layers it reaches under those. The last run's slices are the output: the
+   to the interface count, and every ringed or enforced head's own head, its
+   neck, at the middles of the layers it reaches under those. A head that is
+   not enforced keeps no neck when the lowest of those slices meets the band,
+   so the neck check never exempts it. The cage leaves out each ringed or
+   enforced head's own head over its rings, its pin, which the builder sinks
+   into the model over the tip by the penetration: where the model is thinner
+   than that reach, the pin would come out on the model's top face with
+   nothing printed under it, a floating piece that holds no ring, walls no
+   hole and is no neck. Inside the model or the band the clip removes that
+   part anyway. The last run's slices are the output: the
    pad, sliced on the layers it spans, joins the cage's sections as base
    areas, the rings and each post's disc on the layers a head's rings would
    take become the layer's interface areas and leave its base, and
-   the enforced heads' slices go out apart for `clip_base`.
+   the exempt heads' slices go out apart for `clip_base`.
 
 The returned `Output` carries one `LayerAreas` per planned layer (base,
-interface and enforced heads), the number of
+interface and exempt heads), the number of
 leading layers that are pad, the five tip and pillar counts, and the
 milliseconds spent in the island map, in every build with the pad, and in the
 slicing with the neck checks, which
@@ -337,13 +356,16 @@ tip rings print as the top interface, in
 the interface pattern and flow; with no interface layers configured the rings
 stay in the base and print as base.
 
-Base stays out of the model grown by the xy distance, except at an enforced
-tip, one that painted enforcer facets or an enforcer modifier volume asked
-for: the tip's own head under its rings stays out of the model alone. Without
-that exception the band would cut the neck of a tip the user enforced beside a
-wall and leave its rings over nothing. The exemption covers that head only;
-pillars, bridges and braces keep the band, and the neck check cuts an enforced
-head whose own neck would print in mid-air.
+Base stays out of the model grown by the xy distance, except at an exempt
+head: an enforced tip's, one that painted enforcer facets or an enforcer
+modifier volume asked for, and a head the neck check exempted because the
+band stranded its rings while its lowest neck slice clears the band. The
+head's own neck under its rings stays out of the model alone. Without that
+exception the band would cut the neck of a tip the user enforced beside a
+wall, or trim the neck of a head tilted under a sloped underside, and leave
+its rings over nothing. The exemption covers that head only; pillars, bridges
+and braces keep the band, and the neck check cuts an exempt head whose own
+neck would print in mid-air.
 
 The floating pass runs on every pass that measures itself, and the scaffold
 always does, since it forces miniature contacts on. Under Scaffold the pass
@@ -390,10 +412,14 @@ cases. They cover the style and its keys in the config, the island map, the
 result row, the pad's densities and the wall-only base on a shelf fixture with
 nothing floating and no tip beside the column's wall, cancellation during the
 build, rings printing as base without interface layers, a tip with no route
-being dropped and counted, a head whose neck the band cuts on a slope beside
-a wall being dropped with no ring left floating and no bare planned layer
-left, interior tip thinning, the hold floor restoring contacts under tall
-islands and capped by what a birth piece fits, a tip seeded under an unseeded
+being dropped and counted, a plank off a column's face whose underside slopes
+down away from it, where a plank 2 mm long at 0.2 mm layers keeps all 9 tips
+and one 4 mm long at 0.06 mm layers drops the two tips 0.6 and 1.3 mm off the
+column face, whose necks bottom in the band, with no ring left floating, no
+bare planned layer left and base in the band only under a ring, a head under
+a sheet thinner than its pin leaving nothing floating over the sheet,
+interior tip thinning, the hold floor restoring contacts under tall islands
+and capped by what a birth piece fits, a tip seeded under an unseeded
 feature start with its ring on the layer its z tops and none under debris or
 under a sliver the wall beside it holds, a sliver joining too high for its
 wall counted under-held, braces on slender pillars, pillars widening toward
@@ -410,8 +436,6 @@ directory holding `elf_test.3mf`. It slices plate 3's object under tree slim
 and tree scaffold, first in the stored pose and then upright, times each
 `Print::process()` and one `island_joins` call, writes one row per slice, and
 requires of each scaffold slice: dropped tips at most a fifth of those placed,
-no floating piece removed, a process time at most 1.75 times the tree-slim
-slice's in the stored pose, whose painted enforcers add tips beside the walls,
-and 1.5 times upright, `island_joins` within 2 s and a support volume at most
-2.5 times the tree-slim slice's; the upright pose also requires no under-held
-island.
+no floating piece removed, a process time at most 1.5 times the tree-slim
+slice's, `island_joins` within 2 s and a support volume at most 2.5 times the
+tree-slim slice's; the upright pose also requires no under-held island.
