@@ -396,6 +396,27 @@ TriangleMesh slope_fixture(double length_mm)
     return column;
 }
 
+// A 6 x 6 x 14 mm column at x 0..6, y 0..6 carrying off its +x face a 6 x 6 mm sheet 0.1 mm thick at x 6..12,
+// z 8..8.1, and off its -x face two 2 x 2.5 x 1 mm bars at x -2..0, one at y 0..2.5 from z 8.12, one at y 3.5..6 from
+// z 8.18. At 0.06 mm layers over a 0.2 mm first layer each underside tops an object layer, and a scaffold contact,
+// which has no top gap, bounds a planned layer at its z: the bars plan a support layer at z 8.12..8.18, over the sheet
+// but under the 0.22 mm a head's pin reaches over its tip, so there the pin of a head under the sheet comes out above
+// the sheet with no sheet in that layer's band.
+TriangleMesh thin_sheet_fixture()
+{
+    TriangleMesh column = make_cube(6., 6., 14.);
+    TriangleMesh sheet  = make_cube(6., 6., 0.1);
+    sheet.translate(6.f, 0.f, 8.f);
+    TriangleMesh low_bar = make_cube(2., 2.5, 1.);
+    low_bar.translate(-2.f, 0.f, 8.12f);
+    TriangleMesh high_bar = make_cube(2., 2.5, 1.);
+    high_bar.translate(-2.f, 3.5f, 8.18f);
+    column.merge(sheet);
+    column.merge(low_bar);
+    column.merge(high_bar);
+    return column;
+}
+
 // A JSON config written to the OS temp directory and removed when the guard leaves scope.
 struct ScratchJson
 {
@@ -871,6 +892,30 @@ TEST_CASE("A head whose neck bottoms in the xy band is dropped while one whose n
         INFO("support layer at print_z " << sl->print_z);
         CHECK(diff_ex(in_band, reach_at(reaches, sl->print_z, reach_z)).empty());
     }
+}
+
+TEST_CASE("A head under a sheet thinner than its pin leaves nothing floating over the sheet", "[ScaffoldSupport]")
+{
+    // The builder sinks each head's pin into the model over its tip. Over a sheet thinner than that reach the pin comes
+    // out on the sheet's top face, where no support stands under it, so the cage prints no head over its rings.
+    Print print;
+    init_and_process_print({ thin_sheet_fixture() }, print,
+                           scaffold_config({ { "support_line_width", "0.22" },
+                                             { "support_object_xy_distance", "0.5" },
+                                             { "layer_height", "0.06" },
+                                             { "min_layer_height", "0.04" },
+                                             { "support_top_z_distance", "0.06" },
+                                             { "support_bottom_z_distance", "0" },
+                                             { "support_interface_top_layers", "2" } }));
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    REQUIRE(object.support_analysis() != nullptr);
+    const SupportAnalysis::Report &report = *object.support_analysis();
+    INFO("tips placed " << report.tips_placed << " routed " << report.tips_routed << " dropped " << report.tips_dropped
+                        << " floating removed " << report.floating_pieces_removed);
+    CHECK(report.tips_routed > 0);
+    CHECK(report.tips_placed == report.tips_routed + report.tips_dropped);
+    CHECK(report.floating_pieces_removed == 0);
 }
 
 TEST_CASE("A painted enforcer beside a wall fuses its tip where the paint asks", "[ScaffoldSupport]")

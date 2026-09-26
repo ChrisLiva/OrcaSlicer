@@ -407,13 +407,16 @@ void taper_pillars(sla::SupportTreeBuilder &builder, size_t built, const Params 
     }
 }
 
-// A build's slices: the cage through each planned layer's middle, each routed head's own head through the tops of
-// its ring layers, `first` the lowest, and every ringed or enforced head's own head, its neck, through the middles
-// of the layers it reaches under its rings, `neck_first` the lowest. A neck prints outside the model alone once
-// `exempt`: an enforced tip's from the start, another head's once the neck check cut it and its lowest slice clears
-// the band. A head whose lowest neck slice meets the band keeps no neck. The rings are indexed as the build's heads,
-// whose ids index `tip_of`, then as the posts, whose rings are the post's disc on the layers a head's rings would take;
-// a post has no neck.
+// A build's slices: the cage through each planned layer's middle less every ringed or enforced head's own head over
+// its rings, each routed head's own head through the tops of its ring layers, `first` the lowest, and every ringed or
+// enforced head's own head, its neck, through the middles of the layers it reaches under its rings, `neck_first` the
+// lowest. A head over its rings is its pin, which the builder sinks into the model over the tip by the penetration:
+// where the model is thinner than that, the pin comes out on the model's top face with nothing under it, a floating
+// piece that holds no ring, walls no hole and is no neck. A neck prints outside the model alone once `exempt`: an
+// enforced tip's from the start, another head's once the neck check cut it and its lowest slice clears the band. A
+// head whose lowest neck slice meets the band keeps no neck. The rings are indexed as the build's heads, whose ids
+// index `tip_of`, then as the posts, whose rings are the post's disc on the layers a head's rings would take; a post
+// has no neck.
 struct Rings { size_t first = 0; std::vector<ExPolygons> slices; size_t neck_first = 0; std::vector<ExPolygons> neck;
                bool exempt = false; };
 
@@ -588,6 +591,8 @@ void DrawContext::slice_build(const sla::SupportTreeBuilder &builder, const std:
     cage = merged.indices.empty() ? std::vector<ExPolygons>() : slice_mesh_ex(merged, middles, 0.f, throw_on_cancel);
     cage.resize(layer_heights.size());
     const std::vector<sla::Head> &heads = builder.heads();
+    // Each ringed or enforced head's slices over its rings, as (the lowest layer, the slices).
+    std::vector<std::pair<size_t, std::vector<ExPolygons>>> pins(heads.size());
     rings.assign(heads.size() + posts.size(), Rings());
     for (size_t j = 0; j < posts.size(); ++ j) {
         const size_t above = layers_under_tip(pts[posts[j]].pos.z());
@@ -595,10 +600,6 @@ void DrawContext::slice_build(const sla::SupportTreeBuilder &builder, const std:
         r.first            = above - std::min(above, params.interface_layers);
         r.slices.assign(above - r.first, post_disc(pts[posts[j]]));
     }
-    tbb::parallel_for(tbb::blocked_range<size_t>(0, layer_heights.size()), [&](const tbb::blocked_range<size_t> &range) {
-        for (size_t i = range.begin(); i < range.end(); ++ i)
-            cage[i] = union_ex(cage[i]);
-    });
     tbb::parallel_for(tbb::blocked_range<size_t>(0, heads.size()), [&](const tbb::blocked_range<size_t> &range) {
         for (size_t h = range.begin(); h < range.end(); ++ h) {
             if (! heads[h].is_valid())
@@ -617,8 +618,12 @@ void DrawContext::slice_build(const sla::SupportTreeBuilder &builder, const std:
                     zs.push_back(float(layer_heights[i].print_z - params.z_offset_mm));
                 rings[h].slices = slice_mesh_ex(head, zs, 0.f);
             }
-            const float bottom = std::min_element(head.vertices.begin(), head.vertices.end(),
-                                                  [](const Vec3f &a, const Vec3f &b) { return a.z() < b.z(); })->z();
+            const auto [low, high] = std::minmax_element(head.vertices.begin(), head.vertices.end(),
+                                                         [](const Vec3f &a, const Vec3f &b) { return a.z() < b.z(); });
+            const float  bottom    = low->z();
+            const size_t over      = size_t(std::lower_bound(middles.begin(), middles.end(), high->z()) - middles.begin());
+            if (over > above)
+                pins[h] = { above, slice_mesh_ex(head, std::vector<float>(middles.begin() + above, middles.begin() + over), 0.f) };
             rings[h].neck_first = std::min(size_t(std::lower_bound(middles.begin(), middles.end(), bottom) - middles.begin()),
                                            rings[h].first);
             if (rings[h].neck_first < rings[h].first)
@@ -628,6 +633,14 @@ void DrawContext::slice_build(const sla::SupportTreeBuilder &builder, const std:
             if (! enforced && ! rings[h].neck.empty() && ! intersection_ex(rings[h].neck.front(), clips[rings[h].neck_first].band).empty())
                 rings[h].neck.clear();
         }
+    });
+    std::vector<ExPolygons> over_rings(layer_heights.size());
+    for (const auto &[lowest, slices] : pins)
+        for (size_t k = 0; k < slices.size(); ++ k)
+            append(over_rings[lowest + k], slices[k]);
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, layer_heights.size()), [&](const tbb::blocked_range<size_t> &range) {
+        for (size_t i = range.begin(); i < range.end(); ++ i)
+            cage[i] = over_rings[i].empty() ? union_ex(cage[i]) : diff_ex(union_ex(cage[i]), over_rings[i]);
     });
 }
 
