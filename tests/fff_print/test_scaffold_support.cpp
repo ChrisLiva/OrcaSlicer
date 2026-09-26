@@ -1344,7 +1344,7 @@ TEST_CASE("Scaffold support over corpus plate 3 in two poses", "[ScaffoldSupport
     SupportValidation::ManifestCase c;
     c.id            = "plate3";
     c.model         = "elf_test.3mf";
-    c.sha256        = "0252d6ebf9fa9ff0fc006404920cd41d17a2d1b3b51f6b3a08049b35fd627ed7";
+    c.sha256        = "201c541805e94a2914c3cf0a0aebaee68ee3f6199cc096ae36993069fc781ba6";
     c.selectors     = { "name:10_Dark Elves 3_test.stl" };
     c.styles        = { "tree_slim", "tree_scaffold" };
     c.feature_modes = { "on" };
@@ -1420,9 +1420,7 @@ TEST_CASE("Scaffold support over corpus plate 3 in two poses", "[ScaffoldSupport
             REQUIRE(scaffold.metrics.floating_pieces_removed == 0);
         }
         {
-            // The stored pose carries plate 3's painted enforcers, whose tips fuse beside the walls and cost about
-            // 1.5 times tree slim on their own, so it gets the wider budget.
-            const double wall_cap = pose == "stored" ? 1.75 : 1.5;
+            const double wall_cap = 1.5;
             INFO("process wall " << scaffold.elapsed_s << " s against tree slim " << slim.elapsed_s << " s, cap " << wall_cap << "x");
             REQUIRE(scaffold.elapsed_s <= wall_cap * slim.elapsed_s);
         }
