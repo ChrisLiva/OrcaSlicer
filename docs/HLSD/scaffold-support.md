@@ -413,7 +413,7 @@ result row, the pad's densities and the wall-only base on a shelf fixture with
 nothing floating and no tip beside the column's wall, cancellation during the
 build, rings printing as base without interface layers, a tip with no route
 being dropped and counted, a plank off a column's face whose underside slopes
-down away from it, where a plank 2 mm long at 0.2 mm layers keeps all 9 tips
+down away from it, where a plank 2 mm long at 0.2 mm layers keeps every tip
 and one 4 mm long at 0.06 mm layers drops the two tips 0.6 and 1.3 mm off the
 column face, whose necks bottom in the band, with no ring left floating, no
 bare planned layer left and base in the band only under a ring, a head under

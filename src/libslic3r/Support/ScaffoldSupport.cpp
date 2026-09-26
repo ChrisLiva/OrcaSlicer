@@ -1051,8 +1051,9 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
     // ring. The points keep their order, so a head's id is its index among the points left. With no interface layer
     // there is no ring to strand, but an enforced head still prints its neck up to the tip outside the band, so the
     // check runs while any tip is enforced and one run stands only when none is. Each run builds and slices the whole
-    // cage, 2.5 to 3 s on plate 3 of the corpus, whose runs cut 12 heads and then none: six runs leave spares, and the
-    // heads the sixth still cuts are dropped without another run, their rings left out of the output.
+    // cage, 2.5 to 3 s on plate 3 of the corpus, whose runs cut 12 heads and then none. Plate 4 takes four runs, so
+    // six leave two spare, and the heads the sixth still cuts are dropped without another run, their rings left out of
+    // the output.
     constexpr size_t max_builds = 6;
     const bool       check      = params.interface_layers > 0 ||
                                   std::any_of(nodes.begin(), nodes.end(), [](const TipSite &tip) { return tip.enforced; });

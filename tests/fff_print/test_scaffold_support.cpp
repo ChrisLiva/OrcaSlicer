@@ -916,6 +916,13 @@ TEST_CASE("A head under a sheet thinner than its pin leaves nothing floating ove
     CHECK(report.tips_routed > 0);
     CHECK(report.tips_placed == report.tips_routed + report.tips_dropped);
     CHECK(report.floating_pieces_removed == 0);
+
+    // The bars route tips of their own, so the sheet's own heads are read off the rings under it.
+    const auto   layers = object.support_layers();
+    const size_t top    = top_layer_under(layers, 8.);
+    REQUIRE(top != size_t(-1));
+    const FixtureBox under_sheet { get_extents(object.layers().front()->lslices).min, 6.5, 0., 12., 6. };
+    CHECK_FALSE(intersection_ex(role_footprint(*layers[top], erSupportMaterialInterface), ExPolygons{ ExPolygon(under_sheet.polygon()) }).empty());
 }
 
 TEST_CASE("A painted enforcer beside a wall fuses its tip where the paint asks", "[ScaffoldSupport]")
