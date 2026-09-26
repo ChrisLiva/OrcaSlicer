@@ -408,14 +408,18 @@ void taper_pillars(sla::SupportTreeBuilder &builder, size_t built, const Params 
 }
 
 // A build's slices: the cage through each planned layer's middle, each routed head's own head through the tops of
-// its ring layers, `first` the lowest, and an enforced tip's own head through the middles of the layers it reaches
-// under its rings, `neck_first` the lowest. The rings are indexed as the build's heads, whose ids index `tip_of`,
-// then as the posts, whose rings are the post's disc on the layers a head's rings would take.
-struct Rings { size_t first = 0; std::vector<ExPolygons> slices; size_t neck_first = 0; std::vector<ExPolygons> neck; };
+// its ring layers, `first` the lowest, and every ringed or enforced head's own head, its neck, through the middles
+// of the layers it reaches under its rings, `neck_first` the lowest. A neck prints outside the model alone once
+// `exempt`: an enforced tip's from the start, another head's once the neck check cut it and its lowest slice clears
+// the band. A head whose lowest neck slice meets the band keeps no neck. The rings are indexed as the build's heads,
+// whose ids index `tip_of`, then as the posts, whose rings are the post's disc on the layers a head's rings would take;
+// a post has no neck.
+struct Rings { size_t first = 0; std::vector<ExPolygons> slices; size_t neck_first = 0; std::vector<ExPolygons> neck;
+               bool exempt = false; };
 
 // What became of each tip. A head the builder kept carries its point's index as its id; one it gave up on
 // lost the id and is found by the position it was built at; a point with no head was filtered out. A head
-// whose rings, or enforced neck, would float is cut: `Unrouted` where the builder left it with no pillar and no
+// whose rings, or exempt neck, would float is cut: `Unrouted` where the builder left it with no pillar and no
 // bridge, which a side head whose ground pillar fails keeps, else `Neck`.
 enum class Tip : uint8_t { Filtered, Unrouted, Neck, Routed };
 std::vector<Tip> outcomes(const sla::SupportTreeBuilder &builder, const sla::SupportPoints &pts)
@@ -522,6 +526,8 @@ struct DrawContext
     std::vector<ExPolygons> exempt_heads(const std::vector<Rings> &rings) const;
     std::vector<char>       find_stranded(std::vector<ExPolygons> &cage, const std::vector<Rings> &rings,
                                           const std::vector<ExPolygons> &exempt) const;
+    std::vector<char>       check_necks(const sla::SupportTreeBuilder &builder, std::vector<ExPolygons> &cage,
+                                        std::vector<Rings> &rings) const;
     std::pair<ExPolygons, ExPolygons> seam_areas(const ExPolygons &section, const ExPolygons &exempt, const ExPolygons &interface_,
                                                  size_t i) const;
     SupportAnalysis::Slab   seam_slab(size_t i, const ExPolygons &base_i, const ExPolygons &rings_i, double ground) const;
@@ -611,26 +617,28 @@ void DrawContext::slice_build(const sla::SupportTreeBuilder &builder, const std:
                     zs.push_back(float(layer_heights[i].print_z - params.z_offset_mm));
                 rings[h].slices = slice_mesh_ex(head, zs, 0.f);
             }
-            if (enforced) {
-                const float bottom = std::min_element(head.vertices.begin(), head.vertices.end(),
-                                                      [](const Vec3f &a, const Vec3f &b) { return a.z() < b.z(); })->z();
-                rings[h].neck_first = std::min(size_t(std::lower_bound(middles.begin(), middles.end(), bottom) - middles.begin()),
-                                               rings[h].first);
-                if (rings[h].neck_first < rings[h].first)
-                    rings[h].neck = slice_mesh_ex(head, std::vector<float>(middles.begin() + rings[h].neck_first,
-                                                                           middles.begin() + rings[h].first), 0.f);
-            }
+            const float bottom = std::min_element(head.vertices.begin(), head.vertices.end(),
+                                                  [](const Vec3f &a, const Vec3f &b) { return a.z() < b.z(); })->z();
+            rings[h].neck_first = std::min(size_t(std::lower_bound(middles.begin(), middles.end(), bottom) - middles.begin()),
+                                           rings[h].first);
+            if (rings[h].neck_first < rings[h].first)
+                rings[h].neck = slice_mesh_ex(head, std::vector<float>(middles.begin() + rings[h].neck_first,
+                                                                       middles.begin() + rings[h].first), 0.f);
+            rings[h].exempt = enforced;
+            if (! enforced && ! rings[h].neck.empty() && ! intersection_ex(rings[h].neck.front(), clips[rings[h].neck_first].band).empty())
+                rings[h].neck.clear();
         }
     });
 }
 
-// The heads exempt from the band's slices per planned layer, today the enforced heads.
+// The exempt heads' slices per planned layer: the enforced tips' heads and the heads the neck check exempted.
 std::vector<ExPolygons> DrawContext::exempt_heads(const std::vector<Rings> &rings) const
 {
     std::vector<ExPolygons> out(layer_heights.size());
     for (const Rings &r : rings)
-        for (size_t k = 0; k < r.neck.size(); ++ k)
-            append(out[r.neck_first + k], r.neck[k]);
+        if (r.exempt)
+            for (size_t k = 0; k < r.neck.size(); ++ k)
+                append(out[r.neck_first + k], r.neck[k]);
     return out;
 }
 
@@ -650,10 +658,10 @@ std::vector<ExPolygons> DrawContext::exempt_heads(const std::vector<Rings> &ring
 // A head is cut where one of its rings lies in a floating piece. A floating piece that holds no ring and is the
 // wall of a hole in the cage's section stands over the unprinted inside of the section below: a gap among fused
 // necks 2 mm across or wider keeps its hole while the same gap narrower on the layers around it is filled. That
-// hole is filled too, which removes the wall and nothing a rooted piece stands on. An enforced head is cut where
+// hole is filled too, which removes the wall and nothing a rooted piece stands on. An exempt head is cut where
 // its own neck under its rings lies in a floating piece that holds no ring and walls no hole the fill removes: the
-// head runs through the model or narrows under a line there, so the neck the enforcer exempts from the band would
-// print in mid-air.
+// head runs through the model or narrows under a line there, so the neck exempt from the band would print in
+// mid-air.
 std::vector<char> DrawContext::find_stranded(std::vector<ExPolygons> &cage, const std::vector<Rings> &rings,
                                              const std::vector<ExPolygons> &exempt) const
 {
@@ -692,6 +700,28 @@ std::vector<char> DrawContext::find_stranded(std::vector<ExPolygons> &cage, cons
     const std::vector<std::vector<char>> walls = hole_walls(cage, interface_, exempt, adrift, ringed);
     neck_adrift(rings, adrift, ringed, walls, cut);
     return cut;
+}
+
+// The heads whose rings or exempt neck would float, after the neck exemption. A head the check cuts for its neck
+// whose lowest neck slice clears the band, one that kept its `neck`, takes the exemption: its neck prints outside the
+// model alone, and the same build is checked again, which cuts it only where its rings or its own neck still float.
+// A head the check never cuts keeps its neck clipped by the band. `find_stranded` erases the holes it fills from
+// `cage`, so the second check runs on a copy of the cage as sliced.
+std::vector<char> DrawContext::check_necks(const sla::SupportTreeBuilder &builder, std::vector<ExPolygons> &cage,
+                                           std::vector<Rings> &rings) const
+{
+    std::vector<ExPolygons> sliced = cage;
+    std::vector<char>       cut    = find_stranded(cage, rings, exempt_heads(rings));
+    bool                    exempted = false;
+    for (size_t h = 0; h < builder.heads().size(); ++ h)
+        if (cut[h] && cut_reason(builder, h) == Tip::Neck && ! rings[h].neck.empty() && ! rings[h].exempt) {
+            rings[h].exempt = true;
+            exempted        = true;
+        }
+    if (! exempted)
+        return cut;
+    cage = std::move(sliced);
+    return find_stranded(cage, rings, exempt_heads(rings));
 }
 
 // The base and the rings the seam lays on the planned layer `i` above the pad, with their small holes filled.
@@ -758,7 +788,7 @@ std::vector<std::vector<std::pair<size_t, size_t>>> DrawContext::ring_holds(cons
 }
 
 // Which floating pieces that hold no ring wall a hole in the cage's section, whose holes this erases from `cage`.
-// On a layer with an enforced head the band or the model can cut a filled hole out of the printed base again,
+// On a layer with an exempt head the band or the model can cut a filled hole out of the printed base again,
 // and the wall around it stays in mid-air: there a piece counts as a hole's wall only when the base the seam
 // prints after the fill borders no hole at the piece.
 std::vector<std::vector<char>> DrawContext::hole_walls(std::vector<ExPolygons> &cage, const std::vector<ExPolygons> &interface_,
@@ -804,14 +834,14 @@ std::vector<std::vector<char>> DrawContext::hole_walls(std::vector<ExPolygons> &
     return walls;
 }
 
-// The enforced heads whose own neck lies in a floating piece that holds no ring and walls no hole.
+// The exempt heads whose own neck lies in a floating piece that holds no ring and walls no hole.
 void DrawContext::neck_adrift(const std::vector<Rings> &rings, const Adrift &adrift, const std::vector<std::vector<char>> &ringed,
                               const std::vector<std::vector<char>> &walls, std::vector<char> &cut) const
 {
     const size_t lowest = pad_layers;
     tbb::parallel_for(tbb::blocked_range<size_t>(0, rings.size()), [&](const tbb::blocked_range<size_t> &range) {
         for (size_t h = range.begin(); h < range.end(); ++ h)
-            for (size_t k = 0; k < rings[h].neck.size() && ! cut[h]; ++ k) {
+            for (size_t k = 0; k < rings[h].neck.size() && rings[h].exempt && ! cut[h]; ++ k) {
                 if (rings[h].neck_first + k < lowest || rings[h].neck[k].empty())
                     continue;
                 const size_t      s   = rings[h].neck_first + k - lowest;
@@ -842,8 +872,8 @@ void DrawContext::write_output(sla::SupportTreeBuilder &builder, std::vector<ExP
     out.stage_ms.build = build_ms + ms_since(pad_start);
 
     // The last build's slices are the output: each planned layer is the cage's and the pad's section through the
-    // layer's middle, each routed head's rings print as interface, and the heads exempt from the band under their
-    // rings go out apart for `clip_base`.
+    // layer's middle, each routed head's rings print as interface, and the exempt heads under their rings go out
+    // apart for `clip_base`.
     const auto output_start = std::chrono::steady_clock::now();
     if (! pad_mesh.indices.empty()) {
         const float  pad_top = std::max_element(pad_mesh.vertices.begin(), pad_mesh.vertices.end(),
@@ -890,11 +920,11 @@ Tips choose_tips(const PrintObject &object, const std::vector<std::vector<Suppor
 
     // A tip whose centre stands within the xy distance of the model at its neck's bottom is skipped, and so is a
     // dropped contact the hold floor could restore there: the seam clips support inside that band, so the neck
-    // would be cut while its ring survived. Under a slope the head tilts along the underside's normal and the
-    // slope recedes at least its rise by that depth, so the neck clears the band; beside a wall it does not, and
-    // the wall anchors that band as it does under the legacy tree. A neck bottoming under the first layer stands
-    // by the pad and is kept, and so is an enforced tip: the enforcer asked for it there, and `clip_base` keeps its
-    // head out of the model alone.
+    // would be cut while its ring survived, and the wall anchors that band as it does under the legacy tree. The
+    // skip reads the tip's centre at the depth of the neck's bottom, not the built neck: under a slope the head
+    // tilts along the underside's normal, and the neck check exempts a cut head whose tilted neck bottoms outside
+    // the band. A neck bottoming under the first layer stands by the pad and is kept, and so is an enforced tip:
+    // the enforcer asked for it there, and `clip_base` keeps its head out of the model alone.
     const double neck_depth_mm = head_width_mm + params.toolpath_width_mm;
     std::vector<TipSite> spare;
     for (const SupportNode *node : dropped)
@@ -1008,8 +1038,8 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
     // ring. The points keep their order, so a head's id is its index among the points left. With no interface layer
     // there is no ring to strand, but an enforced head still prints its neck up to the tip outside the band, so the
     // check runs while any tip is enforced and one run stands only when none is. Each run builds and slices the whole
-    // cage, 2.5 to 3 s on plate 3 of the corpus, whose runs cut about 90, 10, 3, 2 and then no head: six runs leave one
-    // spare, and the heads the sixth still cuts are dropped without another run, their rings left out of the output.
+    // cage, 2.5 to 3 s on plate 3 of the corpus, whose runs cut 12 heads and then none: six runs leave spares, and the
+    // heads the sixth still cuts are dropped without another run, their rings left out of the output.
     constexpr size_t max_builds = 6;
     const bool       check      = params.interface_layers > 0 ||
                                   std::any_of(nodes.begin(), nodes.end(), [](const TipSite &tip) { return tip.enforced; });
@@ -1033,7 +1063,7 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
         build_ms += ms_since(run_start);
         const auto slice_start = std::chrono::steady_clock::now();
         ctx.slice_build(*builder, index_of, left, posted, cage, rings);
-        cut = check ? ctx.find_stranded(cage, rings, ctx.exempt_heads(rings)) : std::vector<char>(rings.size(), 0);
+        cut = check ? ctx.check_necks(*builder, cage, rings) : std::vector<char>(rings.size(), 0);
         out.stage_ms.slice += ms_since(slice_start);
         const size_t cut_count = size_t(std::count(cut.begin(), cut.end(), char(1)));
         BOOST_LOG_TRIVIAL(debug) << "scaffold build " << run << ": " << left.size() << " points, " << cut_count << " heads cut";

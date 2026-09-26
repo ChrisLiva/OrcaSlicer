@@ -814,16 +814,19 @@ TEST_CASE("A tip with no path to the pad is dropped and counted", "[ScaffoldSupp
     CHECK(report.floating_pieces_removed == 0);
 }
 
-TEST_CASE("A routed head whose neck the xy band would cut is dropped and no ring floats", "[ScaffoldSupport]")
+TEST_CASE("A head whose neck bottoms in the xy band is dropped while one whose neck clears it keeps its head and no ring floats",
+          "[ScaffoldSupport]")
 {
     // At the corpus's 0.22 mm support line and 0.5 mm xy distance a small-grade neck, 0.44 mm across under its pin, fits
-    // wholly inside the column's band. The seam clips base by that band and the rings by the model alone, so a head
-    // whose neck crosses the band keeps its rings over nothing; such a head is dropped and the cage is built without it.
+    // wholly inside the column's band. A head's neck under its rings is clipped by that band. When that leaves a ring over
+    // nothing and the neck's lowest slice clears the band, the neck is clipped by the model alone and the head stays; a
+    // head whose neck bottoms in the column's band is dropped and the cage is built without it. On the 2 mm plank every
+    // tip keeps its head; on the 4 mm plank the two tips nearest the column face, 0.6 and 1.3 mm off it, are dropped.
     // The 4 mm plank at the corpus's 0.06 mm layers and two interface layers adds rings whose printed loop stops short
     // of a neighbour the drawn ring touches, and base whose printed walls leave its inside and its slivers bare: the
     // drop reads the rings and the base as their lines cover them.
-    const auto [length_mm, layer_height, interface_layers] =
-        GENERATE(table<double, std::string, std::string>({ { 2., "0.2", "3" }, { 4., "0.06", "2" } }));
+    const auto [length_mm, layer_height, interface_layers, min_dropped, max_dropped] = GENERATE(
+        table<double, std::string, std::string, size_t, size_t>({ { 2., "0.2", "3", 0, 0 }, { 4., "0.06", "2", 1, 2 } }));
     Print print;
     init_and_process_print({ slope_fixture(length_mm) }, print,
                            scaffold_config({ { "support_line_width", "0.22" },
@@ -837,16 +840,36 @@ TEST_CASE("A routed head whose neck the xy band would cut is dropped and no ring
     INFO("plank " << length_mm << " mm at " << layer_height << " mm layers: tips placed " << report.tips_placed << " routed "
                   << report.tips_routed << " dropped " << report.tips_dropped << " floating removed " << report.floating_pieces_removed);
     CHECK(report.floating_pieces_removed == 0);
-    CHECK(report.tips_dropped >= 1);
+    CHECK(report.tips_dropped >= min_dropped);
+    CHECK(report.tips_dropped <= max_dropped);
     CHECK(report.tips_routed > 0);
     CHECK(report.tips_placed == report.tips_routed + report.tips_dropped);
 
     // The contacts nearest the column plan layers that carry no area once the wall skip and the neck check have taken
     // their tips out. Such a layer is zeroed and erased, so every support layer left has a height and an area.
-    for (const SupportLayer *sl : object.support_layers()) {
+    const auto layers = object.support_layers();
+    for (const SupportLayer *sl : layers) {
         INFO("support layer at print_z " << sl->print_z);
         CHECK(sl->height > 0.);
         CHECK(sl->base_areas.size() + sl->tree_roof_1st_layer().size() > 0);
+    }
+
+    // Base inside the band stands only under a ring: within `reach_xy` in x and in y of a ring's centroid, on the layers
+    // at most `reach_z` under it. So a neck clipped by the model alone enters the band and a pillar or a bridge never does.
+    // The rings print as interface on both rows.
+    const double       reach_xy = 1.5, reach_z = 2.5;
+    const coord_t      r = scale_(reach_xy);
+    std::vector<Reach> reaches;
+    for (const SupportLayer *sl : layers)
+        for (const ExPolygon &ring : role_footprint(*sl, erSupportMaterialInterface)) {
+            const Point c = ring.contour.centroid();
+            reaches.push_back({ BoundingBox(c - Point(r, r), c + Point(r, r)).polygon(), sl->print_z });
+        }
+    for (const SupportLayer *sl : layers) {
+        const ExPolygons in_band =
+            intersection_ex(role_footprint(*sl, erSupportMaterial), offset_ex(union_ex(model_over(object, *sl)), scale_(0.5 - 0.02)));
+        INFO("support layer at print_z " << sl->print_z);
+        CHECK(diff_ex(in_band, reach_at(reaches, sl->print_z, reach_z)).empty());
     }
 }
 
