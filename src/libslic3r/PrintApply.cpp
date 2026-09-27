@@ -1702,8 +1702,13 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 model_object.scaffold_points_status   = model_object_new.scaffold_points_status;
                 model_object.scaffold_points_pose     = model_object_new.scaffold_points_pose;
                 model_object.scaffold_points_mesh_box = model_object_new.scaffold_points_mesh_box;
-                for (const PrintObjectStatus &print_object_status : print_objects_range)
-                    update_apply_status(print_object_status.print_object->invalidate_step(posSupportMaterial));
+                // The list is chosen from the contacts an auto pass placed on the object, which the edit leaves as they were.
+                for (const PrintObjectStatus &print_object_status : print_objects_range) {
+                    PrintObject *object     = print_object_status.print_object;
+                    const auto   candidates = object->scaffold_candidates();
+                    update_apply_status(object->invalidate_step(posSupportMaterial));
+                    object->set_scaffold_candidates(candidates);
+                }
             }
         }
         if (! solid_or_modifier_differ) {

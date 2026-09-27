@@ -13,6 +13,7 @@ namespace Slic3r {
 
 class ModelInstance;
 class PrintObject;
+namespace ScaffoldSupport { struct Candidates; }
 
 namespace GUI {
 
@@ -85,8 +86,17 @@ private:
     void  toggle_head_size();
     // Writes the editing cache into the selected object through write_points.
     void  apply_changes();
-    // Writes `points` into `mo` as a user-modified list in the pose `instance` holds, and slices the instance's plate.
-    void  write_points(ModelObject &mo, const ModelInstance &instance, ScaffoldPoints points);
+    // Writes `points` into `mo` as a list in the pose `instance` holds, and slices the instance's plate.
+    void  write_points(ModelObject &mo, const ModelInstance &instance, ScaffoldPoints points, ScaffoldPointsStatus status);
+    // The status a list of the editing cache's points takes: generated when they are the density slider's last result,
+    // user-modified otherwise.
+    ScaffoldPointsStatus cache_status() const;
+    // The contacts the last auto slice of the selected object placed, while its slice is done, or none.
+    std::shared_ptr<const ScaffoldSupport::Candidates> density_candidates() const;
+    // Replaces the editing cache with the points the candidates give at m_density.
+    void  retune();
+    // Whether the editing cache holds edits made by hand: it differs from both the object's list and the slider's result.
+    bool  has_hand_edits(const ModelObject *mo) const;
     // Clears the list so that the next slice places its contact points automatically.
     void  revert_to_auto();
     // Replaces the list with the tips the last auto slice routed, slicing the plate first when it holds no such slice.
@@ -120,6 +130,13 @@ private:
     bool               m_generate_pending = false;
     wxString           m_generate_failure; // why the last Generate wrote no points
     std::vector<Vec3f> m_bare_islands;     // raw-mesh frame, from the last finished slice
+
+    // The density slider: 0 Light, 1 Medium, 2 Heavy. The grades belong to m_density_candidates and grow as the slider
+    // grades new tips; m_density_points is the slider's last result, unset once the cache reloads from the object.
+    float                                              m_density = 1.f;
+    std::shared_ptr<const ScaffoldSupport::Candidates> m_density_candidates;
+    std::vector<double>                                m_density_grades;
+    std::optional<ScaffoldPoints>                      m_density_points;
 
     ScaffoldHeadSize        m_new_point_size = ScaffoldHeadSize::Light;
     std::vector<CacheEntry> m_editing_cache;

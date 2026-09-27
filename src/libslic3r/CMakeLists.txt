@@ -473,6 +473,7 @@ set(lisbslic3r_sources
     Support/SupportComponents.hpp
     Support/ScaffoldSupport.cpp
     Support/ScaffoldSupport.hpp
+    Support/ScaffoldRetune.hpp
     Support/SupportLayer.hpp
     Support/SupportMaterial.cpp
     Support/SupportMaterial.hpp

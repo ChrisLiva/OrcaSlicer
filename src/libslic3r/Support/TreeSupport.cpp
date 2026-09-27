@@ -1945,9 +1945,11 @@ void TreeSupport::generate()
     if (m_analyze && ! baked)
         build_required_regions();
     // The thinning distance the contact pass runs under, and the distance the measurement carries a
-    // cell over: nothing at all unless the miniature contact mode asked for it. A Heavy scaffold halves it.
-    const double density_scale        = m_scaffold && m_object_config->scaffold_density == sdHeavy ? 0.5 : 1.;
-    m_problem.contact_min_distance_mm = miniature_contacts ? density_scale * m_object_config->support_contact_min_distance.value : 0.;
+    // cell over: nothing at all unless the miniature contact mode asked for it. A scaffold takes it from its density.
+    const double contact_min_distance = m_object_config->support_contact_min_distance.value;
+    const double density              = ScaffoldSupport::tier_density(m_object_config->scaffold_density);
+    const ScaffoldSupport::DensityDistances distances = ScaffoldSupport::density_distances(contact_min_distance, density);
+    m_problem.contact_min_distance_mm = ! miniature_contacts ? 0. : m_scaffold ? distances.within_mm : contact_min_distance;
     // The model's own weakness under a contact, taken off the object's sliced layers once: the
     // measurement and, where the mode thins them, the contact placement both read it.
     profiler.stage_start(STAGE_RISK_FIELD);
@@ -1983,6 +1985,12 @@ void TreeSupport::generate()
     // is zero unless the miniature contact mode asked for one, and select_contacts relocates contacts
     // even at zero, so the gate stays.
     size_t seeds_kept = m_problem.seeds.size(), seeds_restored = 0, seeds_retained = m_problem.seeds.size();
+    // The seeds' own positions, which the candidates an auto scaffold keeps select from again: the retained seeds
+    // move with their contacts below.
+    std::vector<Point> seed_sources;
+    if (m_scaffold && ! baked)
+        for (const MiniatureSupport::ContactSeed &seed : m_problem.seeds)
+            seed_sources.push_back(seed.position);
     if (! baked && m_problem.contact_min_distance_mm > 0.) {
         // Which contacts this pass keeps: decimated by 3-D distance within an overhang component,
         // then one contact put back per printable region no survivor covers (select_contacts).
@@ -2034,6 +2042,8 @@ void TreeSupport::generate()
     // standing where no contact does prints its top ring right under it as a contact's tip does.
     ScaffoldSupport::Params params;
     ScaffoldSupport::Tips   scaffold_tips;
+    // What an auto slice keeps for the Scaffold Points tool's density slider, published once the measurement is done.
+    std::shared_ptr<ScaffoldSupport::Candidates> candidates;
     std::vector<coordf_t>   tip_tops;
     if (m_scaffold) {
         params.toolpath_width_mm    = toolpath_support_width(m_support_params, *m_print_config, *m_object_config);
@@ -2046,7 +2056,6 @@ void TreeSupport::generate()
                                                2. * params.toolpath_width_mm);
         params.taper                = diameter_angle_scale_factor;
         params.max_bridge_length_mm = m_object_config->max_bridge_length.value;
-        params.tip_spacing_mm       = m_object_config->scaffold_density == sdLight ? m_object_config->support_contact_min_distance.value : 0.;
         params.z_offset_mm          = m_slicing_params.object_print_z_min;
         params.interface_width_mm   = support_material_interface_flow(m_object, float(m_slicing_params.layer_height)).width();
         // The base walls generate_toolpaths lays above the pad, through the same call; a base pattern with infill
@@ -2065,8 +2074,13 @@ void TreeSupport::generate()
             return cover;
         };
         params.interface_layers     = m_support_params.num_top_interface_layers;
-        scaffold_tips = baked ? ScaffoldSupport::baked_tips(*m_object, m_object->model_object()->scaffold_points, params) :
-                                ScaffoldSupport::choose_tips(*m_object, contact_nodes, m_dropped_contacts, params);
+        if (baked)
+            scaffold_tips = ScaffoldSupport::baked_tips(*m_object, m_object->model_object()->scaffold_points, params);
+        else {
+            candidates    = std::make_shared<ScaffoldSupport::Candidates>(
+                ScaffoldSupport::collect_candidates(*m_object, contact_nodes, m_dropped_contacts, params));
+            scaffold_tips = ScaffoldSupport::place_tips(*m_object, candidates->contacts, params, distances.across_mm);
+        }
         for (const ScaffoldSupport::TipSite &tip : scaffold_tips.sites)
             tip_tops.push_back(tip.print_z);
     }
@@ -2140,12 +2154,15 @@ void TreeSupport::generate()
                 record->bare_islands.push_back(raw_of(island.x(), island.y(), island.z()));
         } else
             for (size_t i = 0; i < scaffold_tips.sites.size(); ++ i) {
-                const ScaffoldSupport::TipSite &site = scaffold_tips.sites[i];
-                const Vec2d                     xy   = unscale(site.position);
-                record->tips.push_back({ raw_of(xy.x(), xy.y(), site.print_z),
-                                         out.grades[i] > 3. * params.toolpath_width_mm ? ScaffoldHeadSize::Heavy : ScaffoldHeadSize::Light,
-                                         site.enforced, out.results[i] });
+                const ScaffoldPoint point = ScaffoldSupport::point_of(*m_object, params, scaffold_tips.sites[i], out.grades[i]);
+                record->tips.push_back({ point.pos, point.size, point.enforced, out.results[i] });
             }
+        if (candidates) {
+            candidates->grades.assign(m_problem.seeds.size(), 0.);
+            for (size_t i = 0; i < scaffold_tips.sites.size(); ++ i)
+                if (scaffold_tips.sites[i].seed < candidates->grades.size())
+                    candidates->grades[size_t(scaffold_tips.sites[i].seed)] = out.grades[i];
+        }
         record->pose              = m_object->instances().front().model_instance->get_matrix().linear();
         record->toolpath_width_mm = params.toolpath_width_mm;
         m_object->set_scaffold_record(std::move(record));
@@ -2267,6 +2284,16 @@ void TreeSupport::generate()
         m_object->set_support_analysis(std::make_shared<const SupportAnalysis::Report>(std::move(report)));
     }
     profiler.stage_finish(STAGE_MEASURE);
+
+    if (candidates) {
+        candidates->problem = std::move(m_problem);
+        for (size_t i = 0; i < seed_sources.size(); ++ i)
+            candidates->problem.seeds[i].position = seed_sources[i];
+        candidates->risk                    = std::move(m_risk);
+        candidates->contact_min_distance_mm = contact_min_distance;
+        candidates->density                 = density;
+        m_object->set_scaffold_candidates(std::move(candidates));
+    }
 
     profiler.stage_finish(STAGE_total);
     BOOST_LOG_TRIVIAL(info) << "tree support time " << profiler.report();

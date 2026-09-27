@@ -1634,6 +1634,7 @@ bool PrintObject::invalidate_step(PrintObjectStep step)
         // override, so the posSupportMaterial branch below does not run for a slice invalidation. Drop
         // the pass here too: the geometry it was generated for and measured against is gone.
         this->clear_support_layers();
+        this->set_scaffold_candidates(nullptr);
     } else if (step == posSupportMaterial) {
         invalidated |= this->invalidate_steps({ posSimplifySupportPath });
         invalidated |= m_print->invalidate_steps({ psSkirtBrim });
@@ -1641,6 +1642,7 @@ bool PrintObject::invalidate_step(PrintObjectStep step)
         // The generated pass belongs to this step: it goes when the step does, so nothing reads a
         // support layer, a generator cache or a raft count that the settings no longer produce.
         this->clear_support_layers();
+        this->set_scaffold_candidates(nullptr);
     }
 
     // Wipe tower depends on the ordering of extruders, which in turn depends on everything.
@@ -1661,6 +1663,7 @@ bool PrintObject::invalidate_all_steps()
 	// Then reset some of the depending values.
 	m_slicing_params.valid = false;
     this->clear_support_layers();
+    this->set_scaffold_candidates(nullptr);
 	return result;
 }
 

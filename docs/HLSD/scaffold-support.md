@@ -40,7 +40,7 @@ Four settings belong to the style and show only under it:
   components: plate 1 of the corpus reads 538, with 667 of its 819 kept
   contacts standing within 1 mm of a contact from another component. Heavy
   halves the selection's distance. Light keeps the distance between tips of
-  different components too, in `choose_tips`. A baked list keeps its own points
+  different components too, in `place_tips`. A baked list keeps its own points
   at any density. Plate 1 places 321, 401 and 575 tips at Light, Medium and
   Heavy.
 
@@ -81,8 +81,9 @@ Before `plan_layer_heights`, under Scaffold, the generator fills a
 `ScaffoldSupport::Params` from the object config (toolpath width, pillar
 diameter, `m_ts_data->m_xy_distance`, the two scaffold keys,
 `max_bridge_length`, the interface layer count and the object's print z
-offset) and calls `ScaffoldSupport::choose_tips` on the kept and the dropped
-contacts, or `ScaffoldSupport::baked_tips` on a valid baked list.
+offset). It gathers the kept and the dropped contacts into candidates with
+`ScaffoldSupport::collect_candidates` and calls `ScaffoldSupport::place_tips`
+on them, or `ScaffoldSupport::baked_tips` on a valid baked list.
 `plan_layer_heights` then takes every chosen tip's z as a layer top
 besides the contacts' own, so a tip the hold floor seeded or restored where no
 contact stands prints its top ring on the layer right under it, not under an
@@ -180,7 +181,7 @@ A baked slice skips every stage that places or thins contacts:
 enforcers and blockers therefore change nothing while a list is in use, and
 the tool says so. `detect_overhangs`, the support layers, the preview cache
 and the `Params` fill still run, and the generator calls
-`ScaffoldSupport::baked_tips` in place of `choose_tips`.
+`ScaffoldSupport::baked_tips` in place of `place_tips`.
 
 `baked_tips` maps each point through `trafo_centered()` into the frame the
 builder uses and adds the object's print z offset. It snaps the point's z to
@@ -189,7 +190,7 @@ above the point or the top layer when none does, and files it on the layer
 under that one, where a contact under an overhang is filed. It then runs
 steps 2 to 4 of the auto path on those sites:
 
-- The wall skip calls the same `wall_skip` function `choose_tips` calls. A
+- The wall skip calls the same `wall_skip` function `collect_candidates` calls. A
   point placed with the tool is enforced and never skipped; a point Generate
   copied carries the flag its tip had.
 - The hold floor counts the islands the list leaves under-held but seeds and
@@ -228,6 +229,42 @@ tips. A baked record with any point not `Routed` or any bare island adds the
 warning "Scaffold points for <object>: <d> dropped, <b> islands left without a
 tip." to the support step.
 
+### The candidates
+
+An auto scaffold slice also installs a `ScaffoldSupport::Candidates` on its
+PrintObject, read through `PrintObject::scaffold_candidates()`, so that the
+tool's density slider can place tips at another density without running the
+front half again. It holds every contact the front half placed with what the
+tip choice needs of it (`Candidate`: its site, whether the selection kept it,
+whether the interior rule lets it stand, whether the wall skip takes it out),
+the contact problem with its seeds moved back to their source positions, the
+risk field, the grade `draw` gave each seed's tip, and the parameters,
+`support_contact_min_distance` and density the slice ran with. The slice
+chooses its own tips from the same candidates through
+`ScaffoldSupport::place_tips`, which runs steps 1 to 4.
+
+`ScaffoldSupport::retune_points` runs the selection's decimation and add-back
+again at the distances `density_distances` gives for a density between 0 and
+2, then `place_tips` and the grading, and returns the tips as list points. It
+does not run the selection's placement against the risk field, which costs
+5.5 s on plate 1 of the corpus: a contact the slice kept stands where the slice
+put it, and one it dropped at its source. At the slice's own density it
+returns the tips the slice drew, in order and with their sizes. A grade reads
+the risk field at the tip's position, about 4 ms of wall time per tip on plate
+1, and no density moves a contact, so the caller keeps a grade per seed,
+starting from the slice's, and only new tips sample the field. On plate 1 a
+recompute takes about 0.05 s once its tips are graded and at most 0.46 s
+moving toward Heavy, and places 321 points at Light, 401 at Medium and 575 at
+Heavy. The thinning is greedy, so between the tiers a shorter distance can
+keep a point or two fewer.
+
+A pass built from a baked list leaves the candidates in place, and so does an
+edit of the list: `PrintApply` carries them across the support step's
+invalidation when only the list changed. Any other invalidation of the slice
+or the support step drops them, since a changed setting, paint or mesh changes
+the contacts themselves. A PrintObject that reads a shared owner's layers
+copies the owner's candidates.
+
 ### The Scaffold Points tool
 
 `GLGizmoScaffoldPoints` edits the list. It opens from the toolbar alone, with
@@ -239,9 +276,10 @@ within 30 degrees of straight up, the complement of the builder's 150 degree
 `normal_cutoff_angle`, where the builder would filter the head. The tool writes
 the model three ways:
 
-- Apply writes the cache as a `UserModified` list with the selected instance's
-  pose and a fresh mesh box stamp, makes the instance's plate current and
-  reslices.
+- Apply writes the cache with the selected instance's pose and a fresh mesh
+  box stamp, makes the instance's plate current and reslices. The list is
+  `AutoGenerated` when the cache holds the density slider's last result and
+  `UserModified` otherwise.
 - Generate replaces the list with the routed tips of an auto slice as an
   `AutoGenerated` list, with the record's pose and a fresh mesh box stamp. It
   asks first when the list is user-modified and not empty. When the plate's
@@ -255,6 +293,14 @@ the model three ways:
   finish or the tool closed first, it restores the stash and writes nothing.
 - Revert to auto clears the list to `NoPoints` and invalidates the support
   step without reslicing.
+
+The density slider runs from Light at 0 through Medium at 1 to Heavy at 2 and
+starts at the density the object's last auto slice ran at. Each move replaces
+the cache with `retune_points` at the new density, and one undo snapshot holds
+the cache from before a drag. It needs the candidates and a finished slice of
+the object, and is disabled while a slice runs, while the cache holds hand
+edits, and while the list is user-modified, so that it never overwrites points
+placed by hand; Discard or Revert to auto opens it again.
 
 After a slice from the list, the tool colours each point by its result when
 the record matches the cache point for point, shows a point added since as
@@ -314,12 +360,12 @@ cleared.
 ## The ScaffoldSupport module
 
 `src/libslic3r/Support/ScaffoldSupport.{hpp,cpp}` holds two functions that
-run seven steps between them. `ScaffoldSupport::choose_tips`, the selection,
-runs steps 1 to 4 on the contact nodes, reads no planned layer and returns the
+run seven steps between them. `ScaffoldSupport::place_tips`, the selection,
+runs steps 1 to 4 on the candidates, reads no planned layer and returns the
 tips with the hold floor's count, which is why it can run before the layers are
 planned. `ScaffoldSupport::draw` runs steps 5 to 7 on those tips and the
 planned layers, turns them into per-layer areas and counts what it did with
-them. `ScaffoldSupport::baked_tips` stands in for `choose_tips` on a baked
+them. `ScaffoldSupport::baked_tips` stands in for `place_tips` on a baked
 list and runs steps 2 to 4 on its points, as Baked contact points describes.
 
 1. Tip selection. Every contact node becomes a tip, except an interior contact

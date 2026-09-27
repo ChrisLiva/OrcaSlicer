@@ -70,7 +70,7 @@ sla::SupportTreeConfig tree_config(const Params &params)
 // The seed a contact was placed for, or the largest id for a node the seed pass never named.
 uint64_t seed_id(const SupportNode &node) { return node.source_ids.empty() ? std::numeric_limits<uint64_t>::max() : node.source_ids.front(); }
 
-TipSite site_of(const SupportNode &node) { return { node.position, node.print_z, node.obj_layer_nr, seed_id(node), &node, node.is_pinned }; }
+TipSite site_of(const SupportNode &node) { return { node.position, node.print_z, node.obj_layer_nr, seed_id(node), true, node.is_pinned }; }
 
 // The tips a model island needs for its unjoined height: one for a sliver, two up to 5 mm, three above. A slab z is
 // a sum of layer heights, so a band edge carries an epsilon.
@@ -353,17 +353,12 @@ void space_tips(std::vector<TipSite> &tips, std::vector<TipSite> &spare, double 
     tips = std::move(kept);
 }
 
-// One tip per contact. An interior tip is kept only where its overhang holds a disc as wide as the longest bridge:
-// under a narrower overhang the tips on its rim already hold it.
-std::vector<TipSite> contact_tips(const std::vector<std::vector<SupportNode *>> &contacts, double max_bridge_length_mm)
+// Whether a kept contact stands as a tip. An interior tip stands only where its overhang holds a disc as wide as the
+// longest bridge: under a narrower overhang the tips on its rim already hold it.
+bool stands_as_tip(const SupportNode &node, double max_bridge_length_mm)
 {
-    std::vector<TipSite> nodes;
-    for (const std::vector<SupportNode *> &layer : contacts)
-        for (const SupportNode *node : layer)
-            if (node->placement != SupportNode::Placement::Interior ||
-                (! node->overhang.empty() && ! offset_ex(node->overhang, -scale_(max_bridge_length_mm / 2.)).empty()))
-                nodes.push_back(site_of(*node));
-    return nodes;
+    return node.placement != SupportNode::Placement::Interior ||
+           (! node.overhang.empty() && ! offset_ex(node.overhang, -scale_(max_bridge_length_mm / 2.)).empty());
 }
 
 // The first object layer at or above the bottom of `tip`'s neck, `neck_depth_mm` under the tip, or -1 where the neck
@@ -447,7 +442,7 @@ std::vector<double> tip_grades(const std::vector<TipSite> &nodes, const ModelSup
     if (risk_known)
         tbb::parallel_for(tbb::blocked_range<size_t>(0, nodes.size()), [&](const tbb::blocked_range<size_t> &range) {
             for (size_t i = range.begin(); i < range.end(); ++ i) {
-                if (nodes[i].node == nullptr || nodes[i].grade_mm > 0.)
+                if (! nodes[i].contact || nodes[i].grade_mm > 0.)
                     continue;
                 const ModelSupportRisk::Sample s = ModelSupportRisk::sample(risk, size_t(nodes[i].obj_layer_nr + 1), nodes[i].position);
                 if (s.status == ModelSupportRisk::Sample::Status::Known && s.neck_width_mm >= 8. * w)
@@ -1008,20 +1003,58 @@ ExPolygons clip_base(const ExPolygons &base, const ExPolygons &exempt_heads, con
     return out;
 }
 
-Tips choose_tips(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts,
-                 const std::vector<SupportNode *> &dropped, const Params &params)
+DensityDistances density_distances(double contact_min_distance_mm, double density)
 {
-    std::vector<TipSite> nodes = contact_tips(contacts, params.max_bridge_length_mm);
-    // The wall skip takes out a tip and a dropped contact the hold floor could restore alike.
-    std::vector<TipSite> spare;
-    for (const SupportNode *node : dropped)
-        spare.push_back(site_of(*node));
-    const std::function<bool(const TipSite &)> at_wall = wall_skip(object, nodes, spare, params);
-    nodes.erase(std::remove_if(nodes.begin(), nodes.end(), std::cref(at_wall)), nodes.end());
-    spare.erase(std::remove_if(spare.begin(), spare.end(), std::cref(at_wall)), spare.end());
-    if (params.tip_spacing_mm > 0.)
-        space_tips(nodes, spare, params.tip_spacing_mm);
+    const double d = contact_min_distance_mm;
+    const double t = std::clamp(density, 0., 2.);
+    return { t <= 1. ? d : d * (1. - 0.5 * (t - 1.)), t < 1. ? d * (1. - t) : 0. };
+}
 
+double tier_density(ScaffoldDensity tier) { return tier == sdLight ? 0. : tier == sdHeavy ? 2. : 1.; }
+
+double density_of(const Candidates &candidates) { return candidates.density; }
+
+std::vector<double> grades_of(const Candidates &candidates) { return candidates.grades; }
+
+Candidates collect_candidates(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts,
+                              const std::vector<SupportNode *> &dropped, const Params &params)
+{
+    Candidates candidates;
+    const auto add = [&](const SupportNode &node, bool kept) {
+        candidates.contacts.push_back({ site_of(node), kept, stands_as_tip(node, params.max_bridge_length_mm), false });
+    };
+    for (const std::vector<SupportNode *> &layer : contacts)
+        for (const SupportNode *node : layer)
+            add(*node, true);
+    for (const SupportNode *node : dropped)
+        add(*node, false);
+    // The wall skip takes out a tip and a dropped contact the hold floor could restore alike, whatever the density.
+    std::vector<TipSite> sites;
+    for (const Candidate &candidate : candidates.contacts)
+        sites.push_back(candidate.site);
+    const std::function<bool(const TipSite &)> at_wall = wall_skip(object, sites, {}, params);
+    for (Candidate &candidate : candidates.contacts)
+        candidate.wall = at_wall(candidate.site);
+    candidates.params            = params;
+    candidates.params.base_cover = nullptr;
+    return candidates;
+}
+
+Tips place_tips(const PrintObject &object, const std::vector<Candidate> &contacts, const Params &params, double across_mm)
+{
+    std::vector<TipSite> nodes, spare;
+    for (const Candidate &candidate : contacts)
+        if (! candidate.wall) {
+            if (! candidate.kept)
+                spare.push_back(candidate.site);
+            else if (candidate.rim)
+                nodes.push_back(candidate.site);
+        }
+    if (across_mm > 0.)
+        space_tips(nodes, spare, across_mm);
+
+    // The contacts' walls are read; a tip the hold floor seeds reads its own.
+    const std::function<bool(const TipSite &)> at_wall = wall_skip(object, {}, {}, params);
     Tips       tips;
     const auto islands_start = std::chrono::steady_clock::now();
     tips.islands_under_held  = restore_hold_floor(object, nodes, spare, params.pillar_diameter_mm, at_wall);
@@ -1031,6 +1064,50 @@ Tips choose_tips(const PrintObject &object, const std::vector<std::vector<Suppor
     merge_aliases(nodes);
     tips.sites = std::move(nodes);
     return tips;
+}
+
+ScaffoldPoints retune_points(const PrintObject &object, const Candidates &candidates, double density, std::vector<double> &grades)
+{
+    const DensityDistances distances = density_distances(candidates.contact_min_distance_mm, density);
+    std::vector<Candidate> contacts = candidates.contacts;
+    // TreeSupport runs no selection at a zero distance, so every contact stands kept.
+    if (distances.within_mm > 0.) {
+        MiniatureSupport::Problem problem = candidates.problem;
+        problem.contact_min_distance_mm   = distances.within_mm;
+        // An unmeasured field: the selection moves no contact.
+        std::vector<char> kept(problem.seeds.size(), 0);
+        for (const MiniatureSupport::ContactSeed &seed : MiniatureSupport::select_contacts(problem, ModelSupportRisk::Field()).retained)
+            kept[size_t(seed.id)] = 1;
+        for (Candidate &candidate : contacts)
+            if (candidate.site.seed < kept.size())
+                candidate.kept = kept[size_t(candidate.site.seed)] != 0;
+    } else
+        for (Candidate &candidate : contacts)
+            candidate.kept = true;
+
+    // A contact's grade reads the risk field at its own position, which no density moves: a seed graded once keeps
+    // its grade, and only the tips no earlier call graded sample the field.
+    Tips tips = place_tips(object, contacts, candidates.params, distances.across_mm);
+    grades.resize(candidates.problem.seeds.size(), 0.);
+    for (TipSite &site : tips.sites)
+        if (site.seed < grades.size())
+            site.grade_mm = grades[size_t(site.seed)];
+    const std::vector<double> graded = tip_grades(tips.sites, candidates.risk, candidates.params);
+    ScaffoldPoints            points;
+    for (size_t i = 0; i < tips.sites.size(); ++ i) {
+        if (tips.sites[i].seed < grades.size())
+            grades[size_t(tips.sites[i].seed)] = graded[i];
+        points.push_back(point_of(object, candidates.params, tips.sites[i], graded[i]));
+    }
+    return points;
+}
+
+ScaffoldPoint point_of(const PrintObject &object, const Params &params, const TipSite &site, double grade_mm)
+{
+    const Vec2d xy  = unscale(site.position);
+    const Vec3d raw = object.trafo_centered().inverse() * Vec3d(xy.x(), xy.y(), site.print_z - params.z_offset_mm);
+    return { raw.cast<float>(), grade_mm > 3. * params.toolpath_width_mm ? ScaffoldHeadSize::Heavy : ScaffoldHeadSize::Light,
+             site.enforced };
 }
 
 Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const Params &params)
