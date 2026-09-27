@@ -1377,6 +1377,38 @@ TEST_CASE("A scaffold under an object lifted off the bed stands on the bed and h
     CHECK_FALSE(intersection_ex(role_footprint(*layers[top], erSupportMaterialInterface), underside).empty());
 }
 
+TEST_CASE("A baked scaffold list builds the tips it holds and reports each point's result", "[ScaffoldSupport]")
+{
+    Print print;
+    Model model;
+    const DynamicPrintConfig config = scaffold_config();
+    init_print({ shelf_fixture() }, print, model, config);
+    const ModelObject &mo = *model.objects.front();
+
+    // The auto slice records every tip it handed to draw with what became of it, in the raw-mesh frame the list is
+    // kept in: the shelf's tips lie on the mesh, where the centred frame draw builds in would put them at negative x.
+    print.process();
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    REQUIRE(object.support_analysis() != nullptr);
+    const SupportAnalysis::Report &report = *object.support_analysis();
+    const std::shared_ptr<const ScaffoldRecord> record = object.scaffold_record();
+    REQUIRE(record != nullptr);
+    CHECK_FALSE(record->baked);
+    CHECK_FALSE(record->stale);
+    REQUIRE(report.tips_placed > 0);
+    CHECK(record->tips.size() == report.tips_placed);
+    const size_t routed = size_t(std::count_if(record->tips.begin(), record->tips.end(),
+                                               [](const ScaffoldRecord::Tip &tip) { return tip.result == ScaffoldTipResult::Routed; }));
+    CHECK(routed == report.tips_routed);
+    BoundingBoxf3 mesh_box = mo.raw_mesh_bounding_box();
+    mesh_box.offset(0.5);
+    for (const ScaffoldRecord::Tip &tip : record->tips) {
+        INFO("tip at (" << tip.pos.x() << ", " << tip.pos.y() << ", " << tip.pos.z() << ")");
+        CHECK(mesh_box.contains(tip.pos.cast<double>()));
+    }
+}
+
 // Hidden ([.]): four full Print::process() passes over a 993k-facet miniature at 0.06 mm layers, minutes in
 // total, and the model lives outside the repo under $ORCA_MINIATURE_CORPUS (docs/miniature_support_validation.md).
 // It gates the style on plate 3 of the corpus against a tree-slim slice measured in the same run.

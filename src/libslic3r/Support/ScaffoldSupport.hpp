@@ -2,6 +2,7 @@
 #include <limits>
 #include "TreeSupport.hpp"          // SupportNode, LayerHeightData
 #include "ModelSupportRisk.hpp"
+#include "../ScaffoldPoints.hpp"
 namespace Slic3r::ScaffoldSupport {
 struct Params {   // filled by TreeSupport from its config and support params
     double toolpath_width_mm = 0., pillar_diameter_mm = 0., xy_distance_mm = 0., bridge_length_mm = 0.,
@@ -30,10 +31,15 @@ struct Counts { size_t tips_placed = 0, tips_routed = 0, tips_dropped = 0, islan
 struct StageMs { uint32_t island_joins = 0, build = 0, slice = 0; };   // for TreeSupport's profiler
 struct Output { std::vector<LayerAreas> layers;   // one entry per planned layer
                 size_t pad_layers = 0;            // the leading planned layers whose base is the pad
-                Counts counts; StageMs stage_ms; };
+                Counts counts; StageMs stage_ms;
+                std::vector<ScaffoldTipResult> results;   // what became of each tip, indexed like `Tips::sites`
+                std::vector<double>            grades;    // each tip's disc width in mm, indexed like `Tips::sites`
+              };
 // Where a tip stands. `node` is the contact it stands for, or null for a tip the hold floor seeded under an island
 // the front half left without one. `enforced` is a contact a support enforcer asked for, painted facets or an enforcer
 // volume (`SupportNode::is_pinned`), which the wall skip keeps and whose head `clip_base` clips by the model alone.
+// `grade_mm` is the disc width a baked point asks for, 0 to let `draw` grade the tip, and `source` the point's index in
+// a baked list, -1 for any other tip. Both come after `enforced`, since tips are built by position.
 struct TipSite
 {
     Point              position;
@@ -42,6 +48,8 @@ struct TipSite
     uint64_t           seed         = std::numeric_limits<uint64_t>::max();
     const SupportNode *node         = nullptr;
     bool               enforced     = false;
+    double             grade_mm     = 0.;
+    int                source       = -1;
 };
 // The tips `draw` builds heads for, with what the hold floor counted and how long its island map took.
 struct Tips { std::vector<TipSite> sites; size_t islands_under_held = 0; uint32_t island_joins_ms = 0; };

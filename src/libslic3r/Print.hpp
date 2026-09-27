@@ -9,6 +9,7 @@
 #include "ExtrusionEntityCollection.hpp"
 #include "Flow.hpp"
 #include "Point.hpp"
+#include "ScaffoldPoints.hpp"
 #include "Slicing.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "GCode/ToolOrdering.hpp"
@@ -446,10 +447,14 @@ public:
     // Handed over by the generator that produced them, in place of whatever the object was holding.
     void set_support_analysis(std::shared_ptr<const SupportAnalysis::Report> report) { m_support_analysis = std::move(report); }
     void set_emitted_support(std::shared_ptr<const SupportAnalysis::EmittedSupport> emitted) { m_emitted_support = std::move(emitted); }
+    // What the scaffold pass this object is holding did with its tips, or null when it holds none: every style
+    // but the scaffold records nothing. Immutable once installed, like the measurement.
+    std::shared_ptr<const ScaffoldRecord> scaffold_record() const { return m_scaffold_record; }
+    void set_scaffold_record(std::shared_ptr<const ScaffoldRecord> record) { m_scaffold_record = std::move(record); }
 
     size_t          support_layer_count() const { return m_support_layers.size(); }
-    // Drops the support pass this object is holding, layers, annotations, generator cache, raft count
-    // and measurement together: an object that owns its support layers deletes them, an object
+    // Drops the support pass this object is holding, layers, annotations, generator cache, raft count,
+    // measurement and scaffold record together: an object that owns its support layers deletes them, an object
     // reading a shared owner's layers only lets go of them.
     void            clear_support_layers();
     SupportLayer*   get_support_layer(int idx) { return idx<m_support_layers.size()? m_support_layers[idx]:nullptr; }
@@ -617,6 +622,7 @@ private:
     // The measurement of the pass the object is holding, and the attributed areas behind it.
     std::shared_ptr<const SupportAnalysis::Report>         m_support_analysis;
     std::shared_ptr<const SupportAnalysis::EmittedSupport> m_emitted_support;
+    std::shared_ptr<const ScaffoldRecord>                  m_scaffold_record;
     // Set by Print::request_legacy_support_analysis(), consumed by _generate_support_material().
     bool                                    m_legacy_support_analysis_requested = false;
 

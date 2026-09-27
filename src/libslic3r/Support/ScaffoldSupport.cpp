@@ -355,16 +355,19 @@ size_t pad_layer_count(const std::vector<LayerHeightData> &layer_heights, const 
 
 // A tip's grade is the width of the disc it fuses to the model with: two support lines, or four where the model
 // under it hangs off a neck at least eight lines wide. The pin is half the grade. A seeded tip starts a feature
-// and keeps the small grade.
+// and keeps the small grade, and a baked point keeps the grade it asks for.
 std::vector<double> tip_grades(const std::vector<TipSite> &nodes, const ModelSupportRisk::Field &risk, const Params &params)
 {
     const double w          = params.toolpath_width_mm;
     const bool   risk_known = risk.status == ModelSupportRisk::Field::Status::Complete;
     std::vector<double> grades(nodes.size(), 2. * w);
+    for (size_t i = 0; i < nodes.size(); ++ i)
+        if (nodes[i].grade_mm > 0.)
+            grades[i] = nodes[i].grade_mm;
     if (risk_known)
         tbb::parallel_for(tbb::blocked_range<size_t>(0, nodes.size()), [&](const tbb::blocked_range<size_t> &range) {
             for (size_t i = range.begin(); i < range.end(); ++ i) {
-                if (nodes[i].node == nullptr)
+                if (nodes[i].node == nullptr || nodes[i].grade_mm > 0.)
                     continue;
                 const ModelSupportRisk::Sample s = ModelSupportRisk::sample(risk, size_t(nodes[i].obj_layer_nr + 1), nodes[i].position);
                 if (s.status == ModelSupportRisk::Sample::Status::Known && s.neck_width_mm >= 8. * w)
@@ -424,11 +427,10 @@ struct Rings { size_t first = 0; std::vector<ExPolygons> slices; size_t neck_fir
 // lost the id and is found by the position it was built at; a point with no head was filtered out. A head
 // whose rings, or exempt neck, would float is cut: `Unrouted` where the builder left it with no pillar and no
 // bridge, which a side head whose ground pillar fails keeps, else `Neck`.
-enum class Tip : uint8_t { Filtered, Unrouted, Neck, Routed };
-std::vector<Tip> outcomes(const sla::SupportTreeBuilder &builder, const sla::SupportPoints &pts)
+std::vector<ScaffoldTipResult> outcomes(const sla::SupportTreeBuilder &builder, const sla::SupportPoints &pts)
 {
-    std::vector<Tip>    tips(pts.size(), Tip::Filtered);
-    std::vector<size_t> by_pos(pts.size());
+    std::vector<ScaffoldTipResult> tips(pts.size(), ScaffoldTipResult::Filtered);
+    std::vector<size_t>            by_pos(pts.size());
     for (size_t i = 0; i < by_pos.size(); ++ i)
         by_pos[i] = i;
     const auto pos_less = [](const Vec3d &a, const Vec3d &b) { return std::lexicographical_compare(a.data(), a.data() + 3, b.data(), b.data() + 3); };
@@ -437,14 +439,14 @@ std::vector<Tip> outcomes(const sla::SupportTreeBuilder &builder, const sla::Sup
     for (const sla::Head &head : builder.heads()) {
         if (head.is_valid()) {
             if (size_t(head.id) < tips.size())
-                tips[head.id] = Tip::Routed;
+                tips[head.id] = ScaffoldTipResult::Routed;
             continue;
         }
         auto it = std::lower_bound(by_pos.begin(), by_pos.end(), head.pos,
                                    [&](size_t i, const Vec3d &pos) { return pos_less(pos_of(i), pos); });
         for (; it != by_pos.end() && (pos_of(*it) - head.pos).norm() <= 1e-6; ++ it)
-            if (tips[*it] == Tip::Filtered) {
-                tips[*it] = Tip::Unrouted;
+            if (tips[*it] == ScaffoldTipResult::Filtered) {
+                tips[*it] = ScaffoldTipResult::Unrouted;
                 break;
             }
     }
@@ -457,18 +459,18 @@ size_t point_of(const sla::SupportTreeBuilder &builder, const std::vector<size_t
     const std::vector<sla::Head> &heads = builder.heads();
     return h < heads.size() ? size_t(heads[h].id) : posts[h - heads.size()];
 }
-Tip cut_reason(const sla::SupportTreeBuilder &builder, size_t h)
+ScaffoldTipResult cut_reason(const sla::SupportTreeBuilder &builder, size_t h)
 {
     if (h >= builder.heads().size())
-        return Tip::Neck;
+        return ScaffoldTipResult::Neck;
     const sla::Head &head = builder.heads()[h];
-    return head.pillar_id < 0 && head.bridge_id < 0 ? Tip::Unrouted : Tip::Neck;
+    return head.pillar_id < 0 && head.bridge_id < 0 ? ScaffoldTipResult::Unrouted : ScaffoldTipResult::Neck;
 }
 
 // Takes the points of the heads `cut` names out of `left` and `index_of`, the rest in their order, and records in
 // `tips` why each went.
 void drop_cut(const sla::SupportTreeBuilder &builder, const std::vector<size_t> &posted, const std::vector<char> &cut,
-              sla::SupportPoints &left, std::vector<size_t> &index_of, std::vector<Tip> &tips)
+              sla::SupportPoints &left, std::vector<size_t> &index_of, std::vector<ScaffoldTipResult> &tips)
 {
     std::vector<char> gone(left.size(), 0);
     for (size_t h = 0; h < cut.size(); ++ h)
@@ -490,13 +492,13 @@ void drop_cut(const sla::SupportTreeBuilder &builder, const std::vector<size_t> 
 // Each tip's outcome after the last build. A post counts as routed, and a head the last build still cuts loses its
 // rings, which stay out of the output.
 void settle_tips(const sla::SupportTreeBuilder &builder, const sla::SupportPoints &left, const std::vector<size_t> &index_of,
-                 const std::vector<size_t> &posted, const std::vector<char> &cut, std::vector<Rings> &rings, std::vector<Tip> &tips)
+                 const std::vector<size_t> &posted, const std::vector<char> &cut, std::vector<Rings> &rings, std::vector<ScaffoldTipResult> &tips)
 {
-    const std::vector<Tip> last = outcomes(builder, left);
+    const std::vector<ScaffoldTipResult> last = outcomes(builder, left);
     for (size_t k = 0; k < last.size(); ++ k)
         tips[index_of[k]] = last[k];
     for (const size_t k : posted)
-        tips[index_of[k]] = Tip::Routed;
+        tips[index_of[k]] = ScaffoldTipResult::Routed;
     for (size_t h = 0; h < cut.size(); ++ h)
         if (cut[h]) {
             tips[index_of[point_of(builder, posted, h)]] = cut_reason(builder, h);
@@ -727,7 +729,7 @@ std::vector<char> DrawContext::check_necks(const sla::SupportTreeBuilder &builde
     std::vector<char>       cut    = find_stranded(cage, rings, exempt_heads(rings));
     bool                    exempted = false;
     for (size_t h = 0; h < builder.heads().size(); ++ h)
-        if (cut[h] && cut_reason(builder, h) == Tip::Neck && ! rings[h].neck.empty() && ! rings[h].exempt) {
+        if (cut[h] && cut_reason(builder, h) == ScaffoldTipResult::Neck && ! rings[h].neck.empty() && ! rings[h].exempt) {
             rings[h].exempt = true;
             exempted        = true;
         }
@@ -997,7 +999,7 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
     out.stage_ms.island_joins     = chosen.island_joins_ms;
     const std::vector<TipSite> &nodes = chosen.sites;
 
-    const std::vector<double> grades = tip_grades(nodes, risk, params);
+    std::vector<double> grades = tip_grades(nodes, risk, params);
     // A head's id is its point's index, so the points keep the order of `nodes`.
     sla::SupportPoints points;
     for (size_t i = 0; i < nodes.size(); ++ i) {
@@ -1057,9 +1059,9 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
     constexpr size_t max_builds = 6;
     const bool       check      = params.interface_layers > 0 ||
                                   std::any_of(nodes.begin(), nodes.end(), [](const TipSite &tip) { return tip.enforced; });
-    std::vector<Tip>    tips(points.size(), Tip::Filtered);
-    sla::SupportPoints  left = points;
-    std::vector<size_t> index_of(points.size());
+    std::vector<ScaffoldTipResult> tips(points.size(), ScaffoldTipResult::Filtered);
+    sla::SupportPoints             left = points;
+    std::vector<size_t>            index_of(points.size());
     for (size_t i = 0; i < index_of.size(); ++ i)
         index_of[i] = i;
     std::unique_ptr<sla::SupportTreeBuilder> builder;
@@ -1087,19 +1089,28 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
     }
     settle_tips(*builder, left, index_of, posted, cut, rings, tips);
     out.counts.pillars_unbraced = builder->unbraced_pillars;
-    static constexpr const char *reason[] = { "filtered", "unrouted", "neck" };
+    const auto reason = [](ScaffoldTipResult tip) {
+        switch (tip) {
+        case ScaffoldTipResult::Filtered: return "filtered";
+        case ScaffoldTipResult::Unrouted: return "unrouted";
+        case ScaffoldTipResult::Neck: return "neck";
+        default: return "other";
+        }
+    };
     for (size_t i = 0; i < tips.size(); ++ i) {
-        if (tips[i] == Tip::Routed) {
+        if (tips[i] == ScaffoldTipResult::Routed) {
             ++ out.counts.tips_routed;
             continue;
         }
         ++ out.counts.tips_dropped;
         const Vec3f &p = points[i].pos;
         BOOST_LOG_TRIVIAL(debug) << "scaffold tip dropped at (" << p.x() << ", " << p.y() << ", " << p.z()
-                                 << "): " << reason[size_t(tips[i])];
+                                 << "): " << reason(tips[i]);
     }
 
     ctx.write_output(*builder, cage, rings, build_ms, out);
+    out.results = std::move(tips);
+    out.grades  = std::move(grades);
     return out;
 }
 

@@ -1164,6 +1164,7 @@ void PrintObject::clear_support_layers()
     // taken of support the object no longer has.
     m_support_analysis.reset();
     m_emitted_support.reset();
+    m_scaffold_record.reset();
 }
 
 std::shared_ptr<TreeSupportData> PrintObject::alloc_tree_support_preview_cache()

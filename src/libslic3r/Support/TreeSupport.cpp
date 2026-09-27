@@ -1923,6 +1923,7 @@ void TreeSupport::generate()
     m_analyze = m_analysis_requested || miniature_contacts;
     m_object->set_support_analysis(nullptr);
     m_object->set_emitted_support(nullptr);
+    m_object->set_scaffold_record(nullptr);
     if (m_analyze)
         build_required_regions();
     // The thinning distance the contact pass runs under, and the distance the measurement carries a
@@ -2089,6 +2090,21 @@ void TreeSupport::generate()
         profiler.stage_durations[STAGE_SCAFFOLD_SLICE] = out.stage_ms.slice;
         scaffold_counts = out.counts;
         m_pad_layers    = out.pad_layers;
+
+        // What the pass did with each tip, in the frame of ModelObject::raw_mesh(), the frame a baked list is kept in:
+        // draw builds on the raw mesh through trafo_centered(), with print z less the object's lift.
+        auto record = std::make_shared<ScaffoldRecord>();
+        const Transform3d to_raw = m_object->trafo_centered().inverse();
+        for (size_t i = 0; i < scaffold_tips.sites.size(); ++ i) {
+            const ScaffoldSupport::TipSite &site = scaffold_tips.sites[i];
+            const Vec2d                     xy   = unscale(site.position);
+            record->tips.push_back({ (to_raw * Vec3d(xy.x(), xy.y(), site.print_z - params.z_offset_mm)).cast<float>(),
+                                     out.grades[i] > 3. * params.toolpath_width_mm ? ScaffoldHeadSize::Heavy : ScaffoldHeadSize::Light,
+                                     site.enforced, out.results[i] });
+        }
+        record->pose              = m_object->instances().front().model_instance->get_matrix().linear();
+        record->toolpath_width_mm = params.toolpath_width_mm;
+        m_object->set_scaffold_record(std::move(record));
 
         const size_t      brim_skirt_layers = brim_skirt_layer_count();
         std::vector<char> filled(plan.size(), 0);
