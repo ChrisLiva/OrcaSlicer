@@ -24,6 +24,7 @@ static const ColorRGBA BARE_ISLAND_COLOR = {1.f, 0.9f, 0.1f, 1.f};
 // The cone marks the direction a branch arrives from, so it keeps one size whatever the head.
 static constexpr double CONE_RADIUS = 0.25;
 static constexpr double CONE_HEIGHT = 0.75;
+static constexpr double DISC_THICKNESS = 0.05;
 
 static ColorRGBA result_color(ScaffoldTipResult result)
 {
@@ -51,6 +52,8 @@ GLGizmoScaffoldPoints::GLGizmoScaffoldPoints(GLCanvas3D &parent, const std::stri
     m_sphere.mesh_raycaster = std::make_unique<MeshRaycaster>(std::make_shared<const TriangleMesh>(sphere));
     m_sphere.model.init_from(sphere);
     m_cone.init_from(its_make_cone(1.0, 1.0, double(PI) / 12.0));
+    m_disc.init_from(its_make_cylinder(1.0, 1.0, double(PI) / 12.0));
+    m_disc.set_color(BARE_ISLAND_COLOR);
 }
 
 bool GLGizmoScaffoldPoints::on_init()
@@ -96,7 +99,11 @@ void GLGizmoScaffoldPoints::data_changed(bool is_serializing)
     if (m_state == On && mo && mo->id() != m_old_mo_id && !is_serializing) {
         reload_cache();
         m_old_mo_id = mo->id();
+        m_generate_failure.clear();
     }
+    // A slice finishing or failing reloads the scene, which lands here.
+    finish_pending_generate();
+    if (m_state == On) update_results();
 }
 
 void GLGizmoScaffoldPoints::on_render()
@@ -127,7 +134,7 @@ void GLGizmoScaffoldPoints::on_render()
 
 void GLGizmoScaffoldPoints::render_points(const Selection &selection)
 {
-    if (m_editing_cache.empty()) return;
+    if (m_editing_cache.empty() && m_bare_islands.empty()) return;
 
     GLShaderProgram *shader = wxGetApp().get_shader("gouraud_light");
     if (shader == nullptr) return;
@@ -179,6 +186,11 @@ void GLGizmoScaffoldPoints::render_points(const Selection &selection)
     }
 
     if (vol->is_left_handed()) glsafe(::glFrontFace(GL_CCW));
+
+    // A bare island lies flat on its layer, so its disc stays level whatever the instance's rotation.
+    for (const Vec3f &island : m_bare_islands)
+        render_at(m_disc, Geometry::translation_transform(instance_matrix * island.cast<double>()) *
+                              Geometry::scale_transform(Vec3d(2. * width, 2. * width, DISC_THICKNESS)));
 }
 
 bool GLGizmoScaffoldPoints::on_mouse(const wxMouseEvent &mouse_event)
@@ -390,6 +402,8 @@ void GLGizmoScaffoldPoints::on_dragging(const UpdateData &data)
     if (!unproject_on_mesh(data.mouse_pos.cast<double>(), pos, normal, world_normal) || faces_up(world_normal)) return;
     m_editing_cache[m_hover_id].point.pos = pos;
     m_editing_cache[m_hover_id].normal    = normal;
+    // The last slice placed the point elsewhere.
+    m_editing_cache[m_hover_id].result.reset();
 }
 
 void GLGizmoScaffoldPoints::on_stop_dragging()
@@ -432,8 +446,149 @@ void GLGizmoScaffoldPoints::apply_changes()
     mo->scaffold_points_status   = ScaffoldPointsStatus::UserModified;
     mo->scaffold_points_pose     = mo->instances[active]->get_matrix().linear();
     mo->scaffold_points_mesh_box = mo->raw_mesh_bounding_box();
+    m_generate_failure.clear();
+    wxGetApp().plater()->set_plater_dirty(true);
+    select_plate_of_selection();
+    wxGetApp().plater()->reslice();
+}
+
+void GLGizmoScaffoldPoints::revert_to_auto()
+{
+    ModelObject *mo = m_c->selection_info()->model_object();
+    if (mo == nullptr) return;
+
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Revert scaffold points to auto");
+    mo->clear_scaffold_points();
+    m_editing_cache.clear();
+    m_selection_empty = true;
+    update_raycasters();
+    m_generate_failure.clear();
     wxGetApp().plater()->set_plater_dirty(true);
     m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+    m_parent.set_as_dirty();
+}
+
+void GLGizmoScaffoldPoints::generate()
+{
+    ModelObject *mo     = m_c->selection_info()->model_object();
+    const int    active = m_c->selection_info()->get_active_instance();
+    if (mo == nullptr || active < 0 || active >= int(mo->instances.size()) || m_generate_pending) return;
+
+    if (mo->scaffold_points_status == ScaffoldPointsStatus::UserModified && !mo->scaffold_points.empty()) {
+        MessageDialog dlg(wxGetApp().mainframe, _L("Generate will replace your edited scaffold points. Continue?"), _L("Scaffold Points"),
+                          wxICON_WARNING | wxYES | wxNO);
+        if (dlg.ShowModal() != wxID_YES) return;
+    }
+
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Generate scaffold points");
+    m_generate_failure.clear();
+    m_generate_stash = {mo->id(), mo->instances[active]->id(), mo->scaffold_points, mo->scaffold_points_status, mo->scaffold_points_pose};
+
+    select_plate_of_selection();
+    const PrintObject *po = selected_print_object();
+    if (po != nullptr && po->is_step_done(posSupportMaterial))
+        if (const std::shared_ptr<const ScaffoldRecord> record = po->scaffold_record(); record && !record->baked && !record->stale) {
+            // The plate's last slice placed its contact points automatically: copy them now.
+            m_generate_pending = true;
+            finish_pending_generate();
+            return;
+        }
+
+    mo->scaffold_points_status = ScaffoldPointsStatus::NoPoints;
+    wxGetApp().plater()->reslice();
+    // Set only once reslice() has returned: it reloads the scene before it marks the slice as running, and a pending
+    // Generate seen from that reload would read an unfinished step and no slice, and give up.
+    m_generate_pending = true;
+    // reslice() can return without starting a slice, and then no reload reaches data_changed.
+    finish_pending_generate();
+}
+
+void GLGizmoScaffoldPoints::finish_pending_generate()
+{
+    if (!m_generate_pending) return;
+
+    // Looked up by id, never through the selection: the object may be gone or another one selected by now.
+    ModelObject *mo = nullptr;
+    for (ModelObject *object : wxGetApp().model().objects)
+        if (object->id() == m_generate_stash.object_id) mo = object;
+    const ModelInstance *instance = nullptr;
+    if (mo != nullptr)
+        for (const ModelInstance *inst : mo->instances)
+            if (inst->id() == m_generate_stash.instance_id) instance = inst;
+    const PrintObject *po = instance ? print_object_of(*mo, m_generate_stash.instance_id) : nullptr;
+
+    // Waits for the whole slice, G-code export included: the copy invalidates the support step, which would cancel it.
+    if (instance != nullptr && wxGetApp().plater()->is_background_process_slicing()) return;
+    if (instance != nullptr && (po == nullptr || !po->is_step_done(posSupportMaterial))) {
+        restore_generate_stash();
+        m_generate_failure = _L("Generate stopped: the slice did not finish. No points written.");
+        return;
+    }
+
+    // The slice finished: its tips are copied only when they were taken from the object as it stands now, placed
+    // automatically, in the pose the selected instance holds.
+    const std::shared_ptr<const ScaffoldRecord> record = po ? po->scaffold_record() : nullptr;
+    auto model_part_meshes = [](const ModelObject &object) {
+        std::vector<const TriangleMesh *> meshes;
+        for (const ModelVolume *mv : object.volumes)
+            if (mv->is_model_part()) meshes.push_back(mv->mesh_ptr().get());
+        return meshes;
+    };
+    const bool unchanged = record && !record->baked && !record->stale && model_part_meshes(*mo) == model_part_meshes(*po->model_object()) &&
+                           (instance->get_matrix().linear() - record->pose).cwiseAbs().maxCoeff() <= 1e-9;
+    if (!unchanged) {
+        restore_generate_stash();
+        m_generate_failure = _L("Generate stopped: the object changed during the slice. No points written.");
+        return;
+    }
+
+    m_generate_pending           = false;
+    mo->scaffold_points          = scaffold_points_from(*record);
+    mo->scaffold_points_status   = ScaffoldPointsStatus::AutoGenerated;
+    mo->scaffold_points_pose     = record->pose;
+    mo->scaffold_points_mesh_box = mo->raw_mesh_bounding_box();
+    wxGetApp().plater()->set_plater_dirty(true);
+    if (const ModelObject *selected = m_c->selection_info()->model_object(); selected != nullptr && selected->id() == mo->id())
+        reload_cache();
+    m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+    m_parent.set_as_dirty();
+}
+
+void GLGizmoScaffoldPoints::restore_generate_stash()
+{
+    m_generate_pending = false;
+    for (ModelObject *mo : wxGetApp().model().objects)
+        if (mo->id() == m_generate_stash.object_id) {
+            mo->scaffold_points        = m_generate_stash.points;
+            mo->scaffold_points_status = m_generate_stash.status;
+            mo->scaffold_points_pose   = m_generate_stash.pose;
+            // The Print took the cleared status; it takes the restored list back.
+            m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+        }
+    m_parent.set_as_dirty();
+}
+
+void GLGizmoScaffoldPoints::update_results()
+{
+    const PrintObject                    *po     = selected_print_object();
+    std::shared_ptr<const ScaffoldRecord> record = po && po->is_step_done(posSupportMaterial) ? po->scaffold_record() : nullptr;
+    if (!record) {
+        m_bare_islands.clear();
+        return;
+    }
+    m_bare_islands = record->bare_islands;
+
+    // A slice that did not build from the list says nothing about its points.
+    if (!record->baked || record->stale) {
+        for (CacheEntry &entry : m_editing_cache) entry.result.reset();
+        return;
+    }
+    // A baked record holds one tip per list point in list order; a cache edited since then keeps the results it has,
+    // and a point added since shows as not yet sliced.
+    if (record->tips.size() != m_editing_cache.size()) return;
+    for (size_t i = 0; i < m_editing_cache.size(); ++i)
+        if (record->tips[i].pos != m_editing_cache[i].point.pos) return;
+    for (size_t i = 0; i < m_editing_cache.size(); ++i) m_editing_cache[i].result = record->tips[i].result;
 }
 
 void GLGizmoScaffoldPoints::delete_selected_points()
@@ -523,21 +678,40 @@ Vec3f GLGizmoScaffoldPoints::normal_at(const Vec3f &pos) const
     return normal;
 }
 
-const PrintObject *GLGizmoScaffoldPoints::selected_print_object() const
+void GLGizmoScaffoldPoints::select_plate_of_selection()
 {
-    const ModelObject *mo    = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
-    const Print       *print = m_parent.fff_print();
-    if (mo == nullptr || print == nullptr) return nullptr;
+    const ModelObject *mo     = m_c->selection_info()->model_object();
+    const int          active = m_c->selection_info()->get_active_instance();
+    if (mo == nullptr || active < 0) return;
 
-    const int active = m_c->selection_info()->get_active_instance();
-    if (active < 0 || active >= int(mo->instances.size())) return nullptr;
-    const ObjectID instance_id = mo->instances[active]->id();
+    const ModelObjectPtrs &objects = wxGetApp().model().objects;
+    const int              obj_idx = int(std::find(objects.begin(), objects.end(), mo) - objects.begin());
+    if (obj_idx == int(objects.size())) return;
 
+    Plater    *plater    = wxGetApp().plater();
+    const int  plate_idx = plater->get_partplate_list().find_instance_belongs(obj_idx, active);
+    if (plate_idx >= 0 && plate_idx != plater->get_partplate_list().get_curr_plate_index()) plater->select_plate(plate_idx);
+}
+
+const PrintObject *GLGizmoScaffoldPoints::print_object_of(const ModelObject &mo, ObjectID instance_id) const
+{
+    const Print *print = m_parent.fff_print();
+    if (print == nullptr) return nullptr;
     for (const PrintObject *po : print->objects())
-        if (po->model_object()->id() == mo->id())
+        if (po->model_object()->id() == mo.id())
             for (const PrintInstance &pi : po->instances())
                 if (pi.model_instance->id() == instance_id) return po;
     return nullptr;
+}
+
+const PrintObject *GLGizmoScaffoldPoints::selected_print_object() const
+{
+    const ModelObject *mo = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+    if (mo == nullptr) return nullptr;
+
+    const int active = m_c->selection_info()->get_active_instance();
+    if (active < 0 || active >= int(mo->instances.size())) return nullptr;
+    return print_object_of(*mo, mo->instances[active]->id());
 }
 
 double GLGizmoScaffoldPoints::support_width() const
@@ -554,6 +728,10 @@ void GLGizmoScaffoldPoints::on_render_input_window(float x, float y, float botto
 {
     static float last_y = 0.0f;
     static float last_h = 0.0f;
+
+    // A cancelled or failed slice reloads the scene while it still reads as running, so no later data_changed sees it
+    // end; the next frame does.
+    finish_pending_generate();
 
     const ModelObject *mo = m_c->selection_info()->model_object();
     if (!mo) return;
@@ -592,10 +770,16 @@ void GLGizmoScaffoldPoints::on_render_input_window(float x, float y, float botto
     ImGui::AlignTextToFramePadding();
     m_imgui->text(m_desc["create"]);
     ImGui::SameLine(caption_size);
-    m_imgui->disabled_begin(true);
-    m_imgui->button(m_desc["generate"], m_desc["generate_tooltip"]);
+    // Each runs after the frame: Generate may ask a question and both Generate and Apply reslice, which reloads the scene.
+    m_imgui->disabled_begin(m_generate_pending);
+    if (m_imgui->button(m_desc["generate"], m_desc["generate_tooltip"])) wxGetApp().CallAfter([this]() {
+        if (m_state == On) generate();
+    });
+    m_imgui->disabled_end();
     ImGui::SameLine();
-    m_imgui->button(m_desc["revert"], m_desc["revert_tooltip"]);
+    m_imgui->disabled_begin(m_generate_pending ||
+                            (mo->scaffold_points_status == ScaffoldPointsStatus::NoPoints && mo->scaffold_points.empty() && m_editing_cache.empty()));
+    if (m_imgui->button(m_desc["revert"], m_desc["revert_tooltip"])) revert_to_auto();
     m_imgui->disabled_end();
 
     ImGui::AlignTextToFramePadding();
@@ -652,6 +836,7 @@ void GLGizmoScaffoldPoints::on_render_input_window(float x, float y, float botto
         warnings.push_back(_L("Paint and blockers are ignored while the list is in use."));
     if (cache_differs_from_model()) warnings.push_back(_L("Unapplied edits"));
     if (m_click_refused) warnings.push_back(m_desc["refused"]);
+    if (!m_generate_failure.empty()) warnings.push_back(m_generate_failure);
     if (!warnings.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImGuiWrapper::COL_WARNING);
         const float parent_width = ImGui::GetContentRegionAvail().x;
@@ -665,8 +850,10 @@ void GLGizmoScaffoldPoints::on_render_input_window(float x, float y, float botto
 
     ImGui::SameLine();
     GLGizmoUtils::begin_right_aligned_buttons({m_desc["apply"], m_desc["discard"]});
-    m_imgui->disabled_begin(true);
-    m_imgui->button(m_desc["apply"]);
+    m_imgui->disabled_begin(m_generate_pending || !cache_differs_from_model());
+    if (m_imgui->button(m_desc["apply"])) wxGetApp().CallAfter([this]() {
+        if (m_state == On) apply_changes();
+    });
     m_imgui->disabled_end();
     ImGui::SameLine();
     m_imgui->disabled_begin(!cache_differs_from_model());
@@ -712,6 +899,8 @@ void GLGizmoScaffoldPoints::on_set_state()
     if (m_state == On && m_old_state != On)
         wxGetApp().plater()->enter_gizmos_stack();
     if (m_state == Off && m_old_state != Off) {
+        // A Generate still waiting on its slice writes nothing once the tool closes.
+        if (m_generate_pending) restore_generate_stash();
         // Unapplied edits: refuse to close so that the gizmo is still active when the question is answered, and close it
         // then. The dialog runs through CallAfter, because otherwise on OSX it was shown several times when clicked into.
         if (m_close_asked || cache_differs_from_model()) {
@@ -752,6 +941,8 @@ void GLGizmoScaffoldPoints::on_load(cereal::BinaryInputArchive &ar)
     ar(m_new_point_size, m_editing_cache, m_selection_empty);
     // Undo and redo change the number of points, and each point needs its grabber to be picked.
     update_raycasters();
+    // The snapshot holds no results, so they are matched against the last slice again.
+    update_results();
 }
 
 void GLGizmoScaffoldPoints::on_save(cereal::BinaryOutputArchive &ar) const { ar(m_new_point_size, m_editing_cache, m_selection_empty); }

@@ -82,14 +82,41 @@ private:
     void  delete_selected_points();
     // Ctrl+wheel: flips the head size of the selected points, or the preset for new points when none is selected.
     void  toggle_head_size();
-    // Writes the editing cache into the ModelObject as a user-modified list.
+    // Writes the editing cache into the ModelObject as a user-modified list and slices its plate.
     void  apply_changes();
+    // Clears the list so that the next slice places its contact points automatically.
+    void  revert_to_auto();
+    // Replaces the list with the tips the last auto slice routed, slicing the plate first when it holds no such slice.
+    void  generate();
+    // Ends a Generate waiting on its slice: copies the routed tips when the slice finished on the object it started on,
+    // restores the stashed list when it did not, and does nothing while the slice runs.
+    void  finish_pending_generate();
+    void  restore_generate_stash();
+    // The result of each point and the bare islands, read from the finished slice of the selected object.
+    void  update_results();
     bool  has_selected_points() const;
     bool  cache_differs_from_model() const;
+    // Makes the plate holding the selected instance the current one, so that the canvas' Print and a reslice are its.
+    void  select_plate_of_selection();
+    // The Print's copy of the object on the current plate, holding the instance.
+    const PrintObject *print_object_of(const ModelObject &mo, ObjectID instance_id) const;
     // The Print's copy of the selected object on the current plate, holding the selected instance.
     const PrintObject *selected_print_object() const;
     // w: a Light head has radius w and a Heavy one 2w.
     double             support_width() const;
+
+    // What Generate replaced, written back when it ends without points.
+    struct GenerateStash {
+        ObjectID             object_id;
+        ObjectID             instance_id;
+        ScaffoldPoints       points;
+        ScaffoldPointsStatus status = ScaffoldPointsStatus::NoPoints;
+        Matrix3d             pose   = Matrix3d::Identity();
+    };
+    GenerateStash      m_generate_stash;
+    bool               m_generate_pending = false;
+    wxString           m_generate_failure; // why the last Generate wrote no points
+    std::vector<Vec3f> m_bare_islands;     // raw-mesh frame, from the last finished slice
 
     ScaffoldHeadSize        m_new_point_size = ScaffoldHeadSize::Light;
     std::vector<CacheEntry> m_editing_cache;
@@ -103,6 +130,7 @@ private:
 
     PickingModel m_sphere;
     GLModel      m_cone;
+    GLModel      m_disc;
 
     GLSelectionRectangle m_selection_rectangle;
 
