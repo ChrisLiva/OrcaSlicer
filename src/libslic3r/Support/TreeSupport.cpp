@@ -2040,6 +2040,9 @@ void TreeSupport::generate()
         params.xy_distance_mm       = m_ts_data->m_xy_distance;
         params.bridge_length_mm     = m_object_config->scaffold_bridge_length.value;
         params.brace_slenderness    = m_object_config->scaffold_brace_slenderness.value;
+        // A brace narrower than two support lines prints nothing once its wall closes by half a line.
+        params.brace_diameter_mm    = std::max(params.pillar_diameter_mm * m_object_config->scaffold_brace_diameter.value / 100.,
+                                               2. * params.toolpath_width_mm);
         params.taper                = diameter_angle_scale_factor;
         params.max_bridge_length_mm = m_object_config->max_bridge_length.value;
         params.z_offset_mm          = m_slicing_params.object_print_z_min;

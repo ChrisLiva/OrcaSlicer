@@ -1375,6 +1375,7 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "support_contact_min_distance"
             || opt_key == "scaffold_bridge_length"
             || opt_key == "scaffold_brace_slenderness"
+            || opt_key == "scaffold_brace_diameter"
             || opt_key == "tree_support_wall_count") {
             steps.emplace_back(posSupportMaterial);
         } else if (

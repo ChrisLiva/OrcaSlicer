@@ -6906,6 +6906,17 @@ void PrintConfigDef::init_fff_params()
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(15.));
 
+    def = this->add("scaffold_brace_diameter", coPercent);
+    def->label    = L("Scaffold brace diameter");
+    def->category = L("Support");
+    def->tooltip  = L("The diameter of a Tree Scaffold brace between two pillars, as a percentage of the pillar diameter. "
+                      "A thinner brace snaps off more easily. A brace never prints thinner than two support lines.");
+    def->sidetext = "%";
+    def->min      = 10;
+    def->max      = 100;
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionPercent(60));
+
     // BBS: change type to common float.
     // It may be rounded to mulitple layer height when independent_support_layer_height is false.
     def = this->add("support_top_z_distance", coFloat);

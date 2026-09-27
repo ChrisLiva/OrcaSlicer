@@ -63,6 +63,7 @@ sla::SupportTreeConfig tree_config(const Params &params)
     cfg.bridge_slope                = M_PI / 4.;
     cfg.safety_distance_mm          = params.xy_distance_mm;
     cfg.pillar_link_slenderness     = params.brace_slenderness;
+    cfg.pillar_link_radius_mm       = params.brace_diameter_mm / 2.;
     return cfg;
 }
 

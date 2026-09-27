@@ -476,6 +476,7 @@ TEST_CASE("A tree scaffold style round-trips through the config and lists last",
     const DynamicPrintConfig defaults = DynamicPrintConfig::full_print_config();
     CHECK_THAT(defaults.opt_float("scaffold_bridge_length"), WithinAbs(12., 1e-9));
     CHECK_THAT(defaults.opt_float("scaffold_brace_slenderness"), WithinAbs(15., 1e-9));
+    CHECK_THAT(defaults.option<ConfigOptionPercent>("scaffold_brace_diameter")->value, WithinAbs(60., 1e-9));
 
     const ConfigOptionDef *bridge_def = print_config_def.get("scaffold_bridge_length");
     REQUIRE(bridge_def != nullptr);
@@ -488,10 +489,17 @@ TEST_CASE("A tree scaffold style round-trips through the config and lists last",
     CHECK_THAT(brace_def->max, WithinAbs(40., 1e-9));
     CHECK(brace_def->mode == comAdvanced);
     CHECK(brace_def->sidetext.empty());
+    const ConfigOptionDef *brace_diameter_def = print_config_def.get("scaffold_brace_diameter");
+    REQUIRE(brace_diameter_def != nullptr);
+    CHECK(brace_diameter_def->type == coPercent);
+    CHECK_THAT(brace_diameter_def->min, WithinAbs(10., 1e-9));
+    CHECK_THAT(brace_diameter_def->max, WithinAbs(100., 1e-9));
+    CHECK(brace_diameter_def->mode == comAdvanced);
 
     const std::vector<std::string> &options = Preset::print_options();
     CHECK(std::find(options.begin(), options.end(), "scaffold_bridge_length") != options.end());
     CHECK(std::find(options.begin(), options.end(), "scaffold_brace_slenderness") != options.end());
+    CHECK(std::find(options.begin(), options.end(), "scaffold_brace_diameter") != options.end());
 
     // Print::apply needs the Model the print was built from, so the print is built through init_print.
     const DynamicPrintConfig config = fixture_config({ { "support_style", "tree_slim" } });
@@ -559,6 +567,7 @@ TEST_CASE("A config without the scaffold keys loads with their defaults", "[Scaf
     CHECK(config.opt_enum<SupportMaterialStyle>("support_style") == smsTreeSlim);
     CHECK_THAT(config.opt_float("scaffold_bridge_length"), WithinAbs(12., 1e-9));
     CHECK_THAT(config.opt_float("scaffold_brace_slenderness"), WithinAbs(15., 1e-9));
+    CHECK_THAT(config.option<ConfigOptionPercent>("scaffold_brace_diameter")->value, WithinAbs(60., 1e-9));
 }
 
 TEST_CASE("Island joins name the slab each mid-air island first meets the rooted body", "[ScaffoldSupport]")
@@ -1313,6 +1322,45 @@ TEST_CASE("Slender scaffold pillars get braces and unreachable ones stand unbrac
     CHECK(b.unbraced >= 1);
     CHECK(d.unbraced == 0);
     CHECK(b.volume_mm3 >= 0.98 * d.volume_mm3);
+}
+
+TEST_CASE("Scaffold braces print at their share of the pillar diameter and never under two support lines", "[ScaffoldSupport]")
+{
+    // The tall shelf's straight 1.2 mm pillars stand past 15 diameters, so every one takes braces, and the brace
+    // diameter changes only the linking pass after routing: the same pillars stand under every run, and the printed
+    // footprint between the pad and the slab differs by the braces' sections alone. The fixture's 0.42 mm lines put the
+    // two-line floor at 0.84 mm, so 60 % stays at that floor and 10 %, a 0.12 mm brace that would print nothing, prints
+    // there too.
+    struct Reading { size_t unbraced = 0, floating = 0; double mid_mm2 = 0.; };
+    const auto read = [](const char *slenderness, const char *brace_diameter) {
+        Print print;
+        init_and_process_print({ tall_shelf_fixture() }, print,
+                               scaffold_config({ { "scaffold_brace_slenderness", slenderness }, { "scaffold_brace_diameter", brace_diameter },
+                                                 { "tree_support_branch_diameter_angle", "0" } }));
+        REQUIRE(print.objects().size() == 1);
+        const PrintObject &object = *print.objects().front();
+        REQUIRE(object.support_analysis() != nullptr);
+        const SupportAnalysis::Report &report = *object.support_analysis();
+        Reading r { report.pillars_unbraced, report.floating_pieces_removed, 0. };
+        for (const SupportLayer *sl : object.support_layers())
+            if (sl->print_z > 5. && sl->print_z < 25.)
+                r.mid_mm2 += area_mm2(role_footprint(*sl, erSupportMaterial));
+        INFO("slenderness " << slenderness << " brace " << brace_diameter << ": unbraced " << r.unbraced << " floating removed "
+                            << r.floating << " mid footprint " << r.mid_mm2 << " mm2 over its layers");
+        CHECK(r.floating == 0);
+        return r;
+    };
+
+    const Reading full     = read("15", "100%");
+    const Reading slim     = read("15", "60%");
+    const Reading thinnest = read("15", "10%");
+    const Reading no_brace = read("40", "60%");
+    CHECK(full.unbraced == 0);
+    CHECK(slim.unbraced == 0);
+    CHECK(thinnest.unbraced == 0);
+    CHECK(slim.mid_mm2 < full.mid_mm2);
+    // 10 % prints at the floor 60 % prints at, so its braces add about as much; unfloored they would add nothing.
+    CHECK(thinnest.mid_mm2 - no_brace.mid_mm2 > 0.5 * (slim.mid_mm2 - no_brace.mid_mm2));
 }
 
 TEST_CASE("Scaffold pillars widen toward the pad by the branch diameter angle", "[ScaffoldSupport]")

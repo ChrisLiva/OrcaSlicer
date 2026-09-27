@@ -92,6 +92,10 @@ struct SupportTreeConfig
     // braces a pillar. 0 keeps the cascade linking.
     double pillar_link_slenderness = 0.;
 
+    // The radius in mm of a brace interconnect lays between two pillars,
+    // capped at the pillar's own. 0 builds each brace at the pillar's radius.
+    double pillar_link_radius_mm = 0.;
+
     // The shortest distance of any support structure from the model surface
     double safety_distance_mm = 0.5;
     

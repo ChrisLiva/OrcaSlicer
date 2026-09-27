@@ -125,6 +125,14 @@ const sla::SupportPoints TWO_PLATES_POINTS = {
     sla::SupportPoint(Vec3f(48.f, 5.f, 30.f), 0.2f),
 };
 
+// Three points 6 mm apart in a triangle under the small plate: each pillar's
+// two neighbours lie 60 degrees apart.
+const sla::SupportPoints TRIANGLE_POINTS = {
+    sla::SupportPoint(Vec3f(2.f, 2.f, 30.f), 0.2f),
+    sla::SupportPoint(Vec3f(8.f, 2.f, 30.f), 0.2f),
+    sla::SupportPoint(Vec3f(5.f, 7.2f, 30.f), 0.2f),
+};
+
 } // namespace
 
 TEST_CASE("Pillar pairhash should be unique", "[SLASupportGeneration]") {
@@ -402,18 +410,12 @@ TEST_CASE("Slender pillars braced in one plane or none count as unbraced and get
 }
 
 TEST_CASE("Slender pillars with neighbours in two planes are braced from both", "[SLASupportGeneration]") {
-    // Three points 6 mm apart in a triangle under the small plate: each
-    // pillar's two neighbours lie 60 degrees apart, so each takes chains in
-    // two planes and none stands unbraced.
-    const sla::SupportPoints points = {
-        sla::SupportPoint(Vec3f(2.f, 2.f, 30.f), 0.2f),
-        sla::SupportPoint(Vec3f(8.f, 2.f, 30.f), 0.2f),
-        sla::SupportPoint(Vec3f(5.f, 7.2f, 30.f), 0.2f),
-    };
+    // Each pillar of the triangle takes chains in two planes and none stands
+    // unbraced.
     indexed_triangle_set mesh = two_plates_mesh();
 
     sla::SupportTreeBuilder builder;
-    sla::SupportableMesh sm{mesh, points, two_plates_config(15.)};
+    sla::SupportableMesh sm{mesh, TRIANGLE_POINTS, two_plates_config(15.)};
     REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(builder, sm));
     REQUIRE(builder.pillars().size() == 3);
     CHECK(builder.unbraced_pillars == 0);
@@ -433,6 +435,30 @@ TEST_CASE("Slender pillars with neighbours in two planes are braced from both", 
         INFO("pillar at " << axis.x() << ", " << axis.y() << " with " << dirs.size() << " brace ends");
         CHECK(two_planes);
     }
+}
+
+TEST_CASE("Braces take the pillar link radius, capped at the pillar's, and brace as fully", "[SLASupportGeneration]") {
+    indexed_triangle_set mesh = two_plates_mesh();
+    auto build = [&mesh](double link_radius) {
+        sla::SupportTreeConfig cfg = two_plates_config(15.);
+        cfg.pillar_link_radius_mm  = link_radius;
+        sla::SupportTreeBuilder builder;
+        sla::SupportableMesh    sm{mesh, TRIANGLE_POINTS, cfg};
+        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(builder, sm));
+        REQUIRE(builder.pillars().size() == 3);
+        CHECK(builder.unbraced_pillars == 0);
+        REQUIRE_FALSE(builder.crossbridges().empty());
+        return builder;
+    };
+    auto radii_are = [](const sla::SupportTreeBuilder &builder, double r) {
+        return std::all_of(builder.crossbridges().begin(), builder.crossbridges().end(),
+                           [r](const sla::Bridge &br) { return std::abs(br.r - r) < EPSILON; });
+    };
+
+    // The pillars stand at head_back_radius_mm, 0.6.
+    CHECK(radii_are(build(0.), 0.6));
+    CHECK(radii_are(build(0.3), 0.3));
+    CHECK(radii_are(build(1.), 0.6));
 }
 
 TEST_CASE("InitializedRasterShouldBeNONEmpty", "[SLARasterOutput]") {

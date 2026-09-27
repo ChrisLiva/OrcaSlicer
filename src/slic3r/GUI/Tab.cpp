@@ -3045,6 +3045,7 @@ void TabPrint::build()
         optgroup->append_single_option_line("tree_support_brim_width", "support_settings_tree");
         optgroup->append_single_option_line("scaffold_bridge_length", "support_settings_tree");
         optgroup->append_single_option_line("scaffold_brace_slenderness", "support_settings_tree");
+        optgroup->append_single_option_line("scaffold_brace_diameter", "support_settings_tree");
 
     page = add_options_page(L("Multimaterial"), "custom-gcode_multi_material"); // ORCA: icon only visible on placeholders
         optgroup = page->new_optgroup(L("Prime tower"), L"param_tower");

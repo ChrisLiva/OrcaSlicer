@@ -7,6 +7,7 @@ namespace Slic3r::ScaffoldSupport {
 struct Params {   // filled by TreeSupport from its config and support params
     double toolpath_width_mm = 0., pillar_diameter_mm = 0., xy_distance_mm = 0., bridge_length_mm = 0.,
            brace_slenderness = 0., max_bridge_length_mm = 0.,
+           brace_diameter_mm = 0.,   // a brace between two pillars, capped at the pillar diameter; 0 is the pillar's
            pad_thickness_mm = 0.,    // 0.6 mm rounded up to whole planned layers by TreeSupport
            z_offset_mm = 0.,         // m_slicing_params.object_print_z_min: print z minus mesh z
            interface_width_mm = 0.,  // the interface flow's line width, the width a ring's loop prints at

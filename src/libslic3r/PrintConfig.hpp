@@ -1147,6 +1147,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,               support_contact_min_distance))
     ((ConfigOptionFloat,               scaffold_bridge_length))
     ((ConfigOptionFloat,               scaffold_brace_slenderness))
+    ((ConfigOptionPercent,             scaffold_brace_diameter))
     ((ConfigOptionFloat,               support_top_z_distance))
     ((ConfigOptionFloat,               support_bottom_z_distance))
     ((ConfigOptionInt,                 enforce_support_layers))

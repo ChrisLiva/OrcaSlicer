@@ -1145,6 +1145,7 @@ static std::vector<std::string> s_Preset_print_options{
     "support_contact_min_distance",
     "scaffold_bridge_length",
     "scaffold_brace_slenderness",
+    "scaffold_brace_diameter",
     "bridge_no_support",
     "thick_bridges",
     "thick_internal_bridges",

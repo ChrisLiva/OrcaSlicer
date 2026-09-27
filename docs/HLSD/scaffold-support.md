@@ -24,13 +24,15 @@ listed last in the style menu. Like the other tree styles it needs a tree
 `support_type`: `SupportParameters` resolves the style to grid under a normal
 support type.
 
-Two settings belong to the style and show only under it:
+Three settings belong to the style and show only under it:
 
 - `scaffold_bridge_length`, 3 to 30 mm with a 12 mm default, bounds every
   bridge from a tip to its pillar and every brace between pillars.
 - `scaffold_brace_slenderness`, 5 to 40 with a 15 default, is the unbraced
   height of a pillar, in pillar diameters, above which the builder braces it
   to its neighbours.
+- `scaffold_brace_diameter`, 10 % to 100 % with a 60 % default, is a brace's
+  diameter as a share of the pillar diameter, never under two support lines.
 
 `tree_support_branch_diameter` sets the pillar diameter, as it sets the branch
 diameter of the slim, strong and hybrid styles, and
@@ -378,7 +380,8 @@ list and runs steps 2 to 4 on its points, as Baked contact points describes.
    radius at one toolpath width, pillar radius at half the pillar diameter,
    no model anchors, bridge and pillar-link lengths at the
    scaffold bridge length, a 45 degree bridge slope, the object's xy distance
-   as the safety distance and the scaffold brace slenderness. The draw sets
+   as the safety distance, the scaffold brace slenderness, and the brace
+   radius at half the brace diameter. The draw sets
    the elevation to the mesh's lowest z: the builder grounds pillars at that z
    less the elevation, so the ground sits at the pad's top on the bed for an
    object standing on it and for one lifted off it with auto-drop off. A
@@ -536,6 +539,19 @@ tolerates.
   with a run over the ratio or with its chains in one plane stays up and
   counts in `SupportTreeBuilder::unbraced_pillars`. The classic cascade and
   its helper pillars do not run under a slenderness.
+- Slim braces. `interconnect` builds a brace at `pillar_link_radius_mm`,
+  capped at the pillar's radius, and at the pillar's radius when the field is
+  zero, as SLA leaves it. A brace takes a pull or a push along its axis, so it
+  needs far less section than the pillar it steadies, and every brace is a
+  joint the user snaps to free the print: at the pillar's 1.2 mm a brace
+  prints a 0.22 mm wall around a 1.2 by 1.7 mm slice, about 0.61 mm2 across
+  its axis, and at 60 % about 0.31 mm2. `TreeSupport` floors the diameter at
+  two support lines, since `tree_supports_generate_paths` closes a section by
+  half a line before laying its wall and a narrower one prints nothing. A
+  pillar-thick brace fuses the pillars it joins into one outline and a thin
+  one leaves each pillar its own wall, so a densely braced plate prints more
+  wall as its braces thin: plate 1 of the corpus, with about 1200
+  braces, prints about 10 % more support path at 0.5 mm than at 1.2 mm.
 
 ## Emission and removal contract
 
