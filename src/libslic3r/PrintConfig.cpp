@@ -467,6 +467,13 @@ static const t_config_enum_values s_keys_map_BrimType = {
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(BrimType)
 
+static const t_config_enum_values s_keys_map_ScaffoldDensity = {
+    {"light",  sdLight},
+    {"medium", sdMedium},
+    {"heavy",  sdHeavy},
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(ScaffoldDensity)
+
 // using 0,1 to compatible with old files
 static const t_config_enum_values s_keys_map_TimelapseType = {
     {"0",       tlTraditional},
@@ -6916,6 +6923,23 @@ void PrintConfigDef::init_fff_params()
     def->max      = 100;
     def->mode     = comAdvanced;
     def->set_default_value(new ConfigOptionPercent(60));
+
+    def = this->add("scaffold_density", coEnum);
+    def->label    = L("Scaffold density");
+    def->category = L("Support");
+    def->tooltip  = L("How many support tips Tree Scaffold places. Medium keeps the minimum contact distance between the tips of one "
+                      "overhang. Light also keeps that distance between the tips of neighbouring overhangs, so fewer tips "
+                      "stand on a detailed underside. Heavy halves the distance, so more tips stand under every overhang. "
+                      "Every floating part of the model keeps its minimum number of tips at any density.");
+    def->enum_keys_map = &ConfigOptionEnum<ScaffoldDensity>::get_enum_values();
+    def->enum_values.emplace_back("light");
+    def->enum_values.emplace_back("medium");
+    def->enum_values.emplace_back("heavy");
+    def->enum_labels.emplace_back(L("Light"));
+    def->enum_labels.emplace_back(L("Medium"));
+    def->enum_labels.emplace_back(L("Heavy"));
+    def->mode     = comAdvanced;
+    def->set_default_value(new ConfigOptionEnum<ScaffoldDensity>(sdMedium));
 
     // BBS: change type to common float.
     // It may be rounded to mulitple layer height when independent_support_layer_height is false.

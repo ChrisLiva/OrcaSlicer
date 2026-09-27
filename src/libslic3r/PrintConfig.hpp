@@ -351,6 +351,11 @@ enum SLAPillarConnectionMode {
     slapcmDynamic
 };
 
+// How many tips Tree Scaffold places: Medium as the contact selection keeps them, Light and Heavy fewer and more.
+enum ScaffoldDensity {
+    sdLight, sdMedium, sdHeavy,
+};
+
 enum BrimType {
     btAutoBrim,  // BBS
     btEar, // Orca
@@ -680,6 +685,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SeamScarfType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SLADisplayOrientation)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SLAPillarConnectionMode)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BrimType)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(ScaffoldDensity)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(TimelapseType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(BedType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SkirtType)
@@ -1148,6 +1154,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,               scaffold_bridge_length))
     ((ConfigOptionFloat,               scaffold_brace_slenderness))
     ((ConfigOptionPercent,             scaffold_brace_diameter))
+    ((ConfigOptionEnum<ScaffoldDensity>, scaffold_density))
     ((ConfigOptionFloat,               support_top_z_distance))
     ((ConfigOptionFloat,               support_bottom_z_distance))
     ((ConfigOptionInt,                 enforce_support_layers))

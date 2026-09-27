@@ -1945,8 +1945,9 @@ void TreeSupport::generate()
     if (m_analyze && ! baked)
         build_required_regions();
     // The thinning distance the contact pass runs under, and the distance the measurement carries a
-    // cell over: nothing at all unless the miniature contact mode asked for it.
-    m_problem.contact_min_distance_mm = miniature_contacts ? m_object_config->support_contact_min_distance.value : 0.;
+    // cell over: nothing at all unless the miniature contact mode asked for it. A Heavy scaffold halves it.
+    const double density_scale        = m_scaffold && m_object_config->scaffold_density == sdHeavy ? 0.5 : 1.;
+    m_problem.contact_min_distance_mm = miniature_contacts ? density_scale * m_object_config->support_contact_min_distance.value : 0.;
     // The model's own weakness under a contact, taken off the object's sliced layers once: the
     // measurement and, where the mode thins them, the contact placement both read it.
     profiler.stage_start(STAGE_RISK_FIELD);
@@ -2045,6 +2046,7 @@ void TreeSupport::generate()
                                                2. * params.toolpath_width_mm);
         params.taper                = diameter_angle_scale_factor;
         params.max_bridge_length_mm = m_object_config->max_bridge_length.value;
+        params.tip_spacing_mm       = m_object_config->scaffold_density == sdLight ? m_object_config->support_contact_min_distance.value : 0.;
         params.z_offset_mm          = m_slicing_params.object_print_z_min;
         params.interface_width_mm   = support_material_interface_flow(m_object, float(m_slicing_params.layer_height)).width();
         // The base walls generate_toolpaths lays above the pad, through the same call; a base pattern with infill

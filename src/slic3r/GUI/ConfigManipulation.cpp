@@ -953,7 +953,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
     for (auto el : {"tree_support_branch_angle", "tree_support_branch_distance", "tree_support_auto_brim", "tree_support_brim_width"})
         toggle_line(el, support_is_normal_tree);
     toggle_line("tree_support_branch_diameter", support_is_normal_tree || support_is_scaffold);
-    for (auto el : {"scaffold_bridge_length", "scaffold_brace_slenderness", "scaffold_brace_diameter"})
+    for (auto el : {"scaffold_bridge_length", "scaffold_brace_slenderness", "scaffold_brace_diameter", "scaffold_density"})
         toggle_line(el, support_is_scaffold);
     // settings specific to organic trees
     for (auto el : {"tree_support_branch_angle_organic", "tree_support_branch_distance_organic", "tree_support_branch_diameter_organic", "tree_support_angle_slow", "tree_support_tip_diameter", "tree_support_top_rate"})

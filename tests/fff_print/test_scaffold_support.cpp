@@ -390,6 +390,21 @@ TriangleMesh floating_slab_fixture()
     return post;
 }
 
+// A 6 x 6 x 14 mm column at x 0..6, y 0..6 carrying off its +x face six steps across y 0..6 up to z 12, step i reaching
+// x 6..7 + i from z 8 + 0.6 i. Each step's underside is a 1 mm strip three 0.2 mm layers over the one before, past the
+// two-layer window that links regions into one overhang component, so every strip is its own component while
+// contacts on neighbouring strips stand about 1.2 mm apart in 3-D.
+TriangleMesh staircase_fixture()
+{
+    TriangleMesh column = make_cube(6., 6., 14.);
+    for (int i = 0; i < 6; ++ i) {
+        TriangleMesh step = make_cube(1. + i, 6., 4. - 0.6 * i);
+        step.translate(6.f, 0.f, float(8. + 0.6 * i));
+        column.merge(step);
+    }
+    return column;
+}
+
 // A 6 x 6 x 14 mm column at x 0..6, y 0..6 carrying off its +x face a plank 2 mm thick whose underside falls at
 // 45 degrees from z 10 at the face, `length_mm` along x, across y 0..6. A head on the underside aims along the
 // underside's normal, down and back toward the column, so a tip under a millimetre from the face tilts its neck into
@@ -495,11 +510,17 @@ TEST_CASE("A tree scaffold style round-trips through the config and lists last",
     CHECK_THAT(brace_diameter_def->min, WithinAbs(10., 1e-9));
     CHECK_THAT(brace_diameter_def->max, WithinAbs(100., 1e-9));
     CHECK(brace_diameter_def->mode == comAdvanced);
+    CHECK(defaults.opt_enum<ScaffoldDensity>("scaffold_density") == sdMedium);
+    const ConfigOptionDef *density_def = print_config_def.get("scaffold_density");
+    REQUIRE(density_def != nullptr);
+    CHECK(density_def->enum_values == std::vector<std::string>{ "light", "medium", "heavy" });
+    CHECK(density_def->mode == comAdvanced);
 
     const std::vector<std::string> &options = Preset::print_options();
     CHECK(std::find(options.begin(), options.end(), "scaffold_bridge_length") != options.end());
     CHECK(std::find(options.begin(), options.end(), "scaffold_brace_slenderness") != options.end());
     CHECK(std::find(options.begin(), options.end(), "scaffold_brace_diameter") != options.end());
+    CHECK(std::find(options.begin(), options.end(), "scaffold_density") != options.end());
 
     // Print::apply needs the Model the print was built from, so the print is built through init_print.
     const DynamicPrintConfig config = fixture_config({ { "support_style", "tree_slim" } });
@@ -1179,6 +1200,31 @@ TEST_CASE("The hold floor restores dropped contacts under tall islands", "[Scaff
             spread_mm = std::max(spread_mm, unscale<double>((at_b[i] - at_b[j]).cast<double>().norm()));
     INFO("the interface polygons under B spread " << spread_mm << " mm");
     CHECK(spread_mm >= 1.2);
+}
+
+TEST_CASE("Scaffold density places fewer tips at Light and more at Heavy", "[ScaffoldSupport]")
+{
+    // At a 2 mm contact distance, Medium keeps a tip on every step's strip, since each strip is its own component. Light
+    // also keeps 2 mm between strips, so it thins neighbouring steps. Heavy thins inside a strip at 1 mm, so a strip's
+    // corners 1 mm apart both stand.
+    const auto tips = [](const char *density) {
+        Print print;
+        init_and_process_print({ staircase_fixture() }, print,
+                               scaffold_config({ { "support_contact_min_distance", "2" }, { "scaffold_density", density } }));
+        REQUIRE(print.objects().size() == 1);
+        const PrintObject &object = *print.objects().front();
+        REQUIRE(object.support_analysis() != nullptr);
+        const SupportAnalysis::Report &report = *object.support_analysis();
+        INFO(density << ": tips placed " << report.tips_placed << " routed " << report.tips_routed << " dropped "
+                     << report.tips_dropped << " floating removed " << report.floating_pieces_removed);
+        CHECK(report.floating_pieces_removed == 0);
+        return report.tips_placed;
+    };
+    const size_t light = tips("light"), medium = tips("medium"), heavy = tips("heavy");
+    INFO("light " << light << " medium " << medium << " heavy " << heavy);
+    CHECK(light > 0);
+    CHECK(light < medium);
+    CHECK(medium < heavy);
 }
 
 TEST_CASE("Unseeded feature starts get a scaffold tip while floating debris and wall-held slivers get none", "[ScaffoldSupport]")

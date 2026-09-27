@@ -24,7 +24,7 @@ listed last in the style menu. Like the other tree styles it needs a tree
 `support_type`: `SupportParameters` resolves the style to grid under a normal
 support type.
 
-Three settings belong to the style and show only under it:
+Four settings belong to the style and show only under it:
 
 - `scaffold_bridge_length`, 3 to 30 mm with a 12 mm default, bounds every
   bridge from a tip to its pillar and every brace between pillars.
@@ -33,6 +33,16 @@ Three settings belong to the style and show only under it:
   to its neighbours.
 - `scaffold_brace_diameter`, 10 % to 100 % with a 60 % default, is a brace's
   diameter as a share of the pillar diameter, never under two support lines.
+- `scaffold_density`, Light, Medium or Heavy with Medium the default, sets how
+  many tips an auto slice places. Medium keeps the tips the contact selection
+  keeps. The selection thins contacts by `support_contact_min_distance` within
+  one overhang component only, and a sculpted underside splits into many small
+  components: plate 1 of the corpus reads 538, with 667 of its 819 kept
+  contacts standing within 1 mm of a contact from another component. Heavy
+  halves the selection's distance. Light keeps the distance between tips of
+  different components too, in `choose_tips`. A baked list keeps its own points
+  at any density. Plate 1 places 321, 401 and 575 tips at Light, Medium and
+  Heavy.
 
 `tree_support_branch_diameter` sets the pillar diameter, as it sets the branch
 diameter of the slim, strong and hybrid styles, and
@@ -335,7 +345,12 @@ list and runs steps 2 to 4 on its points, as Baked contact points describes.
    covers, whether painted facets or an enforcer modifier volume, and every
    vertical enforcer point painted facets place, becomes a `TipSite` with
    `enforced` set, and the skip keeps it however close the wall stands, so
-   the tip fuses where the user asked for support and leaves its scar there.
+   the tip fuses where the user asked for support and leaves its scar there. Under
+   Light density the selection then visits the tips lowest first, among equals
+   by seed id, and moves a tip standing within `support_contact_min_distance`
+   in 3-D of a tip already kept, of any component, to the dropped contacts,
+   where the hold floor can restore it; an enforced tip is kept and crowds no
+   other.
 3. The island hold floor. `SupportAnalysis::island_joins` maps every mid-air
    island of the model to the slab where it first meets the rooted body. An
    island needs one tip when its unjoined height is at most 1 mm, two up to

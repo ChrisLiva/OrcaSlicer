@@ -11,7 +11,8 @@ struct Params {   // filled by TreeSupport from its config and support params
            pad_thickness_mm = 0.,    // 0.6 mm rounded up to whole planned layers by TreeSupport
            z_offset_mm = 0.,         // m_slicing_params.object_print_z_min: print z minus mesh z
            interface_width_mm = 0.,  // the interface flow's line width, the width a ring's loop prints at
-           taper = 0.;               // radius a pillar gains per mm below its top, the branch diameter angle in radians
+           taper = 0.,               // radius a pillar gains per mm below its top, the branch diameter angle in radians
+           tip_spacing_mm = 0.;      // Light density: the 3-D distance tips of different overhangs keep, 0 for none
     size_t interface_layers = 0;     // support_interface_top_layers
     // What the lines TreeSupport lays on base areas of a layer this high cover, as the floating pass reads them.
     std::function<Polygons(const ExPolygons &base, double height)> base_cover;

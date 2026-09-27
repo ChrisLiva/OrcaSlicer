@@ -324,6 +324,35 @@ void merge_aliases(std::vector<TipSite> &tips)
     tips.resize(next);
 }
 
+// Light density. The contact selection keeps its distance between the contacts of one overhang component only, so a
+// detailed underside that splits into many small components keeps a tip on each however close they stand. Tips are
+// visited lowest first, among equals by seed id, and a tip standing within `spacing_mm` in 3-D of a tip already kept
+// moves to `spare`, where the hold floor can restore it. An enforced tip is kept and crowds nobody.
+void space_tips(std::vector<TipSite> &tips, std::vector<TipSite> &spare, double spacing_mm)
+{
+    std::stable_sort(tips.begin(), tips.end(), [](const TipSite &a, const TipSite &b) {
+        return a.print_z != b.print_z ? a.print_z < b.print_z : a.seed < b.seed;
+    });
+    const auto point = [](const TipSite &tip) {
+        const Vec2d xy = unscale(tip.position);
+        return Vec3d(xy.x(), xy.y(), tip.print_z);
+    };
+    std::vector<Vec3d>   kept_at;
+    std::vector<TipSite> kept;
+    for (const TipSite &tip : tips) {
+        if (! tip.enforced) {
+            const Vec3d p = point(tip);
+            if (std::any_of(kept_at.begin(), kept_at.end(), [&](const Vec3d &q) { return (p - q).norm() < spacing_mm; })) {
+                spare.push_back(tip);
+                continue;
+            }
+            kept_at.push_back(p);
+        }
+        kept.push_back(tip);
+    }
+    tips = std::move(kept);
+}
+
 // One tip per contact. An interior tip is kept only where its overhang holds a disc as wide as the longest bridge:
 // under a narrower overhang the tips on its rim already hold it.
 std::vector<TipSite> contact_tips(const std::vector<std::vector<SupportNode *>> &contacts, double max_bridge_length_mm)
@@ -990,6 +1019,8 @@ Tips choose_tips(const PrintObject &object, const std::vector<std::vector<Suppor
     const std::function<bool(const TipSite &)> at_wall = wall_skip(object, nodes, spare, params);
     nodes.erase(std::remove_if(nodes.begin(), nodes.end(), std::cref(at_wall)), nodes.end());
     spare.erase(std::remove_if(spare.begin(), spare.end(), std::cref(at_wall)), spare.end());
+    if (params.tip_spacing_mm > 0.)
+        space_tips(nodes, spare, params.tip_spacing_mm);
 
     Tips       tips;
     const auto islands_start = std::chrono::steady_clock::now();
