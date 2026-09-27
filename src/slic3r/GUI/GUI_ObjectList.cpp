@@ -3050,6 +3050,10 @@ void ObjectList::merge(bool to_multipart_object)
 
         Slic3r::SaveObjectGaurd gaurd(*new_object);
 
+        // Held apart until the new instance is final: ModelObject::translate moves a listed point, so pushing them
+        // before center_around_origin would apply its shift twice.
+        ScaffoldPoints scaffold_points;
+        bool           has_scaffold_points = false;
         for (int obj_idx : obj_idxs) {
             ModelObject* object = (*m_objects)[obj_idx];
 
@@ -3147,6 +3151,11 @@ void ObjectList::merge(bool to_multipart_object)
                 p.set_transform(transformation_matrix);
                 new_object->brim_points.push_back(p);
             }
+
+            // merge scaffold points
+            for (const ScaffoldPoint& p : object->scaffold_points)
+                scaffold_points.push_back({ (transformation_matrix * p.pos.cast<double>()).cast<float>(), p.size, p.enforced });
+            has_scaffold_points |= object->scaffold_points_status != ScaffoldPointsStatus::NoPoints;
         }
 
         //BBS: ensure on bed, and no need to center around origin
@@ -3161,6 +3170,14 @@ void ObjectList::merge(bool to_multipart_object)
         const Transform3d& new_object_inverse_matrix = new_object_trsf.get_matrix().inverse();
         for (auto& p : new_object->brim_points) {
             p.set_transform(new_object_inverse_matrix);
+        }
+        if (has_scaffold_points) {
+            for (ScaffoldPoint& p : scaffold_points)
+                p.pos = (new_object_inverse_matrix * p.pos.cast<double>()).cast<float>();
+            new_object->scaffold_points          = std::move(scaffold_points);
+            new_object->scaffold_points_status   = ScaffoldPointsStatus::UserModified;
+            new_object->scaffold_points_pose     = new_object_trsf.get_matrix().linear();
+            new_object->scaffold_points_mesh_box = new_object->raw_mesh_bounding_box();
         }
         //BBS: notify it before remove
         notify_instance_updated(m_objects->size() - 1);

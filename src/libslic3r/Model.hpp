@@ -396,6 +396,8 @@ public:
     // Linear part of the first instance's matrix when the list was written.
     Matrix3d                scaffold_points_pose     = Matrix3d::Identity();
     BoundingBoxf3           scaffold_points_mesh_box;   // raw_mesh_bounding_box() when the list was written
+    // Empties the list and sets NoPoints; a mesh edit calls it, since the points no longer sit on the surface.
+    void                    clear_scaffold_points();
 
     /* This vector accumulates the total translation applied to the object by the
         center_around_origin() method. Callers might want to apply the same translation

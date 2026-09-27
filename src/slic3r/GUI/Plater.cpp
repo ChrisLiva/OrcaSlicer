@@ -20745,6 +20745,7 @@ void Plater::changed_mesh(int obj_idx)
 {
     ModelObject* mo = model().objects[obj_idx];
     sla::reproject_points_and_holes(mo);
+    mo->clear_scaffold_points();
     update();
     p->object_list_changed();
     p->schedule_background_process();

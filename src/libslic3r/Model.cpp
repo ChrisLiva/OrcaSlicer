@@ -1862,6 +1862,19 @@ void ModelObject::translate(double x, double y, double z)
         m_bounding_box_approx.translate(x, y, z);
     if (m_bounding_box_exact_valid)
         m_bounding_box_exact.translate(x, y, z);
+
+    // The raw mesh moves with its volumes, and the list and its stamp live in the raw-mesh frame.
+    const Vec3f shift = Vec3d(x, y, z).cast<float>();
+    for (ScaffoldPoint &p : this->scaffold_points)
+        p.pos += shift;
+    if (this->scaffold_points_mesh_box.defined)
+        this->scaffold_points_mesh_box.translate(x, y, z);
+}
+
+void ModelObject::clear_scaffold_points()
+{
+    this->scaffold_points.clear();
+    this->scaffold_points_status = ScaffoldPointsStatus::NoPoints;
 }
 
 void ModelObject::scale(const Vec3d &versor)
@@ -1869,6 +1882,7 @@ void ModelObject::scale(const Vec3d &versor)
     for (ModelVolume *v : this->volumes) {
         v->scale(versor);
     }
+    this->clear_scaffold_points();
     this->invalidate_bounding_box();
 }
 
@@ -1878,6 +1892,9 @@ void ModelObject::rotate(double angle, Axis axis)
         v->rotate(angle, axis);
     }
     center_around_origin();
+    // Every imported object is rotated by preferred_orientation, which defaults to 0.
+    if (angle != 0.)
+        this->clear_scaffold_points();
     this->invalidate_bounding_box();
 }
 
@@ -1893,6 +1910,8 @@ void ModelObject::rotate(double angle, const Vec3d& axis)
     }
 
     center_around_origin();
+    if (angle != 0.)
+        this->clear_scaffold_points();
     this->invalidate_bounding_box();
 }
 
@@ -1901,6 +1920,7 @@ void ModelObject::mirror(Axis axis)
     for (ModelVolume *v : this->volumes) {
         v->mirror(axis);
     }
+    this->clear_scaffold_points();
     this->invalidate_bounding_box();
 }
 
@@ -1911,6 +1931,7 @@ void ModelObject::scale_mesh_after_creation(const float scale)
         v->scale_geometry_after_creation(scale);
         v->set_offset(Vec3d(scale, scale, scale).cwiseProduct(v->get_offset()));
     }
+    this->clear_scaffold_points();
     this->invalidate_bounding_box();
 }
 
@@ -1928,6 +1949,7 @@ void ModelObject::convert_units(ModelObjectPtrs& new_objects, ConversionType con
     new_object->sla_drain_holes.clear();
     new_object->sla_points_status = sla::PointsStatus::NoPoints;
     new_object->brim_points.clear();
+    new_object->clear_scaffold_points();
     new_object->clear_volumes();
     new_object->input_file.clear();
 
@@ -2038,6 +2060,7 @@ void ModelObject::clone_for_cut(ModelObject **obj)
     (*obj)->sla_support_points.clear();
     (*obj)->sla_drain_holes.clear();
     (*obj)->sla_points_status = sla::PointsStatus::NoPoints;
+    (*obj)->clear_scaffold_points();
     (*obj)->clear_volumes();
     (*obj)->input_file.clear();
 }
@@ -2289,6 +2312,7 @@ ModelObjectPtrs ModelObject::merge_volumes(std::vector<int>& vol_indeces)
     upper->sla_drain_holes.clear();
     upper->sla_points_status = sla::PointsStatus::NoPoints;
     upper->brim_points.clear();
+    upper->clear_scaffold_points();
     upper->clear_volumes();
     upper->input_file.clear();
 
