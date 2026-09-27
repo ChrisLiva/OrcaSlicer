@@ -1924,7 +1924,10 @@ void TreeSupport::generate()
     m_object->set_support_analysis(nullptr);
     m_object->set_emitted_support(nullptr);
     m_object->set_scaffold_record(nullptr);
-    if (m_analyze)
+    // A scaffold object holding a baked list builds its tips from the list, so it places no contact, and the regions,
+    // the risk field and the seeds the contact pass reads go unbuilt.
+    const bool baked = m_scaffold && m_object->model_object()->scaffold_points_status != ScaffoldPointsStatus::NoPoints;
+    if (m_analyze && ! baked)
         build_required_regions();
     // The thinning distance the contact pass runs under, and the distance the measurement carries a
     // cell over: nothing at all unless the miniature contact mode asked for it.
@@ -1932,7 +1935,7 @@ void TreeSupport::generate()
     // The model's own weakness under a contact, taken off the object's sliced layers once: the
     // measurement and, where the mode thins them, the contact placement both read it.
     profiler.stage_start(STAGE_RISK_FIELD);
-    if (m_analyze && m_problem.extrusion_width_mm > 0.)
+    if (m_analyze && ! baked && m_problem.extrusion_width_mm > 0.)
         m_risk = SupportAnalysis::measure_model_risk(*m_object, m_problem.extrusion_width_mm);
     profiler.stage_finish(STAGE_RISK_FIELD);
 
@@ -1943,14 +1946,16 @@ void TreeSupport::generate()
     // auto tmp= diff_ex(offset_ex(m_machine_border, scale_(100)), m_machine_border);
     // if (!tmp.empty()) m_ts_data->m_machine_border = tmp[0];
 
-    profiler.stage_start(STAGE_GENERATE_CONTACT_NODES);
-    m_object->print()->set_status(56, _u8L("Support: generate contact points"));
-    generate_contact_points();
-    profiler.stage_finish(STAGE_GENERATE_CONTACT_NODES);
+    if (! baked) {
+        profiler.stage_start(STAGE_GENERATE_CONTACT_NODES);
+        m_object->print()->set_status(56, _u8L("Support: generate contact points"));
+        generate_contact_points();
+        profiler.stage_finish(STAGE_GENERATE_CONTACT_NODES);
+    }
 
     // Before anything thins or routes the contacts: the seeds are what this pass placed, and the ids
     // they get are what every node below them carries from here on.
-    if (m_analyze)
+    if (m_analyze && ! baked)
         build_contact_seeds();
 
     // Serial 3-D contact selection: already_inserted in generate_contact_points is scoped to one layer
@@ -1962,7 +1967,7 @@ void TreeSupport::generate()
     // is zero unless the miniature contact mode asked for one, and select_contacts relocates contacts
     // even at zero, so the gate stays.
     size_t seeds_kept = m_problem.seeds.size(), seeds_restored = 0, seeds_retained = m_problem.seeds.size();
-    if (m_problem.contact_min_distance_mm > 0.) {
+    if (! baked && m_problem.contact_min_distance_mm > 0.) {
         // Which contacts this pass keeps: decimated by 3-D distance within an overhang component,
         // then one contact put back per printable region no survivor covers (select_contacts).
         const MiniatureSupport::Selection selection = MiniatureSupport::select_contacts(m_problem, m_risk);
@@ -2040,7 +2045,8 @@ void TreeSupport::generate()
             return cover;
         };
         params.interface_layers     = m_support_params.num_top_interface_layers;
-        scaffold_tips = ScaffoldSupport::choose_tips(*m_object, contact_nodes, m_dropped_contacts, params);
+        scaffold_tips = baked ? ScaffoldSupport::baked_tips(*m_object, m_object->model_object()->scaffold_points, params) :
+                                ScaffoldSupport::choose_tips(*m_object, contact_nodes, m_dropped_contacts, params);
         for (const ScaffoldSupport::TipSite &tip : scaffold_tips.sites)
             tip_tops.push_back(tip.print_z);
     }
@@ -2092,16 +2098,33 @@ void TreeSupport::generate()
         m_pad_layers    = out.pad_layers;
 
         // What the pass did with each tip, in the frame of ModelObject::raw_mesh(), the frame a baked list is kept in:
-        // draw builds on the raw mesh through trafo_centered(), with print z less the object's lift.
+        // draw builds on the raw mesh through trafo_centered(), with print z less the object's lift. A baked record
+        // holds one tip per list point, in list order: a point with no drawn site was skipped at a wall or merged.
         auto record = std::make_shared<ScaffoldRecord>();
         const Transform3d to_raw = m_object->trafo_centered().inverse();
-        for (size_t i = 0; i < scaffold_tips.sites.size(); ++ i) {
-            const ScaffoldSupport::TipSite &site = scaffold_tips.sites[i];
-            const Vec2d                     xy   = unscale(site.position);
-            record->tips.push_back({ (to_raw * Vec3d(xy.x(), xy.y(), site.print_z - params.z_offset_mm)).cast<float>(),
-                                     out.grades[i] > 3. * params.toolpath_width_mm ? ScaffoldHeadSize::Heavy : ScaffoldHeadSize::Light,
-                                     site.enforced, out.results[i] });
-        }
+        const auto        raw_of = [&to_raw, &params](double x, double y, double print_z) -> Vec3f {
+            return (to_raw * Vec3d(x, y, print_z - params.z_offset_mm)).cast<float>();
+        };
+        record->baked = baked;
+        if (baked) {
+            const ScaffoldPoints &points = m_object->model_object()->scaffold_points;
+            std::vector<ScaffoldTipResult> results(points.size(), ScaffoldTipResult::Merged);
+            for (const int source : scaffold_tips.wall_skipped)
+                results[size_t(source)] = ScaffoldTipResult::Wall;
+            for (size_t i = 0; i < scaffold_tips.sites.size(); ++ i)
+                results[size_t(scaffold_tips.sites[i].source)] = out.results[i];
+            for (size_t i = 0; i < points.size(); ++ i)
+                record->tips.push_back({ points[i].pos, points[i].size, points[i].enforced, results[i] });
+            for (const Vec3d &island : scaffold_tips.bare_islands)
+                record->bare_islands.push_back(raw_of(island.x(), island.y(), island.z()));
+        } else
+            for (size_t i = 0; i < scaffold_tips.sites.size(); ++ i) {
+                const ScaffoldSupport::TipSite &site = scaffold_tips.sites[i];
+                const Vec2d                     xy   = unscale(site.position);
+                record->tips.push_back({ raw_of(xy.x(), xy.y(), site.print_z),
+                                         out.grades[i] > 3. * params.toolpath_width_mm ? ScaffoldHeadSize::Heavy : ScaffoldHeadSize::Light,
+                                         site.enforced, out.results[i] });
+            }
         record->pose              = m_object->instances().front().model_instance->get_matrix().linear();
         record->toolpath_width_mm = params.toolpath_width_mm;
         m_object->set_scaffold_record(std::move(record));

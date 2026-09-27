@@ -179,10 +179,10 @@ void restore_dropped(std::vector<TipSite> &kept, std::vector<TipSite> &candidate
 
 // Holds island `k` with its floor of tips, `kept` the tips standing under it and `spare` its dropped contacts, and
 // returns whether it stays short of the floor or of the tips its birth piece fits, whichever is fewer. Debris and an
-// island hanging from a wall read false.
+// island hanging from a wall read false. With `bare`, the tip the island would be seeded goes there and not into `tips`.
 bool hold_island(const std::vector<SupportAnalysis::Slab> &slabs, const SupportAnalysis::IslandMap &map, size_t k,
                  std::vector<TipSite> &kept, std::vector<TipSite> &spare, std::vector<TipSite> &tips, double pillar_diameter_mm,
-                 const std::function<bool(const TipSite &)> &at_wall)
+                 const std::function<bool(const TipSite &)> &at_wall, std::vector<TipSite> *bare = nullptr)
 {
     using namespace SupportAnalysis;
     const IslandJoin &join   = map.islands[k];
@@ -200,10 +200,14 @@ bool hold_island(const std::vector<SupportAnalysis::Slab> &slabs, const SupportA
     if (kept.empty() && spare.empty() && birth_piece != nullptr) {
         const TipSite seeded { inscribed_point(*birth_piece), birth.bottom_z, int(join.birth_slab) - 1 };
         if (! at_wall(seeded)) {
-            const Vec2d xy = unscale(seeded.position);
-            BOOST_LOG_TRIVIAL(debug) << "scaffold tip seeded at (" << xy.x() << ", " << xy.y() << ", " << seeded.print_z << ")";
-            kept.push_back(seeded);
-            tips.push_back(seeded);
+            if (bare != nullptr) {
+                bare->push_back(seeded);
+            } else {
+                const Vec2d xy = unscale(seeded.position);
+                BOOST_LOG_TRIVIAL(debug) << "scaffold tip seeded at (" << xy.x() << ", " << xy.y() << ", " << seeded.print_z << ")";
+                kept.push_back(seeded);
+                tips.push_back(seeded);
+            }
         } else if (joins && height <= 1. + EPSILON) {
             BOOST_LOG_TRIVIAL(debug) << "scaffold island held at " << birth.bottom_z << ": wall";
             return false;
@@ -229,9 +233,10 @@ bool hold_island(const std::vector<SupportAnalysis::Slab> &slabs, const SupportA
 // counted, so a short leg merging into a taller floating part keeps its floor. An island with no tip and no dropped
 // contact gets one tip seeded at the deepest point of its birth piece, at the piece's bottom, unless `at_wall` skips
 // it; an island `at_wall` skips that joins within 1 mm hangs from that wall and is not counted. Short of the floor,
-// the dropped contacts under it come back.
+// the dropped contacts under it come back. With `bare`, a seeded tip goes there and not into `tips`.
 size_t restore_hold_floor(const PrintObject &object, std::vector<TipSite> &tips, const std::vector<TipSite> &dropped,
-                          double pillar_diameter_mm, const std::function<bool(const TipSite &)> &at_wall)
+                          double pillar_diameter_mm, const std::function<bool(const TipSite &)> &at_wall,
+                          std::vector<TipSite> *bare = nullptr)
 {
     using namespace SupportAnalysis;
     const std::vector<Slab> slabs = model_slabs_of(object);
@@ -250,7 +255,7 @@ size_t restore_hold_floor(const PrintObject &object, std::vector<TipSite> &tips,
 
     size_t under_held = 0;
     for (size_t k = 0; k < map.islands.size(); ++ k)
-        if (hold_island(slabs, map, k, kept[k], spare[k], tips, pillar_diameter_mm, at_wall))
+        if (hold_island(slabs, map, k, kept[k], spare[k], tips, pillar_diameter_mm, at_wall, bare))
             ++ under_held;
     return under_held;
 }
@@ -339,6 +344,49 @@ int reference_layer(const PrintObject &object, const TipSite &tip, double neck_d
     const auto it = std::lower_bound(object.layers().begin(), object.layers().end(), z,
                                      [](const Layer *layer, double z) { return layer->print_z < z; });
     return it == object.layers().end() ? -1 : int(it - object.layers().begin());
+}
+
+// The wall skip, true for a tip whose centre stands within the xy distance of the model at its neck's bottom: the seam
+// clips support inside that band, so the neck would be cut while its ring survived, and the wall anchors that band as
+// it does under the legacy tree. The skip reads the tip's centre at the depth of the neck's bottom, not the built neck:
+// under a slope the head tilts along the underside's normal, and the neck check exempts a cut head whose tilted neck
+// bottoms outside the band. A neck bottoming under the first layer stands by the pad and is kept, and so is an
+// enforced tip: the enforcer asked for it there, and `clip_base` keeps its head out of the model alone. The bands of
+// the layers under `tips` and `spare` are offset up front.
+std::function<bool(const TipSite &)> wall_skip(const PrintObject &object, const std::vector<TipSite> &tips,
+                                               const std::vector<TipSite> &spare, const Params &params)
+{
+    const double     neck_depth_mm = head_width_mm + params.toolpath_width_mm;
+    std::vector<int> wall_layers;
+    for (const std::vector<TipSite> *list : { &tips, &spare })
+        for (const TipSite &tip : *list)
+            if (const int l = reference_layer(object, tip, neck_depth_mm); l >= 0)
+                wall_layers.push_back(l);
+    std::sort(wall_layers.begin(), wall_layers.end());
+    wall_layers.erase(std::unique(wall_layers.begin(), wall_layers.end()), wall_layers.end());
+    const auto wall_band = [&object, xy_distance_mm = params.xy_distance_mm](int layer) {
+        return offset_ex(object.get_layer(layer)->lslices, scale_(xy_distance_mm));
+    };
+    std::vector<ExPolygons> wall_bands(wall_layers.size());
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, wall_layers.size()), [&](const tbb::blocked_range<size_t> &range) {
+        for (size_t i = range.begin(); i < range.end(); ++ i)
+            wall_bands[i] = wall_band(wall_layers[i]);
+    });
+    // A tip the hold floor seeds may stand over a layer no other tip does, so its band is offset on the spot.
+    return [&object, neck_depth_mm, wall_band, wall_layers = std::move(wall_layers), wall_bands = std::move(wall_bands)](const TipSite &tip) {
+        const int l = reference_layer(object, tip, neck_depth_mm);
+        if (l < 0 || tip.enforced)
+            return false;
+        const auto        it     = std::lower_bound(wall_layers.begin(), wall_layers.end(), l);
+        const bool        listed = it != wall_layers.end() && *it == l;
+        const ExPolygons  own    = listed ? ExPolygons() : wall_band(l);
+        const ExPolygons &band   = listed ? wall_bands[size_t(it - wall_layers.begin())] : own;
+        if (std::none_of(band.begin(), band.end(), [&tip](const ExPolygon &expoly) { return expoly.contains(tip.position); }))
+            return false;
+        const Vec2d xy = unscale(tip.position);
+        BOOST_LOG_TRIVIAL(debug) << "scaffold tip skipped at (" << xy.x() << ", " << xy.y() << ", " << tip.print_z << "): wall";
+        return true;
+    };
 }
 
 // The leading planned layers whose base is the pad.
@@ -932,50 +980,13 @@ Tips choose_tips(const PrintObject &object, const std::vector<std::vector<Suppor
                  const std::vector<SupportNode *> &dropped, const Params &params)
 {
     std::vector<TipSite> nodes = contact_tips(contacts, params.max_bridge_length_mm);
-
-    // A tip whose centre stands within the xy distance of the model at its neck's bottom is skipped, and so is a
-    // dropped contact the hold floor could restore there: the seam clips support inside that band, so the neck
-    // would be cut while its ring survived, and the wall anchors that band as it does under the legacy tree. The
-    // skip reads the tip's centre at the depth of the neck's bottom, not the built neck: under a slope the head
-    // tilts along the underside's normal, and the neck check exempts a cut head whose tilted neck bottoms outside
-    // the band. A neck bottoming under the first layer stands by the pad and is kept, and so is an enforced tip:
-    // the enforcer asked for it there, and `clip_base` keeps its head out of the model alone.
-    const double neck_depth_mm = head_width_mm + params.toolpath_width_mm;
+    // The wall skip takes out a tip and a dropped contact the hold floor could restore alike.
     std::vector<TipSite> spare;
     for (const SupportNode *node : dropped)
         spare.push_back(site_of(*node));
-    std::vector<int> wall_layers;
-    for (const TipSite &tip : nodes)
-        if (const int l = reference_layer(object, tip, neck_depth_mm); l >= 0)
-            wall_layers.push_back(l);
-    for (const TipSite &tip : spare)
-        if (const int l = reference_layer(object, tip, neck_depth_mm); l >= 0)
-            wall_layers.push_back(l);
-    std::sort(wall_layers.begin(), wall_layers.end());
-    wall_layers.erase(std::unique(wall_layers.begin(), wall_layers.end()), wall_layers.end());
-    const auto wall_band = [&object, &params](int layer) { return offset_ex(object.get_layer(layer)->lslices, scale_(params.xy_distance_mm)); };
-    std::vector<ExPolygons> wall_bands(wall_layers.size());
-    tbb::parallel_for(tbb::blocked_range<size_t>(0, wall_layers.size()), [&](const tbb::blocked_range<size_t> &range) {
-        for (size_t i = range.begin(); i < range.end(); ++ i)
-            wall_bands[i] = wall_band(wall_layers[i]);
-    });
-    // A tip the hold floor seeds may stand over a layer no other tip does, so its band is offset on the spot.
-    const auto at_wall = [&](const TipSite &tip) {
-        const int l = reference_layer(object, tip, neck_depth_mm);
-        if (l < 0 || tip.enforced)
-            return false;
-        const auto        it     = std::lower_bound(wall_layers.begin(), wall_layers.end(), l);
-        const bool        listed = it != wall_layers.end() && *it == l;
-        const ExPolygons  own    = listed ? ExPolygons() : wall_band(l);
-        const ExPolygons &band   = listed ? wall_bands[size_t(it - wall_layers.begin())] : own;
-        if (std::none_of(band.begin(), band.end(), [&tip](const ExPolygon &expoly) { return expoly.contains(tip.position); }))
-            return false;
-        const Vec2d xy = unscale(tip.position);
-        BOOST_LOG_TRIVIAL(debug) << "scaffold tip skipped at (" << xy.x() << ", " << xy.y() << ", " << tip.print_z << "): wall";
-        return true;
-    };
-    nodes.erase(std::remove_if(nodes.begin(), nodes.end(), at_wall), nodes.end());
-    spare.erase(std::remove_if(spare.begin(), spare.end(), at_wall), spare.end());
+    const std::function<bool(const TipSite &)> at_wall = wall_skip(object, nodes, spare, params);
+    nodes.erase(std::remove_if(nodes.begin(), nodes.end(), std::cref(at_wall)), nodes.end());
+    spare.erase(std::remove_if(spare.begin(), spare.end(), std::cref(at_wall)), spare.end());
 
     Tips       tips;
     const auto islands_start = std::chrono::steady_clock::now();
@@ -985,6 +996,50 @@ Tips choose_tips(const PrintObject &object, const std::vector<std::vector<Suppor
     // that a restored contact standing on a kept one merges too.
     merge_aliases(nodes);
     tips.sites = std::move(nodes);
+    return tips;
+}
+
+Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const Params &params)
+{
+    Tips tips;
+    if (object.layer_count() == 0)
+        return tips;
+    // A point stands where a contact would: on the bottom of the object layer holding it, the first whose top is above
+    // it, and `obj_layer_nr` one under that layer, the layer a contact under its overhang is filed on.
+    std::vector<TipSite> sites;
+    const Transform3d   &trafo = object.trafo_centered();
+    for (size_t i = 0; i < points.size(); ++ i) {
+        const Vec3d  p = trafo * points[i].pos.cast<double>();
+        const double z = p.z() + params.z_offset_mm;
+        auto         it = std::upper_bound(object.layers().begin(), object.layers().end(), z + EPSILON,
+                                           [](double z, const Layer *layer) { return z < layer->print_z; });
+        if (it == object.layers().end())
+            -- it;
+        TipSite site { Point::new_scale(p.x(), p.y()), (*it)->bottom_z(), int(it - object.layers().begin()) - 1 };
+        site.enforced = points[i].enforced;
+        site.grade_mm = (points[i].size == ScaffoldHeadSize::Heavy ? 4. : 2.) * params.toolpath_width_mm;
+        site.source   = int(i);
+        sites.push_back(site);
+    }
+
+    const std::function<bool(const TipSite &)> at_wall = wall_skip(object, sites, {}, params);
+    sites.erase(std::remove_if(sites.begin(), sites.end(), [&](const TipSite &site) {
+                    if (! at_wall(site))
+                        return false;
+                    tips.wall_skipped.push_back(site.source);
+                    return true;
+                }), sites.end());
+    // The hold floor counts the islands the list leaves short and seeds none of them: where it would have is reported.
+    std::vector<TipSite> bare;
+    const auto           islands_start = std::chrono::steady_clock::now();
+    tips.islands_under_held            = restore_hold_floor(object, sites, {}, params.pillar_diameter_mm, at_wall, &bare);
+    tips.island_joins_ms               = ms_since(islands_start);
+    for (const TipSite &site : bare) {
+        const Vec2d xy = unscale(site.position);
+        tips.bare_islands.emplace_back(xy.x(), xy.y(), site.print_z);
+    }
+    merge_aliases(sites);
+    tips.sites = std::move(sites);
     return tips;
 }
 

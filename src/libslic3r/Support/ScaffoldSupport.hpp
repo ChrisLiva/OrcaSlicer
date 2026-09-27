@@ -51,13 +51,19 @@ struct TipSite
     double             grade_mm     = 0.;
     int                source       = -1;
 };
-// The tips `draw` builds heads for, with what the hold floor counted and how long its island map took.
-struct Tips { std::vector<TipSite> sites; size_t islands_under_held = 0; uint32_t island_joins_ms = 0; };
+// The tips `draw` builds heads for, with what the hold floor counted and how long its island map took. From a baked
+// list, also the `source` of each point the wall skip took out, and where the hold floor would have seeded a tip, x and
+// y in mm and print z.
+struct Tips { std::vector<TipSite> sites; size_t islands_under_held = 0; uint32_t island_joins_ms = 0;
+              std::vector<int> wall_skipped; std::vector<Vec3d> bare_islands; };
 // contacts: TreeSupport's contact_nodes before plan_layer_heights re-distributes them, the nodes the contact selection
 // kept. dropped: the nodes the erase loop after select_contacts took out, the hold floor's candidates. Reads no planned
 // layer, so TreeSupport plans a layer topped at every tip's z.
 Tips choose_tips(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts,
                  const std::vector<SupportNode *> &dropped, const Params &params);
+// A baked list in the builder's frame: each point mapped through trafo_centered(), z + params.z_offset_mm, snapped
+// to the bottom of the object layer holding it; wall skip (enforced exempt), island count seeding nothing, alias merge.
+Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const Params &params);
 // clips: the clip the seam runs on each planned layer, which the neck check applies the same way.
 Output draw(const PrintObject &object, const Tips &chosen, const std::vector<LayerHeightData> &layer_heights,
             const std::vector<LayerClip> &clips, const ModelSupportRisk::Field &risk, const Params &params,
