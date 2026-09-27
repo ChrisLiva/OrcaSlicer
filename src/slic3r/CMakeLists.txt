@@ -192,6 +192,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoRotate.hpp
     GUI/Gizmos/GLGizmoScale.cpp
     GUI/Gizmos/GLGizmoScale.hpp
+    GUI/Gizmos/GLGizmoScaffoldPoints.cpp
+    GUI/Gizmos/GLGizmoScaffoldPoints.hpp
     GUI/Gizmos/GLGizmosCommon.cpp
     GUI/Gizmos/GLGizmosCommon.hpp
     GUI/Gizmos/GLGizmoSeam.cpp

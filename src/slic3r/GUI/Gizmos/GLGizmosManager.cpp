@@ -17,6 +17,7 @@
 #include "slic3r/GUI/Gizmos/GLGizmoFdmSupports.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoFuzzySkin.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoBrimEars.hpp"
+#include "slic3r/GUI/Gizmos/GLGizmoScaffoldPoints.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoCut.hpp"
 //#include "slic3r/GUI/Gizmos/GLGizmoFaceDetector.hpp"
 //#include "slic3r/GUI/Gizmos/GLGizmoHollow.hpp"
@@ -180,6 +181,9 @@ void GLGizmosManager::switch_gizmos_icon_filename()
         case (EType::BrimEars):
             gizmo->set_icon_filename(m_is_dark ? "toolbar_brimears_dark.svg" : "toolbar_brimears.svg");
             break;
+        case (EType::ScaffoldPoints):
+            gizmo->set_icon_filename(m_is_dark ? "toolbar_scaffold_points_dark.svg" : "toolbar_scaffold_points.svg");
+            break;
 #ifdef SLIC3R_CAD
         case (EType::Primitive):
             gizmo->set_icon_filename(m_is_dark ? "toolbar_modifier_cube_dark.svg" : "toolbar_modifier_cube.svg");
@@ -231,6 +235,7 @@ bool GLGizmosManager::init()
     m_gizmos.emplace_back(new GLGizmoAssembly(m_parent, m_is_dark ? "toolbar_assembly_dark.svg" : "toolbar_assembly.svg", EType::Assembly));
     m_gizmos.emplace_back(new GLGizmoSimplify(m_parent, "reduce_triangles.svg", EType::Simplify));
     m_gizmos.emplace_back(new GLGizmoBrimEars(m_parent, m_is_dark ? "toolbar_brimears_dark.svg" : "toolbar_brimears.svg", EType::BrimEars));
+    m_gizmos.emplace_back(new GLGizmoScaffoldPoints(m_parent, m_is_dark ? "toolbar_scaffold_points_dark.svg" : "toolbar_scaffold_points.svg", EType::ScaffoldPoints));
 #ifdef SLIC3R_CAD
     // Registered last: Primitive and Sketch are the final entries before Undefined, so
     // omitting them leaves every preceding m_gizmos index (indexed by EType) untouched.
@@ -548,6 +553,8 @@ bool GLGizmosManager::gizmo_event(SLAGizmoEventType action, const Vec2d& mouse_p
         return dynamic_cast<GLGizmoMeshBoolean*>(m_gizmos[MeshBoolean].get())->gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
     else if (m_current == BrimEars)
         return dynamic_cast<GLGizmoBrimEars*>(m_gizmos[BrimEars].get())->gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
+    else if (m_current == ScaffoldPoints)
+        return dynamic_cast<GLGizmoScaffoldPoints*>(m_gizmos[ScaffoldPoints].get())->gizmo_event(action, mouse_position, shift_down, alt_down, control_down);
     else
         return false;
 }
@@ -655,7 +662,7 @@ bool GLGizmosManager::on_mouse_wheel(const wxMouseEvent &evt)
 {
     bool processed = false;
 
-    if (/*m_current == SlaSupports || m_current == Hollow ||*/ m_current == FdmSupports || m_current == Seam || m_current == MmSegmentation || m_current == FuzzySkin || m_current == BrimEars) {
+    if (/*m_current == SlaSupports || m_current == Hollow ||*/ m_current == FdmSupports || m_current == Seam || m_current == MmSegmentation || m_current == FuzzySkin || m_current == BrimEars || m_current == ScaffoldPoints) {
         float rot = (float)evt.GetWheelRotation() / (float)evt.GetWheelDelta();
         if (gizmo_event((rot > 0.f ? SLAGizmoEventType::MouseWheelUp : SLAGizmoEventType::MouseWheelDown), Vec2d::Zero(), evt.ShiftDown(), evt.AltDown()
             // BBS
@@ -862,7 +869,7 @@ bool GLGizmosManager::on_char(wxKeyEvent& evt)
 
         case WXK_BACK:
         case WXK_DELETE: {
-            if ((m_current == Cut || m_current == Measure || m_current == Assembly) && gizmo_event(SLAGizmoEventType::Delete))
+            if ((m_current == Cut || m_current == Measure || m_current == Assembly || m_current == ScaffoldPoints) && gizmo_event(SLAGizmoEventType::Delete))
                 processed = true;
             break;
         }
@@ -927,7 +934,7 @@ bool GLGizmosManager::on_key(wxKeyEvent& evt)
 
     if (evt.GetEventType() == wxEVT_KEY_UP)
     {
-        if (/*m_current == SlaSupports || m_current == Hollow ||*/ m_current == BrimEars)
+        if (/*m_current == SlaSupports || m_current == Hollow ||*/ m_current == BrimEars || m_current == ScaffoldPoints)
         {
             bool is_editing = true;
             bool is_rectangle_dragging = false;
@@ -936,9 +943,8 @@ bool GLGizmosManager::on_key(wxKeyEvent& evt)
                 GLGizmoSlaSupports* gizmo = dynamic_cast<GLGizmoSlaSupports*>(get_current());
                 is_editing = gizmo->is_in_editing_mode();
                 is_rectangle_dragging = gizmo->is_selection_rectangle_dragging();
-            } else*/ if (m_current == BrimEars) {
-                GLGizmoBrimEars* gizmo = dynamic_cast<GLGizmoBrimEars*>(get_current());
-                is_rectangle_dragging = gizmo->is_selection_rectangle_dragging();
+            } else*/ if (m_current == BrimEars || m_current == ScaffoldPoints) {
+                is_rectangle_dragging = get_current()->is_selection_rectangle_dragging();
             }
             /*else {
                 GLGizmoHollow* gizmo = dynamic_cast<GLGizmoHollow*>(get_current());
@@ -983,7 +989,7 @@ bool GLGizmosManager::on_key(wxKeyEvent& evt)
 //            m_parent.set_cursor(GLCanvas3D::Cross);
             processed = true;
         }
-        else*/ if  ((m_current == BrimEars) && ((keyCode == WXK_SHIFT) || (keyCode == WXK_ALT)))
+        else*/ if  ((m_current == BrimEars || m_current == ScaffoldPoints) && ((keyCode == WXK_SHIFT) || (keyCode == WXK_ALT)))
         {
             processed = true;
         }

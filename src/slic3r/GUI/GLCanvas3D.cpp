@@ -1621,7 +1621,7 @@ void GLCanvas3D::toggle_model_objects_visibility(bool visible, const ModelObject
                         && !vol->is_modifier) {
                         vol->force_neutral_color = true;
                     }
-                    else if (gizmo_type == GLGizmosManager::BrimEars)
+                    else if (gizmo_type == GLGizmosManager::BrimEars || gizmo_type == GLGizmosManager::ScaffoldPoints)
                         vol->force_neutral_color = false;
                     else if (gizmo_type == GLGizmosManager::MmSegmentation)
                         vol->is_active = false;
@@ -2058,7 +2058,7 @@ void GLCanvas3D::render(bool only_init)
     }
     else if ((gizmo_type == GLGizmosManager::FdmSupports) || (gizmo_type == GLGizmosManager::Seam) || (gizmo_type == GLGizmosManager::MmSegmentation) || (gizmo_type == GLGizmosManager::FuzzySkin))
         no_partplate = true;
-    else if (gizmo_type == GLGizmosManager::BrimEars && !camera.is_looking_downward())
+    else if ((gizmo_type == GLGizmosManager::BrimEars || gizmo_type == GLGizmosManager::ScaffoldPoints) && !camera.is_looking_downward())
         show_grid = false;
     if (m_axes_at_bed_center)
         // Design tab: the plate grid is generated from the plate's front-left corner, so it

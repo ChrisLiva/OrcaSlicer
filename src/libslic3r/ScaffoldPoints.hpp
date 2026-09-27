@@ -46,5 +46,8 @@ inline ScaffoldPoints scaffold_points_from(const ScaffoldRecord &record)
 
 namespace cereal {   // Point.hpp serializes Transform3d but not Matrix3d; kept here, out of the precompiled header
 template<class Archive> void load(Archive &ar, Slic3r::Matrix3d &m) { ar.loadBinary((char *) m.data(), sizeof(double) * 9); }
-template<class Archive> void save(Archive &ar, const Slic3r::Matrix3d &m) { ar.saveBinary((const char *) m.data(), sizeof(double) * 9); }
+// Deduced rather than taking const Matrix3d&: Eigen's implicit converting constructor would bind a Vec3f or Vec3d to
+// that reference, and cereal would then count two save functions for every vector it writes.
+template<class Archive, class T, std::enable_if_t<std::is_same<T, Slic3r::Matrix3d>::value, int> = 0>
+void save(Archive &ar, const T &m) { ar.saveBinary((const char *) m.data(), sizeof(double) * 9); }
 }
