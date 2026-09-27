@@ -818,6 +818,8 @@ bool GLGizmosManager::on_char(wxKeyEvent& evt)
             //// Sla gizmo selects all support points
             //if ((m_current == SlaSupports || m_current == Hollow) && gizmo_event(SLAGizmoEventType::SelectAll))
             //    processed = true;
+            if (m_current == ScaffoldPoints && gizmo_event(SLAGizmoEventType::SelectAll))
+                processed = true;
 
             break;
         }

@@ -38,6 +38,7 @@ public:
     virtual ~GLGizmoScaffoldPoints() = default;
 
     void data_changed(bool is_serializing) override;
+    bool on_mouse(const wxMouseEvent &mouse_event) override;
     bool gizmo_event(SLAGizmoEventType action, const Vec2d &mouse_position, bool shift_down, bool alt_down, bool control_down);
     bool is_selection_rectangle_dragging() const override { return m_selection_rectangle.is_dragging(); }
 
@@ -48,6 +49,9 @@ public:
 protected:
     bool               on_init() override;
     void               on_render() override;
+    void               on_dragging(const UpdateData &data) override;
+    void               on_start_dragging() override;
+    void               on_stop_dragging() override;
     void               on_render_input_window(float x, float y, float bottom_limit) override;
     void               on_set_state() override;
     void               on_set_hover_id() override
@@ -70,8 +74,16 @@ private:
     void  reload_cache();
     Vec3f normal_at(const Vec3f &pos) const;
     void  update_raycasters();
+    // The closest hit of the mouse ray on a model part of the selected instance: position and normal in the object
+    // frame, and the normal in world space.
+    bool  unproject_on_mesh(const Vec2d &mouse_pos, Vec3f &pos, Vec3f &normal, Vec3d &world_normal) const;
     void  select_point(int i);
+    void  unselect_point(int i);
     void  delete_selected_points();
+    // Ctrl+wheel: flips the head size of the selected points, or the preset for new points when none is selected.
+    void  toggle_head_size();
+    // Writes the editing cache into the ModelObject as a user-modified list.
+    void  apply_changes();
     bool  has_selected_points() const;
     bool  cache_differs_from_model() const;
     // The Print's copy of the selected object on the current plate, holding the selected instance.
@@ -84,6 +96,10 @@ private:
     ObjectID                m_old_mo_id;
     EState                  m_old_state = Off;
     bool                    m_selection_empty = true;
+    bool                    m_wait_for_up_event = false;
+    bool                    m_click_refused     = false; // the last click hit a face that points up
+    bool                    m_close_asked       = false; // the apply-on-close dialog is queued or showing
+    std::optional<CacheEntry> m_point_before_drag;
 
     PickingModel m_sphere;
     GLModel      m_cone;

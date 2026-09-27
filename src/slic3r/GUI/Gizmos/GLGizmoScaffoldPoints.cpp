@@ -5,11 +5,14 @@
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmosCommon.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
+#include "slic3r/GUI/MainFrame.hpp"
+#include "slic3r/GUI/MsgDialog.hpp"
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/format.hpp"
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PresetBundle.hpp"
+#include "libslic3r/SLA/SupportTree.hpp"
 #include "GLGizmoUtils.hpp"
 
 namespace Slic3r { namespace GUI {
@@ -35,6 +38,12 @@ static ColorRGBA result_color(ScaffoldTipResult result)
     return UNSLICED_COLOR;
 }
 
+// A contact point needs a face a branch can reach from below, by the SLA support tree's rule for which faces take a head.
+static bool faces_up(const Vec3d &world_normal)
+{
+    return std::acos(std::clamp(world_normal.normalized().z(), -1., 1.)) < M_PI - sla::SupportTreeConfig::normal_cutoff_angle;
+}
+
 GLGizmoScaffoldPoints::GLGizmoScaffoldPoints(GLCanvas3D &parent, const std::string &icon_filename, unsigned int sprite_id)
     : GLGizmoBase(parent, icon_filename, sprite_id)
 {
@@ -46,7 +55,9 @@ GLGizmoScaffoldPoints::GLGizmoScaffoldPoints(GLCanvas3D &parent, const std::stri
 
 bool GLGizmoScaffoldPoints::on_init()
 {
-    const wxString ctrl = GUI::shortkey_ctrl_prefix();
+    const wxString ctrl  = GUI::shortkey_ctrl_prefix();
+    const wxString alt   = GUI::shortkey_alt_prefix();
+    const wxString shift = GUI::shortkey_shift_prefix();
 
     m_desc["head_size"]        = _L("Head size");
     m_desc["light"]            = _L("Light");
@@ -61,10 +72,15 @@ bool GLGizmoScaffoldPoints::on_init()
     m_desc["remove_all"]       = _L("All");
     m_desc["apply"]            = _L("Apply");
     m_desc["discard"]          = _L("Discard");
+    m_desc["refused"]          = _L("That face points up. Place points on undersides and walls.");
 
     m_shortcuts = {
         {_L("Left mouse button"),  _L("Add or Select")},
         {_L("Right mouse button"), _L("Remove")},
+        {_L("Drag"),               _L("Move point")},
+        {shift + _L("Drag"),       _L("Select by rectangle")},
+        {alt + _L("Drag"),         _L("Deselect by rectangle")},
+        {ctrl + "A",               _L("Select all points")},
         {ctrl + _L("Mouse wheel"), m_desc["head_size"]},
     };
 
@@ -88,10 +104,13 @@ void GLGizmoScaffoldPoints::on_render()
     ModelObject     *mo        = m_c->selection_info()->model_object();
     const Selection &selection = m_parent.get_selection();
 
-    // If current m_c->m_model_object does not match selection, ask GLCanvas3D to turn us off
-    if (m_state == On && (mo != selection.get_model()->objects[selection.get_object_idx()] ||
+    // If current m_c->m_model_object does not match selection, ask GLCanvas3D to turn us off. The tool can stay open
+    // with no selection while it asks about unapplied edits, so the object index is checked before it is used.
+    const int obj_idx = selection.get_object_idx();
+    if (m_state == On && (mo == nullptr || obj_idx < 0 || obj_idx >= int(selection.get_model()->objects.size()) ||
+                          mo != selection.get_model()->objects[obj_idx] ||
                           m_c->selection_info()->get_active_instance() != selection.get_instance_idx())) {
-        m_parent.post_event(SimpleEvent(EVT_GLCANVAS_RESETGIZMOS));
+        if (!m_close_asked) m_parent.post_event(SimpleEvent(EVT_GLCANVAS_RESETGIZMOS));
         return;
     }
 
@@ -162,14 +181,259 @@ void GLGizmoScaffoldPoints::render_points(const Selection &selection)
     if (vol->is_left_handed()) glsafe(::glFrontFace(GL_CCW));
 }
 
+bool GLGizmoScaffoldPoints::on_mouse(const wxMouseEvent &mouse_event)
+{
+    const Vec2d mouse_pos(mouse_event.GetX(), mouse_event.GetY());
+    // when control is down we allow scene pan and rotation even when clicking over some object
+    const bool control_down           = mouse_event.CmdDown();
+    const bool grabber_contains_mouse = get_hover_id() != -1;
+
+    if (mouse_event.LeftDown()) {
+        if ((!control_down || grabber_contains_mouse) &&
+            gizmo_event(SLAGizmoEventType::LeftDown, mouse_pos, mouse_event.ShiftDown(), mouse_event.AltDown(), false))
+            return true;
+    } else if (mouse_event.RightDown()) {
+        if (!control_down && m_parent.get_selection().get_object_idx() != -1 &&
+            gizmo_event(SLAGizmoEventType::RightDown, mouse_pos, false, false, false))
+            return true;
+    } else if (mouse_event.Dragging()) {
+        if (m_parent.get_move_volume_id() != -1)
+            // don't allow dragging objects with the gizmo on
+            return true;
+        if (!control_down && gizmo_event(SLAGizmoEventType::Dragging, mouse_pos, mouse_event.ShiftDown(), mouse_event.AltDown(), false)) {
+            m_parent.set_as_dirty();
+            return true;
+        }
+        if (control_down && (mouse_event.LeftIsDown() || mouse_event.RightIsDown())) {
+            // CTRL has been pressed while already dragging -> stop current action
+            gizmo_event(mouse_event.LeftIsDown() ? SLAGizmoEventType::LeftUp : SLAGizmoEventType::RightUp, mouse_pos, mouse_event.ShiftDown(),
+                        mouse_event.AltDown(), true);
+            return false;
+        }
+    } else if (mouse_event.LeftUp()) {
+        if (gizmo_event(SLAGizmoEventType::LeftUp, mouse_pos, mouse_event.ShiftDown(), mouse_event.AltDown(), control_down) &&
+            !m_parent.is_mouse_dragging())
+            return true;
+    }
+    return use_grabbers(mouse_event);
+}
+
+// Called from GLCanvas3D to inform the gizmo about a mouse or keyboard event. Returns true when the gizmo took the event,
+// so that the canvas does not make different sense of it.
 bool GLGizmoScaffoldPoints::gizmo_event(SLAGizmoEventType action, const Vec2d &mouse_position, bool shift_down, bool alt_down, bool control_down)
 {
+    const ModelObject *mo = m_c->selection_info()->model_object();
+    if (mo == nullptr) return false;
+
+    // left down with shift or alt: start the selection rectangle, or toggle the hovered point
+    if (action == SLAGizmoEventType::LeftDown && (shift_down || alt_down || control_down)) {
+        if (m_hover_id == -1) {
+            if (shift_down || alt_down)
+                m_selection_rectangle.start_dragging(mouse_position, shift_down ? GLSelectionRectangle::Select : GLSelectionRectangle::Deselect);
+        } else if (m_editing_cache[m_hover_id].selected)
+            unselect_point(m_hover_id);
+        else if (!alt_down)
+            select_point(m_hover_id);
+        return true;
+    }
+
+    // left down without selection rectangle: place a point on the mesh
+    if (action == SLAGizmoEventType::LeftDown && !m_selection_rectangle.is_dragging() && !shift_down) {
+        // A hovered point starts a drag, which the grabbers handle.
+        if (m_hover_id != -1) return false;
+
+        // A click with points selected clears the selection instead of adding a point.
+        if (!m_selection_empty) {
+            select_point(NoPoints);
+            return true;
+        }
+
+        Vec3f pos, normal;
+        Vec3d world_normal;
+        if (!unproject_on_mesh(mouse_position, pos, normal, world_normal)) return false;
+
+        m_click_refused = faces_up(world_normal);
+        if (!m_click_refused) {
+            Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Add scaffold point");
+            CacheEntry &entry = m_editing_cache.emplace_back(ScaffoldPoint{pos, m_new_point_size, true});
+            entry.normal      = normal;
+            update_raycasters();
+        }
+        m_wait_for_up_event = true;
+        m_parent.set_as_dirty();
+        return true;
+    }
+
+    // left up with selection rectangle: select the visible points inside the rectangle
+    if ((action == SLAGizmoEventType::LeftUp || action == SLAGizmoEventType::ShiftUp || action == SLAGizmoEventType::AltUp) &&
+        m_selection_rectangle.is_dragging()) {
+        const GLSelectionRectangle::EState rectangle_status = m_selection_rectangle.get_state();
+
+        const int                      active_inst = m_c->selection_info()->get_active_instance();
+        const Geometry::Transformation trafo       = mo->instances[active_inst]->get_transformation();
+        std::vector<Vec3d>             points;
+        for (const CacheEntry &entry : m_editing_cache) points.push_back(trafo.get_matrix() * entry.point.pos.cast<double>());
+
+        const std::vector<unsigned int> points_idxs = m_selection_rectangle.contains(points);
+        m_selection_rectangle.stop_dragging();
+        std::vector<Vec3f> points_inside;
+        for (unsigned int idx : points_idxs) points_inside.push_back(points[idx].cast<float>());
+
+        // Check the base of each point's cone too, so the points don't hide under every small irregularity of the model.
+        const size_t orig_pts_num = points_inside.size();
+        for (unsigned int idx : points_idxs)
+            points_inside.emplace_back((trafo.get_matrix() * (m_editing_cache[idx].point.pos + m_editing_cache[idx].normal).cast<double>()).cast<float>());
+
+        if (const MeshRaycaster *raycaster = m_c->raycaster() ? m_c->raycaster()->raycaster() : nullptr)
+            for (size_t idx : raycaster->get_unobscured_idxs(trafo, wxGetApp().plater()->get_camera(), points_inside,
+                                                             m_c->object_clipper()->get_clipping_plane())) {
+                if (idx >= orig_pts_num) // a cone base: take the index of the point it belongs to
+                    idx -= orig_pts_num;
+                if (rectangle_status == GLSelectionRectangle::Deselect)
+                    unselect_point(points_idxs[idx]);
+                else
+                    select_point(points_idxs[idx]);
+            }
+        return true;
+    }
+
+    // left up with no selection rectangle
+    if (action == SLAGizmoEventType::LeftUp) {
+        m_wait_for_up_event = false;
+        return true;
+    }
+
+    // dragging the selection rectangle
+    if (action == SLAGizmoEventType::Dragging) {
+        // A point has been placed and the button not released yet: keep GLCanvas from rotating the scene.
+        if (m_wait_for_up_event) return true;
+        if (m_selection_rectangle.is_dragging()) {
+            m_selection_rectangle.dragging(mouse_position);
+            return true;
+        }
+        return false;
+    }
+
     if (action == SLAGizmoEventType::Delete) {
         // Taken even with nothing selected, so that Delete never falls through to deleting the object.
         delete_selected_points();
         return true;
     }
+
+    if (action == SLAGizmoEventType::RightDown) {
+        if (m_hover_id == -1) return false;
+        select_point(NoPoints);
+        select_point(m_hover_id);
+        delete_selected_points();
+        return true;
+    }
+
+    if (action == SLAGizmoEventType::SelectAll) {
+        select_point(AllPoints);
+        return true;
+    }
+
+    if ((action == SLAGizmoEventType::MouseWheelUp || action == SLAGizmoEventType::MouseWheelDown) && control_down) {
+        toggle_head_size();
+        return true;
+    }
+
     return false;
+}
+
+bool GLGizmoScaffoldPoints::unproject_on_mesh(const Vec2d &mouse_pos, Vec3f &pos, Vec3f &normal, Vec3d &world_normal) const
+{
+    const Camera        &camera    = wxGetApp().plater()->get_camera();
+    const Selection     &selection = m_parent.get_selection();
+    const ClippingPlane *clp       = m_c->object_clipper()->get_position() != 0. ? m_c->object_clipper()->get_clipping_plane() : nullptr;
+
+    double closest = std::numeric_limits<double>::max();
+    bool   found   = false;
+    for (unsigned int idx : selection.get_volume_idxs()) {
+        const GLVolume    *v  = selection.get_volume(idx);
+        const ModelVolume *mv = get_model_volume(*v, wxGetApp().model());
+        if (mv == nullptr || !mv->is_model_part() || !v->mesh_raycaster) continue;
+
+        const Transform3d volume_trafo = v->get_volume_transformation().get_matrix();
+        const Transform3d world_trafo  = v->get_instance_transformation().get_matrix() * volume_trafo;
+        Vec3f             hit, hit_normal;
+        if (!v->mesh_raycaster->unproject_on_mesh(mouse_pos, world_trafo, camera, hit, hit_normal, clp)) continue;
+
+        const double dist = (camera.get_position() - world_trafo * hit.cast<double>()).norm();
+        if (dist >= closest) continue;
+        closest      = dist;
+        found        = true;
+        pos          = (volume_trafo * hit.cast<double>()).cast<float>();
+        normal       = (volume_trafo.linear().inverse().transpose() * hit_normal.cast<double>()).normalized().cast<float>();
+        world_normal = (world_trafo.linear().inverse().transpose() * hit_normal.cast<double>()).normalized();
+    }
+    return found;
+}
+
+void GLGizmoScaffoldPoints::on_start_dragging()
+{
+    if (m_hover_id != -1) {
+        select_point(NoPoints);
+        select_point(m_hover_id);
+        m_point_before_drag = m_editing_cache[m_hover_id];
+    } else
+        m_point_before_drag.reset();
+}
+
+void GLGizmoScaffoldPoints::on_dragging(const UpdateData &data)
+{
+    if (m_hover_id == -1) return;
+
+    Vec3f pos, normal;
+    Vec3d world_normal;
+    // The point follows the mesh and stays where it was over a face that points up, as a click there adds nothing.
+    if (!unproject_on_mesh(data.mouse_pos.cast<double>(), pos, normal, world_normal) || faces_up(world_normal)) return;
+    m_editing_cache[m_hover_id].point.pos = pos;
+    m_editing_cache[m_hover_id].normal    = normal;
+}
+
+void GLGizmoScaffoldPoints::on_stop_dragging()
+{
+    if (m_hover_id != -1 && m_point_before_drag && m_editing_cache[m_hover_id].point.pos != m_point_before_drag->point.pos) {
+        // Momentarily restore the point so that the snapshot holds the state before the move.
+        const CacheEntry moved      = m_editing_cache[m_hover_id];
+        m_editing_cache[m_hover_id] = *m_point_before_drag;
+        Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Move scaffold point");
+        m_editing_cache[m_hover_id] = moved;
+    }
+    m_point_before_drag.reset();
+}
+
+void GLGizmoScaffoldPoints::toggle_head_size()
+{
+    auto other = [](ScaffoldHeadSize size) { return size == ScaffoldHeadSize::Light ? ScaffoldHeadSize::Heavy : ScaffoldHeadSize::Light; };
+
+    const auto first = std::find_if(m_editing_cache.begin(), m_editing_cache.end(), [](const CacheEntry &e) { return e.selected; });
+    if (first == m_editing_cache.end())
+        m_new_point_size = other(m_new_point_size);
+    else {
+        Plater::TakeSnapshot   snapshot(wxGetApp().plater(), "Change scaffold point size");
+        const ScaffoldHeadSize size = other(first->point.size);
+        for (CacheEntry &entry : m_editing_cache)
+            if (entry.selected) entry.point.size = size;
+    }
+    m_parent.set_as_dirty();
+}
+
+void GLGizmoScaffoldPoints::apply_changes()
+{
+    ModelObject *mo     = m_c->selection_info()->model_object();
+    const int    active = m_c->selection_info()->get_active_instance();
+    if (mo == nullptr || active < 0 || active >= int(mo->instances.size())) return;
+
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Apply scaffold points");
+    mo->scaffold_points.clear();
+    for (const CacheEntry &entry : m_editing_cache) mo->scaffold_points.push_back(entry.point);
+    mo->scaffold_points_status   = ScaffoldPointsStatus::UserModified;
+    mo->scaffold_points_pose     = mo->instances[active]->get_matrix().linear();
+    mo->scaffold_points_mesh_box = mo->raw_mesh_bounding_box();
+    wxGetApp().plater()->set_plater_dirty(true);
+    m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
 }
 
 void GLGizmoScaffoldPoints::delete_selected_points()
@@ -187,6 +451,12 @@ void GLGizmoScaffoldPoints::delete_selected_points()
 bool GLGizmoScaffoldPoints::has_selected_points() const
 {
     return std::any_of(m_editing_cache.begin(), m_editing_cache.end(), [](const CacheEntry &e) { return e.selected; });
+}
+
+void GLGizmoScaffoldPoints::unselect_point(int i)
+{
+    m_editing_cache[i].selected = false;
+    m_selection_empty           = !has_selected_points();
 }
 
 void GLGizmoScaffoldPoints::select_point(int i)
@@ -381,6 +651,7 @@ void GLGizmoScaffoldPoints::on_render_input_window(float x, float y, float botto
     if (mo->scaffold_points_status != ScaffoldPointsStatus::NoPoints)
         warnings.push_back(_L("Paint and blockers are ignored while the list is in use."));
     if (cache_differs_from_model()) warnings.push_back(_L("Unapplied edits"));
+    if (m_click_refused) warnings.push_back(m_desc["refused"]);
     if (!warnings.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImGuiWrapper::COL_WARNING);
         const float parent_width = ImGui::GetContentRegionAvail().x;
@@ -441,6 +712,34 @@ void GLGizmoScaffoldPoints::on_set_state()
     if (m_state == On && m_old_state != On)
         wxGetApp().plater()->enter_gizmos_stack();
     if (m_state == Off && m_old_state != Off) {
+        // Unapplied edits: refuse to close so that the gizmo is still active when the question is answered, and close it
+        // then. The dialog runs through CallAfter, because otherwise on OSX it was shown several times when clicked into.
+        if (m_close_asked || cache_differs_from_model()) {
+            m_state = m_old_state;
+            if (m_close_asked) return;
+            m_close_asked = true;
+            // The edits belong to the object loaded into the cache; an answer never writes them into another one.
+            wxGetApp().CallAfter([this, edited_id = m_old_mo_id]() {
+                MessageDialog dlg(wxGetApp().mainframe, _L("Apply your scaffold point edits?"), _L("Scaffold Points"),
+                                  wxICON_QUESTION | wxYES | wxNO | wxCANCEL);
+                const int          ret = dlg.ShowModal();
+                const ModelObject *mo  = m_c->selection_info() ? m_c->selection_info()->model_object() : nullptr;
+                if (mo != nullptr && mo->id() == edited_id) {
+                    if (ret == wxID_YES)
+                        apply_changes();
+                    else if (ret == wxID_NO)
+                        reload_cache();
+                } else
+                    // The edited object is no longer selected: its edits are dropped so that the tool can close.
+                    reload_cache();
+                m_close_asked = false;
+                if (ret != wxID_CANCEL && m_parent.get_gizmos_manager().get_current_type() == GLGizmosManager::ScaffoldPoints) {
+                    m_parent.get_gizmos_manager().reset_all_states();
+                    m_parent.set_as_dirty();
+                }
+            });
+            return;
+        }
         wxGetApp().plater()->leave_gizmos_stack();
         // Reopening the tool reloads the list from the model.
         m_old_mo_id = ObjectID();
@@ -448,7 +747,12 @@ void GLGizmoScaffoldPoints::on_set_state()
     m_old_state = m_state;
 }
 
-void GLGizmoScaffoldPoints::on_load(cereal::BinaryInputArchive &ar) { ar(m_new_point_size, m_editing_cache, m_selection_empty); }
+void GLGizmoScaffoldPoints::on_load(cereal::BinaryInputArchive &ar)
+{
+    ar(m_new_point_size, m_editing_cache, m_selection_empty);
+    // Undo and redo change the number of points, and each point needs its grabber to be picked.
+    update_raycasters();
+}
 
 void GLGizmoScaffoldPoints::on_save(cereal::BinaryOutputArchive &ar) const { ar(m_new_point_size, m_editing_cache, m_selection_empty); }
 
