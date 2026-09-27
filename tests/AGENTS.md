@@ -36,6 +36,7 @@ Check these before writing your own setup or output-parsing code.
 - `tests/test_utils.hpp` is shared by every suite. `load_model()` loads a mesh from `tests/data/`, and `ScopedTemporaryFile` gives a temp path that removes itself.
 - `fff_print/test_helpers.hpp` builds and slices a `Print` and parses the emitted G-code. Read it before writing an fff_print test rather than assembling a `Print` by hand.
 - `fixture_config()` alone fails `Print::validate` under the relative-extruder default: pass `{{"layer_change_gcode", "G92 E0"}}` (as `tests/fff_print/test_auto_tilt.cpp` does) before a full `Print::process`, or the evaluator refuses every pose with a validation error rather than a slicing one (2026-09-08).
+- `Model::add_object(const ModelObject&)` sets `extruder` 1 on the copy, and an `init_print` object carries no `extruder` key, so the two configs differ and `Print::process` never lets the copy share the source's layers. A test of shared-layer behaviour sets `extruder` 1 on the source before copying; without it, removing the sharing check left such a test green (journey 1 leg 8 in `tests/fff_print/test_scaffold_support.cpp`, 2026-09-26).
 - The other suites have their own: `sla_print/sla_test_utils.hpp`, `libnest2d/libnest2d_test_utils.hpp`, `slic3rutils/plugin_test_utils.hpp`, `filament_group/fg_test_utils.hpp`. `libslic3r` has none and uses the shared header.
 - Test data lives in `tests/data/` and is reached through the `TEST_DATA_DIR` define. Wrap it in `std::string(...)` before joining a path onto it.
 

@@ -48,6 +48,8 @@ rewriting it only when the hash changes, and only `GUI/BuildCommit.cpp` (plus `B
 `tests/fff_print/support_validation.cpp` include it, where the former global `add_definitions()` re-stamped every object
 after each new commit (1 h 14 min for `--target all`, 2026-09-08).
 
+Build the `OrcaSlicer` target after changing a type the undo/redo archive serializes: only the GUI instantiates those cereal saves, so a cereal ambiguity passes `fff_print_tests` and `libslic3r_tests` and fails the app. A `save(Archive&, const Matrix3d&)` in `ScaffoldPoints.hpp` also bound `Vec3f` and `Vec3d` through Eigen's converting constructor, and `GLGizmoBrimEars.cpp` failed with "cereal found more than one compatible output serialization function" three commits after the test targets had built it (2026-09-27).
+
 Never start a second `cmake --build` in a build directory that already has one running: two Ninja
 instances compile the same objects and starved each other to 0.03 s of CPU per compiler over 49 min
 on a 16 GB Mac (2026-09-08). Check `pgrep -x ninja` first: under an agent harness `pgrep -fl 'ninja -f
