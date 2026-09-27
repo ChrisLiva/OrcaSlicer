@@ -2757,6 +2757,9 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
         //    return false;
         if (model_obj1->layer_height_profile.get() != model_obj2->layer_height_profile.get())
             return false;
+        // Shared support layers would print one object's baked scaffold list under the other.
+        if (model_scaffold_points_data_changed(*model_obj1, *model_obj2))
+            return false;
         if (model_obj1->config.get() != model_obj2->config.get())
             return false;
         return true;

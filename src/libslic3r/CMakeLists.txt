@@ -93,6 +93,7 @@ set(lisbslic3r_sources
     BridgeDetector.hpp
     Brim.cpp
     BrimEarsPoint.hpp
+    ScaffoldPoints.hpp
     Brim.hpp
     BuildVolume.cpp
     BuildVolume.hpp

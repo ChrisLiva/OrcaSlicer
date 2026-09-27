@@ -1697,6 +1697,14 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 model_object.brim_points = model_object_new.brim_points;
                 update_apply_status(this->invalidate_all_steps());
             }
+            if (model_scaffold_points_data_changed(model_object, model_object_new)) {
+                model_object.scaffold_points          = model_object_new.scaffold_points;
+                model_object.scaffold_points_status   = model_object_new.scaffold_points_status;
+                model_object.scaffold_points_pose     = model_object_new.scaffold_points_pose;
+                model_object.scaffold_points_mesh_box = model_object_new.scaffold_points_mesh_box;
+                for (const PrintObjectStatus &print_object_status : print_objects_range)
+                    update_apply_status(print_object_status.print_object->invalidate_step(posSupportMaterial));
+            }
         }
         if (! solid_or_modifier_differ) {
             // Synchronize Object's config.

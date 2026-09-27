@@ -1216,6 +1216,10 @@ ModelObject& ModelObject::assign_copy(const ModelObject &rhs)
     this->sla_points_status           = rhs.sla_points_status;
     this->sla_drain_holes             = rhs.sla_drain_holes;
     this->brim_points                 = rhs.brim_points;
+    this->scaffold_points             = rhs.scaffold_points;
+    this->scaffold_points_status      = rhs.scaffold_points_status;
+    this->scaffold_points_pose        = rhs.scaffold_points_pose;
+    this->scaffold_points_mesh_box    = rhs.scaffold_points_mesh_box;
     this->layer_config_ranges         = rhs.layer_config_ranges;
     this->layer_height_profile        = rhs.layer_height_profile;
     this->printable                   = rhs.printable;
@@ -1256,6 +1260,10 @@ ModelObject& ModelObject::assign_copy(ModelObject &&rhs)
     this->sla_points_status           = std::move(rhs.sla_points_status);
     this->sla_drain_holes             = std::move(rhs.sla_drain_holes);
     this->brim_points                 = std::move(rhs.brim_points);
+    this->scaffold_points             = std::move(rhs.scaffold_points);
+    this->scaffold_points_status      = std::move(rhs.scaffold_points_status);
+    this->scaffold_points_pose        = std::move(rhs.scaffold_points_pose);
+    this->scaffold_points_mesh_box    = std::move(rhs.scaffold_points_mesh_box);
     this->layer_config_ranges         = std::move(rhs.layer_config_ranges);
     this->layer_height_profile        = std::move(rhs.layer_height_profile);
     this->printable                   = std::move(rhs.printable);
@@ -3847,6 +3855,15 @@ bool model_brim_points_data_changed(const ModelObject& mo, const ModelObject& mo
             return true;
     }
     return false;
+}
+
+bool model_scaffold_points_data_changed(const ModelObject& mo, const ModelObject& mo_new)
+{
+    return mo.scaffold_points != mo_new.scaffold_points ||
+           mo.scaffold_points_status != mo_new.scaffold_points_status ||
+           mo.scaffold_points_pose != mo_new.scaffold_points_pose ||
+           mo.scaffold_points_mesh_box.min != mo_new.scaffold_points_mesh_box.min ||
+           mo.scaffold_points_mesh_box.max != mo_new.scaffold_points_mesh_box.max;
 }
 
 bool model_has_multi_part_objects(const Model &model)

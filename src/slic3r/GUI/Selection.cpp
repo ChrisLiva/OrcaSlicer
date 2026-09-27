@@ -2126,6 +2126,10 @@ void Selection::copy_to_clipboard()
         dst_object->sla_points_status    = src_object->sla_points_status;
         dst_object->sla_drain_holes      = src_object->sla_drain_holes;
         dst_object->brim_points          = src_object->brim_points;
+        dst_object->scaffold_points          = src_object->scaffold_points;
+        dst_object->scaffold_points_status   = src_object->scaffold_points_status;
+        dst_object->scaffold_points_pose     = src_object->scaffold_points_pose;
+        dst_object->scaffold_points_mesh_box = src_object->scaffold_points_mesh_box;
         dst_object->layer_config_ranges  = src_object->layer_config_ranges;     // #ys_FIXME_experiment
         dst_object->layer_height_profile.assign(src_object->layer_height_profile);
         dst_object->origin_translation   = src_object->origin_translation;

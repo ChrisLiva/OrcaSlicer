@@ -12,6 +12,7 @@
 #include "SLA/SupportPoint.hpp"
 #include "SLA/Hollowing.hpp"
 #include "BrimEarsPoint.hpp"
+#include "ScaffoldPoints.hpp"
 #include "TriangleMesh.hpp"
 #include "CustomGCode.hpp"
 #include "calib.hpp"
@@ -389,6 +390,13 @@ public:
 
     BrimPoints              brim_points;
 
+    // Baked scaffold contact points, in the raw-mesh frame; a slice builds the Tree Scaffold from them while they are valid.
+    ScaffoldPoints          scaffold_points;
+    ScaffoldPointsStatus    scaffold_points_status   = ScaffoldPointsStatus::NoPoints;
+    // Linear part of the first instance's matrix when the list was written.
+    Matrix3d                scaffold_points_pose     = Matrix3d::Identity();
+    BoundingBoxf3           scaffold_points_mesh_box;   // raw_mesh_bounding_box() when the list was written
+
     /* This vector accumulates the total translation applied to the object by the
         center_around_origin() method. Callers might want to apply the same translation
         to new volumes before adding them to this object in order to preserve alignment
@@ -682,6 +690,7 @@ private:
         Internal::StaticSerializationWrapper<LayerHeightProfile const> layer_heigth_profile_wrapper(layer_height_profile);
         ar(name, module_name, input_file, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
             sla_support_points, sla_points_status, sla_drain_holes, printable, origin_translation, brim_points,
+            scaffold_points, scaffold_points_status, scaffold_points_pose, scaffold_points_mesh_box,
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
@@ -695,6 +704,7 @@ private:
         SaveObjectGaurd gaurd(*this);
         ar(name, module_name, input_file, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
             sla_support_points, sla_points_status, sla_drain_holes, printable, origin_translation, brim_points,
+            scaffold_points, scaffold_points_status, scaffold_points_pose, scaffold_points_mesh_box,
             m_bounding_box_approx, m_bounding_box_approx_valid, 
             m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
             m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
@@ -1791,6 +1801,8 @@ extern bool model_mmu_segmentation_data_changed(const ModelObject& mo, const Mod
 extern bool model_fuzzy_skin_data_changed(const ModelObject &mo, const ModelObject &mo_new);
 
 bool model_brim_points_data_changed(const ModelObject& mo, const ModelObject& mo_new);
+// Test whether the baked scaffold point list, its status, its pose or its mesh box differ.
+bool model_scaffold_points_data_changed(const ModelObject& mo, const ModelObject& mo_new);
 
 // If the model has multi-part objects, then it is currently not supported by the SLA mode.
 // Either the model cannot be loaded, or a SLA printer has to be activated.
