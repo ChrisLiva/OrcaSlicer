@@ -1043,6 +1043,14 @@ Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const P
     return tips;
 }
 
+bool baked_pose_valid(const Matrix3d &pose, const Matrix3d &linear)
+{
+    const Matrix3d M            = linear * pose.inverse();
+    const bool     keeps_length = (M.transpose() * M - Matrix3d::Identity()).norm() < 1e-6;
+    const bool     keeps_z      = (M * Vec3d::UnitZ() - Vec3d::UnitZ()).norm() < 1e-6;
+    return keeps_length && keeps_z;
+}
+
 Output draw(const PrintObject &object, const Tips &chosen, const std::vector<LayerHeightData> &layer_heights,
             const std::vector<LayerClip> &clips, const ModelSupportRisk::Field &risk, const Params &params,
             const std::function<void()> &throw_on_cancel)

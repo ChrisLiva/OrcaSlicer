@@ -1925,8 +1925,23 @@ void TreeSupport::generate()
     m_object->set_emitted_support(nullptr);
     m_object->set_scaffold_record(nullptr);
     // A scaffold object holding a baked list builds its tips from the list, so it places no contact, and the regions,
-    // the risk field and the seeds the contact pass reads go unbuilt.
-    const bool baked = m_scaffold && m_object->model_object()->scaffold_points_status != ScaffoldPointsStatus::NoPoints;
+    // the risk field and the seeds the contact pass reads go unbuilt. A list goes stale, and the pass places auto
+    // contacts, under a pose of the first model instance that tilts, Z-mirrors or scales the one it was baked in, or
+    // once the raw mesh moved from the box stamped with the list. The pose is read off the instance matrix rather than
+    // trafo(), which carries the filament's shrinkage compensation.
+    const ModelObject &model_object = *m_object->model_object();
+    const bool         has_list     = m_scaffold && model_object.scaffold_points_status != ScaffoldPointsStatus::NoPoints;
+    bool               stale        = false;
+    if (has_list) {
+        const Matrix3d      linear = m_object->instances().front().model_instance->get_matrix().linear();
+        const BoundingBoxf3 box    = model_object.raw_mesh_bounding_box();
+        const BoundingBoxf3 &stamp = model_object.scaffold_points_mesh_box;
+        const bool pose_valid = ScaffoldSupport::baked_pose_valid(model_object.scaffold_points_pose, linear);
+        const bool mesh_kept  = (box.min - stamp.min).cwiseAbs().maxCoeff() <= 1e-3 && (box.max - stamp.max).cwiseAbs().maxCoeff() <= 1e-3;
+        const bool valid      = pose_valid && mesh_kept;
+        stale = ! valid;
+    }
+    const bool baked = has_list && ! stale;
     if (m_analyze && ! baked)
         build_required_regions();
     // The thinning distance the contact pass runs under, and the distance the measurement carries a
@@ -2106,6 +2121,7 @@ void TreeSupport::generate()
             return (to_raw * Vec3d(x, y, print_z - params.z_offset_mm)).cast<float>();
         };
         record->baked = baked;
+        record->stale = stale;
         if (baked) {
             const ScaffoldPoints &points = m_object->model_object()->scaffold_points;
             std::vector<ScaffoldTipResult> results(points.size(), ScaffoldTipResult::Merged);

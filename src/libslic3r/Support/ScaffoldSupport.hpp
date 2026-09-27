@@ -64,6 +64,9 @@ Tips choose_tips(const PrintObject &object, const std::vector<std::vector<Suppor
 // A baked list in the builder's frame: each point mapped through trafo_centered(), z + params.z_offset_mm, snapped
 // to the bottom of the object layer holding it; wall skip (enforced exempt), island count seeding nothing, alias merge.
 Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const Params &params);
+// Whether a list baked under the linear part `pose` still holds under `linear`: the change between them keeps lengths
+// and keeps the Z axis, as a turn about Z or a mirror in X or Y does, and a tilt, a Z mirror or a scale does not.
+bool baked_pose_valid(const Matrix3d &pose, const Matrix3d &linear);
 // clips: the clip the seam runs on each planned layer, which the neck check applies the same way.
 Output draw(const PrintObject &object, const Tips &chosen, const std::vector<LayerHeightData> &layer_heights,
             const std::vector<LayerClip> &clips, const ModelSupportRisk::Field &risk, const Params &params,

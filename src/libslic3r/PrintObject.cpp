@@ -4610,6 +4610,22 @@ void PrintObject::_generate_support_material()
                                      "settings and the orientation."),
                                    this->model_object()->name));
         }
+    // A baked list that went stale under this object's pose, or points and islands a baked list left without support.
+    if (m_config.support_style.value == smsTreeScaffold)
+        if (const std::shared_ptr<const ScaffoldRecord> record = this->scaffold_record()) {
+            if (record->stale)
+                this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                    L("Scaffold points are stale for this pose; auto contacts used."));
+            if (record->baked) {
+                const size_t dropped = size_t(std::count_if(record->tips.begin(), record->tips.end(),
+                    [](const ScaffoldRecord::Tip &tip) { return tip.result != ScaffoldTipResult::Routed; }));
+                const size_t bare = record->bare_islands.size();
+                if (dropped + bare > 0)
+                    this->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
+                        Slic3r::format(L("Scaffold points for %1%: %2% dropped, %3% islands left without a tip."),
+                                       this->model_object()->name, dropped, bare));
+            }
+        }
     attempt.installed = true;
 }
 
