@@ -45,6 +45,30 @@ static bool faces_up(const Vec3d &world_normal)
     return std::acos(std::clamp(world_normal.normalized().z(), -1., 1.)) < M_PI - sla::SupportTreeConfig::normal_cutoff_angle;
 }
 
+// The record of `po`'s finished support step, or none: a step still running holds the previous pass's record or none.
+// PrintObject reads and writes the slot atomically, since an object sharing another's layers has its record re-copied
+// after its step reads as done.
+static std::shared_ptr<const ScaffoldRecord> finished_record(const PrintObject *po)
+{
+    return po != nullptr && po->is_step_done(posSupportMaterial) ? po->scaffold_record() : nullptr;
+}
+
+// Looked up by id, never through the selection: the object may be gone or another one selected by now.
+static ModelObject *model_object_by_id(ObjectID id)
+{
+    for (ModelObject *object : wxGetApp().model().objects)
+        if (object->id() == id) return object;
+    return nullptr;
+}
+
+static const ModelInstance *instance_by_id(const ModelObject *mo, ObjectID id)
+{
+    if (mo != nullptr)
+        for (const ModelInstance *instance : mo->instances)
+            if (instance->id() == id) return instance;
+    return nullptr;
+}
+
 GLGizmoScaffoldPoints::GLGizmoScaffoldPoints(GLCanvas3D &parent, const std::string &icon_filename, unsigned int sprite_id)
     : GLGizmoBase(parent, icon_filename, sprite_id)
 {
@@ -94,12 +118,33 @@ void GLGizmoScaffoldPoints::data_changed(bool is_serializing)
 {
     if (!m_c->selection_info()) return;
 
-    // Only a change of object reloads the cache: any other reload would wipe edits not yet applied.
+    // Only a change of object reloads the cache: any other reload would wipe edits not yet applied. Undo and redo load
+    // the cache their snapshot holds, which belongs to the object it selects.
     const ModelObject *mo = m_c->selection_info()->model_object();
-    if (m_state == On && mo && mo->id() != m_old_mo_id && !is_serializing) {
-        reload_cache();
+    if (m_state == On && mo && mo->id() != m_old_mo_id) {
+        if (!is_serializing) {
+            // The selection has already moved, so the close check would compare the new object with itself: edits left
+            // on the object it moved from are put to the user here, and written only into that object.
+            if (cache_differs_from_model(model_object_by_id(m_old_mo_id))) {
+                ScaffoldPoints points;
+                for (const CacheEntry &entry : m_editing_cache) points.push_back(entry.point);
+                wxGetApp().CallAfter([this, object_id = m_old_mo_id, instance_id = m_old_instance_id, points = std::move(points)]() {
+                    MessageDialog dlg(wxGetApp().mainframe, _L("Apply your scaffold point edits?"), _L("Scaffold Points"),
+                                      wxICON_QUESTION | wxYES | wxNO);
+                    if (dlg.ShowModal() != wxID_YES) return;
+                    ModelObject         *edited   = model_object_by_id(object_id);
+                    const ModelInstance *instance = instance_by_id(edited, instance_id);
+                    if (instance != nullptr) write_points(*edited, *instance, points);
+                });
+            }
+            reload_cache();
+            m_generate_failure.clear();
+        }
         m_old_mo_id = mo->id();
-        m_generate_failure.clear();
+    }
+    if (m_state == On && mo) {
+        const int active = m_c->selection_info()->get_active_instance();
+        if (active >= 0 && active < int(mo->instances.size())) m_old_instance_id = mo->instances[active]->id();
     }
     // A slice finishing or failing reloads the scene, which lands here.
     finish_pending_generate();
@@ -440,15 +485,21 @@ void GLGizmoScaffoldPoints::apply_changes()
     const int    active = m_c->selection_info()->get_active_instance();
     if (mo == nullptr || active < 0 || active >= int(mo->instances.size())) return;
 
-    Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Apply scaffold points");
-    mo->scaffold_points.clear();
-    for (const CacheEntry &entry : m_editing_cache) mo->scaffold_points.push_back(entry.point);
-    mo->scaffold_points_status   = ScaffoldPointsStatus::UserModified;
-    mo->scaffold_points_pose     = mo->instances[active]->get_matrix().linear();
-    mo->scaffold_points_mesh_box = mo->raw_mesh_bounding_box();
+    ScaffoldPoints points;
+    for (const CacheEntry &entry : m_editing_cache) points.push_back(entry.point);
     m_generate_failure.clear();
+    write_points(*mo, *mo->instances[active], std::move(points));
+}
+
+void GLGizmoScaffoldPoints::write_points(ModelObject &mo, const ModelInstance &instance, ScaffoldPoints points)
+{
+    Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Apply scaffold points");
+    mo.scaffold_points          = std::move(points);
+    mo.scaffold_points_status   = ScaffoldPointsStatus::UserModified;
+    mo.scaffold_points_pose     = instance.get_matrix().linear();
+    mo.scaffold_points_mesh_box = mo.raw_mesh_bounding_box();
     wxGetApp().plater()->set_plater_dirty(true);
-    select_plate_of_selection();
+    select_plate_of(mo, instance);
     wxGetApp().plater()->reslice();
 }
 
@@ -484,15 +535,13 @@ void GLGizmoScaffoldPoints::generate()
     m_generate_failure.clear();
     m_generate_stash = {mo->id(), mo->instances[active]->id(), mo->scaffold_points, mo->scaffold_points_status, mo->scaffold_points_pose};
 
-    select_plate_of_selection();
-    const PrintObject *po = selected_print_object();
-    if (po != nullptr && po->is_step_done(posSupportMaterial))
-        if (const std::shared_ptr<const ScaffoldRecord> record = po->scaffold_record(); record && !record->baked && !record->stale) {
-            // The plate's last slice placed its contact points automatically: copy them now.
-            m_generate_pending = true;
-            finish_pending_generate();
-            return;
-        }
+    select_plate_of(*mo, *mo->instances[active]);
+    if (const std::shared_ptr<const ScaffoldRecord> record = finished_record(selected_print_object()); record && !record->baked && !record->stale) {
+        // The plate's last slice placed its contact points automatically: copy them now.
+        m_generate_pending = true;
+        finish_pending_generate();
+        return;
+    }
 
     mo->scaffold_points_status = ScaffoldPointsStatus::NoPoints;
     wxGetApp().plater()->reslice();
@@ -507,15 +556,9 @@ void GLGizmoScaffoldPoints::finish_pending_generate()
 {
     if (!m_generate_pending) return;
 
-    // Looked up by id, never through the selection: the object may be gone or another one selected by now.
-    ModelObject *mo = nullptr;
-    for (ModelObject *object : wxGetApp().model().objects)
-        if (object->id() == m_generate_stash.object_id) mo = object;
-    const ModelInstance *instance = nullptr;
-    if (mo != nullptr)
-        for (const ModelInstance *inst : mo->instances)
-            if (inst->id() == m_generate_stash.instance_id) instance = inst;
-    const PrintObject *po = instance ? print_object_of(*mo, m_generate_stash.instance_id) : nullptr;
+    ModelObject         *mo       = model_object_by_id(m_generate_stash.object_id);
+    const ModelInstance *instance = instance_by_id(mo, m_generate_stash.instance_id);
+    const PrintObject   *po       = instance ? print_object_of(*mo, m_generate_stash.instance_id) : nullptr;
 
     // Waits for the whole slice, G-code export included: the copy invalidates the support step, which would cancel it.
     if (instance != nullptr && wxGetApp().plater()->is_background_process_slicing()) return;
@@ -527,7 +570,7 @@ void GLGizmoScaffoldPoints::finish_pending_generate()
 
     // The slice finished: its tips are copied only when they were taken from the object as it stands now, placed
     // automatically, in the pose the selected instance holds.
-    const std::shared_ptr<const ScaffoldRecord> record = po ? po->scaffold_record() : nullptr;
+    const std::shared_ptr<const ScaffoldRecord> record = finished_record(po);
     auto model_part_meshes = [](const ModelObject &object) {
         std::vector<const TriangleMesh *> meshes;
         for (const ModelVolume *mv : object.volumes)
@@ -557,21 +600,19 @@ void GLGizmoScaffoldPoints::finish_pending_generate()
 void GLGizmoScaffoldPoints::restore_generate_stash()
 {
     m_generate_pending = false;
-    for (ModelObject *mo : wxGetApp().model().objects)
-        if (mo->id() == m_generate_stash.object_id) {
-            mo->scaffold_points        = m_generate_stash.points;
-            mo->scaffold_points_status = m_generate_stash.status;
-            mo->scaffold_points_pose   = m_generate_stash.pose;
-            // The Print took the cleared status; it takes the restored list back.
-            m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
-        }
+    if (ModelObject *mo = model_object_by_id(m_generate_stash.object_id)) {
+        mo->scaffold_points        = m_generate_stash.points;
+        mo->scaffold_points_status = m_generate_stash.status;
+        mo->scaffold_points_pose   = m_generate_stash.pose;
+        // The Print took the cleared status; it takes the restored list back.
+        m_parent.post_event(SimpleEvent(EVT_GLCANVAS_SCHEDULE_BACKGROUND_PROCESS));
+    }
     m_parent.set_as_dirty();
 }
 
 void GLGizmoScaffoldPoints::update_results()
 {
-    const PrintObject                    *po     = selected_print_object();
-    std::shared_ptr<const ScaffoldRecord> record = po && po->is_step_done(posSupportMaterial) ? po->scaffold_record() : nullptr;
+    const std::shared_ptr<const ScaffoldRecord> record = finished_record(selected_print_object());
     if (!record) {
         m_bare_islands.clear();
         return;
@@ -625,9 +666,8 @@ void GLGizmoScaffoldPoints::select_point(int i)
     }
 }
 
-bool GLGizmoScaffoldPoints::cache_differs_from_model() const
+bool GLGizmoScaffoldPoints::cache_differs_from_model(const ModelObject *mo) const
 {
-    const ModelObject *mo = m_c->selection_info()->model_object();
     if (mo == nullptr) return false;
     if (mo->scaffold_points.size() != m_editing_cache.size()) return true;
     for (size_t i = 0; i < m_editing_cache.size(); ++i)
@@ -678,18 +718,15 @@ Vec3f GLGizmoScaffoldPoints::normal_at(const Vec3f &pos) const
     return normal;
 }
 
-void GLGizmoScaffoldPoints::select_plate_of_selection()
+void GLGizmoScaffoldPoints::select_plate_of(const ModelObject &mo, const ModelInstance &instance)
 {
-    const ModelObject *mo     = m_c->selection_info()->model_object();
-    const int          active = m_c->selection_info()->get_active_instance();
-    if (mo == nullptr || active < 0) return;
-
-    const ModelObjectPtrs &objects = wxGetApp().model().objects;
-    const int              obj_idx = int(std::find(objects.begin(), objects.end(), mo) - objects.begin());
-    if (obj_idx == int(objects.size())) return;
+    const ModelObjectPtrs &objects  = wxGetApp().model().objects;
+    const int              obj_idx  = int(std::find(objects.begin(), objects.end(), &mo) - objects.begin());
+    const int              inst_idx = int(std::find(mo.instances.begin(), mo.instances.end(), &instance) - mo.instances.begin());
+    if (obj_idx == int(objects.size()) || inst_idx == int(mo.instances.size())) return;
 
     Plater    *plater    = wxGetApp().plater();
-    const int  plate_idx = plater->get_partplate_list().find_instance_belongs(obj_idx, active);
+    const int  plate_idx = plater->get_partplate_list().find_instance_belongs(obj_idx, inst_idx);
     if (plate_idx >= 0 && plate_idx != plater->get_partplate_list().get_curr_plate_index()) plater->select_plate(plate_idx);
 }
 
@@ -716,9 +753,8 @@ const PrintObject *GLGizmoScaffoldPoints::selected_print_object() const
 
 double GLGizmoScaffoldPoints::support_width() const
 {
-    if (const PrintObject *po = selected_print_object())
-        if (const std::shared_ptr<const ScaffoldRecord> record = po->scaffold_record(); record && record->toolpath_width_mm > 0.)
-            return record->toolpath_width_mm;
+    if (const std::shared_ptr<const ScaffoldRecord> record = finished_record(selected_print_object()); record && record->toolpath_width_mm > 0.)
+        return record->toolpath_width_mm;
     // Before the first slice: the support width the slice would derive from the nozzle.
     const double nozzle_diameter = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionFloats>("nozzle_diameter")->get_at(0);
     return Flow::auto_extrusion_width(frSupportMaterial, float(nozzle_diameter));
@@ -820,8 +856,7 @@ void GLGizmoScaffoldPoints::on_render_input_window(float x, float y, float botto
 
     ImGui::Separator();
 
-    const PrintObject                          *po     = selected_print_object();
-    const std::shared_ptr<const ScaffoldRecord> record = po ? po->scaffold_record() : nullptr;
+    const std::shared_ptr<const ScaffoldRecord> record = finished_record(selected_print_object());
     if (record) {
         const size_t routed = std::count_if(record->tips.begin(), record->tips.end(),
                                             [](const ScaffoldRecord::Tip &tip) { return tip.result == ScaffoldTipResult::Routed; });
@@ -834,7 +869,7 @@ void GLGizmoScaffoldPoints::on_render_input_window(float x, float y, float botto
     if (record && record->stale) warnings.push_back(_L("Scaffold points are stale for this pose; auto contacts used."));
     if (mo->scaffold_points_status != ScaffoldPointsStatus::NoPoints)
         warnings.push_back(_L("Paint and blockers are ignored while the list is in use."));
-    if (cache_differs_from_model()) warnings.push_back(_L("Unapplied edits"));
+    if (cache_differs_from_model(mo)) warnings.push_back(_L("Unapplied edits"));
     if (m_click_refused) warnings.push_back(m_desc["refused"]);
     if (!m_generate_failure.empty()) warnings.push_back(m_generate_failure);
     if (!warnings.empty()) {
@@ -850,13 +885,13 @@ void GLGizmoScaffoldPoints::on_render_input_window(float x, float y, float botto
 
     ImGui::SameLine();
     GLGizmoUtils::begin_right_aligned_buttons({m_desc["apply"], m_desc["discard"]});
-    m_imgui->disabled_begin(m_generate_pending || !cache_differs_from_model());
+    m_imgui->disabled_begin(m_generate_pending || !cache_differs_from_model(mo));
     if (m_imgui->button(m_desc["apply"])) wxGetApp().CallAfter([this]() {
         if (m_state == On) apply_changes();
     });
     m_imgui->disabled_end();
     ImGui::SameLine();
-    m_imgui->disabled_begin(!cache_differs_from_model());
+    m_imgui->disabled_begin(!cache_differs_from_model(mo));
     if (m_imgui->button(m_desc["discard"])) reload_cache();
     m_imgui->disabled_end();
 
@@ -903,7 +938,7 @@ void GLGizmoScaffoldPoints::on_set_state()
         if (m_generate_pending) restore_generate_stash();
         // Unapplied edits: refuse to close so that the gizmo is still active when the question is answered, and close it
         // then. The dialog runs through CallAfter, because otherwise on OSX it was shown several times when clicked into.
-        if (m_close_asked || cache_differs_from_model()) {
+        if (m_close_asked || cache_differs_from_model(m_c->selection_info()->model_object())) {
             m_state = m_old_state;
             if (m_close_asked) return;
             m_close_asked = true;

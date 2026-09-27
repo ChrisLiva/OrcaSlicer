@@ -1874,7 +1874,10 @@ void ModelObject::translate(double x, double y, double z)
 void ModelObject::clear_scaffold_points()
 {
     this->scaffold_points.clear();
-    this->scaffold_points_status = ScaffoldPointsStatus::NoPoints;
+    this->scaffold_points_status   = ScaffoldPointsStatus::NoPoints;
+    // model_scaffold_points_data_changed compares these whatever the status, so a cleared list keeps no stamp.
+    this->scaffold_points_pose     = Matrix3d::Identity();
+    this->scaffold_points_mesh_box = BoundingBoxf3();
 }
 
 void ModelObject::scale(const Vec3d &versor)

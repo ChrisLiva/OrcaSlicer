@@ -11,6 +11,7 @@
 
 namespace Slic3r {
 
+class ModelInstance;
 class PrintObject;
 
 namespace GUI {
@@ -82,8 +83,10 @@ private:
     void  delete_selected_points();
     // Ctrl+wheel: flips the head size of the selected points, or the preset for new points when none is selected.
     void  toggle_head_size();
-    // Writes the editing cache into the ModelObject as a user-modified list and slices its plate.
+    // Writes the editing cache into the selected object through write_points.
     void  apply_changes();
+    // Writes `points` into `mo` as a user-modified list in the pose `instance` holds, and slices the instance's plate.
+    void  write_points(ModelObject &mo, const ModelInstance &instance, ScaffoldPoints points);
     // Clears the list so that the next slice places its contact points automatically.
     void  revert_to_auto();
     // Replaces the list with the tips the last auto slice routed, slicing the plate first when it holds no such slice.
@@ -95,9 +98,9 @@ private:
     // The result of each point and the bare islands, read from the finished slice of the selected object.
     void  update_results();
     bool  has_selected_points() const;
-    bool  cache_differs_from_model() const;
-    // Makes the plate holding the selected instance the current one, so that the canvas' Print and a reslice are its.
-    void  select_plate_of_selection();
+    bool  cache_differs_from_model(const ModelObject *mo) const;
+    // Makes the plate holding `instance` the current one, so that the canvas' Print and a reslice are its.
+    void  select_plate_of(const ModelObject &mo, const ModelInstance &instance);
     // The Print's copy of the object on the current plate, holding the instance.
     const PrintObject *print_object_of(const ModelObject &mo, ObjectID instance_id) const;
     // The Print's copy of the selected object on the current plate, holding the selected instance.
@@ -121,6 +124,7 @@ private:
     ScaffoldHeadSize        m_new_point_size = ScaffoldHeadSize::Light;
     std::vector<CacheEntry> m_editing_cache;
     ObjectID                m_old_mo_id;
+    ObjectID                m_old_instance_id; // the instance of m_old_mo_id last selected
     EState                  m_old_state = Off;
     bool                    m_selection_empty = true;
     bool                    m_wait_for_up_event = false;

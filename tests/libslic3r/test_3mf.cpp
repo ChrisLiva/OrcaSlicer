@@ -1760,9 +1760,12 @@ TEST_CASE("Scaffold points survive a 3MF round trip and model edits clear or car
                     copy->scale_mesh_after_creation(0.5f);
                 edited = { copy };
             }
+            // The pose and the mesh box go with the list, so two cleared copies compare equal whatever they held.
             for (const ModelObject* object : edited) {
                 CHECK(object->scaffold_points_status == ScaffoldPointsStatus::NoPoints);
                 CHECK(object->scaffold_points.empty());
+                CHECK(object->scaffold_points_pose == Matrix3d::Identity());
+                CHECK_FALSE(object->scaffold_points_mesh_box.defined);
             }
         }
     }

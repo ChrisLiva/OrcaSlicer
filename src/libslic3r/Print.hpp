@@ -448,9 +448,11 @@ public:
     void set_support_analysis(std::shared_ptr<const SupportAnalysis::Report> report) { m_support_analysis = std::move(report); }
     void set_emitted_support(std::shared_ptr<const SupportAnalysis::EmittedSupport> emitted) { m_emitted_support = std::move(emitted); }
     // What the scaffold pass this object is holding did with its tips, or null when it holds none: every style
-    // but the scaffold records nothing. Immutable once installed, like the measurement.
-    std::shared_ptr<const ScaffoldRecord> scaffold_record() const { return m_scaffold_record; }
-    void set_scaffold_record(std::shared_ptr<const ScaffoldRecord> record) { m_scaffold_record = std::move(record); }
+    // but the scaffold records nothing. Immutable once installed, like the measurement. The slot is read and written
+    // atomically: the scaffold tool reads it from the GUI thread, and Print::process copies it into an object sharing
+    // another's layers after that object's support step already reads as done.
+    std::shared_ptr<const ScaffoldRecord> scaffold_record() const { return std::atomic_load(&m_scaffold_record); }
+    void set_scaffold_record(std::shared_ptr<const ScaffoldRecord> record) { std::atomic_store(&m_scaffold_record, std::move(record)); }
 
     size_t          support_layer_count() const { return m_support_layers.size(); }
     // Drops the support pass this object is holding, layers, annotations, generator cache, raft count,

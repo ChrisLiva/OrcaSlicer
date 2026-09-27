@@ -1656,6 +1656,36 @@ TEST_CASE("A baked list goes stale under a tilt and stays valid under a Z rotati
     CHECK(object_of(0).scaffold_record()->baked);
     CHECK_FALSE(object_of(0).scaffold_record()->stale);
     CHECK_FALSE(warns_stale(object_of(0)));
+    // The list maps through the turned instance's rotation, so support prints at every routed point's place in that
+    // instance's frame. A tip mapped without the turn lands in open air and still routes to the bed, so where the
+    // support prints, not the routed count, is what tells the two apart.
+    {
+        const PrintObject &po = object_of(0);
+        REQUIRE(po.support_analysis() != nullptr);
+        CHECK(po.support_analysis()->tips_placed == mo->scaffold_points.size());
+        const std::shared_ptr<const ScaffoldRecord> record = po.scaffold_record();
+        size_t routed = 0, printed_at = 0;
+        for (const ScaffoldRecord::Tip &tip : record->tips) {
+            if (tip.result != ScaffoldTipResult::Routed)
+                continue;
+            ++ routed;
+            const Vec3d q    = po.trafo_centered() * tip.pos.cast<double>();
+            const Point at   = Point::new_scale(q.x(), q.y());
+            bool        near = false;
+            for (const SupportLayer *sl : po.support_layers())
+                if (std::abs(sl->print_z - q.z()) <= 0.4) {
+                    Polygons covered;
+                    std::vector<const ExtrusionEntity *> entities;
+                    collect_entities(sl->support_fills, entities);
+                    for (const ExtrusionEntity *e : entities)
+                        e->polygons_covered_by_width(covered, 0.f);
+                    near = near || ! intersection_ex(offset(covered, scale_(0.5)), Polygons{ Polygon({ at, at + Point(1, 0), at + Point(0, 1) }) }).empty();
+                }
+            printed_at += near;
+        }
+        REQUIRE(routed > 0);
+        CHECK(printed_at == routed);
+    }
     CHECK_FALSE(object_of(1).scaffold_record()->baked);
     CHECK(object_of(1).scaffold_record()->stale);
     CHECK(warns_stale(object_of(1)));

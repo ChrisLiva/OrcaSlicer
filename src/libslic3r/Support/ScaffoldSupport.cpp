@@ -283,7 +283,8 @@ size_t alias_of(const AliasGrid &kept, const Vec3d &p, const AliasCell &c)
 // equals by seed id, and a tip within the distance of a tip already kept merges into it; a merged tip absorbs none.
 // A chain at the layer pitch therefore keeps every tip standing further than the distance from the kept tips under
 // it, and three tips all within the distance of each other keep one where the builder's pairs would keep two: no
-// two kept tips are aliases, so the builder filters none. A kept tip is enforced when a tip merged into it was. The
+// two kept tips are aliases, so the builder filters none. A kept tip is enforced when a tip merged into it was, and
+// takes the larger head grade of the two, so a Heavy point merged into a Light one keeps its Heavy head. The
 // kept tips sit in a grid of cells the distance wide, so a tip reads the 27 cells around its own. `tips` keeps its
 // order.
 void merge_aliases(std::vector<TipSite> &tips)
@@ -309,6 +310,7 @@ void merge_aliases(std::vector<TipSite> &tips)
         if (const size_t into = alias_of(kept, p, c); into != size_t(-1)) {
             BOOST_LOG_TRIVIAL(debug) << "scaffold tip merged at (" << p.x() << ", " << p.y() << ", " << p.z() << ")";
             tips[into].enforced = tips[into].enforced || tips[i].enforced;
+            tips[into].grade_mm = std::max(tips[into].grade_mm, tips[i].grade_mm);
             continue;
         }
         keep[i] = true;
