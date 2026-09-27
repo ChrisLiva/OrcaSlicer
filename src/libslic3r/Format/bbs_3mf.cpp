@@ -19,6 +19,7 @@
 #include <stdexcept>
 #include <iomanip>
 #include <regex>
+#include <charconv>
 
 #include <boost/assign.hpp>
 #include <boost/bimap.hpp>
@@ -181,6 +182,7 @@ const std::string ORCA_CAD_RECIPE_FILE = "Metadata/orca_cad.bin";
 const std::string LEGACY_CAD_RECIPE_FILE = "Metadata/SnapOrca_cad.bin";
 const std::string LAYER_CONFIG_RANGES_FILE = "Metadata/layer_config_ranges.xml";
 const std::string BRIM_EAR_POINTS_FILE = "Metadata/brim_ear_points.txt";
+const std::string SCAFFOLD_POINTS_FILE = "Metadata/scaffold_points.txt";
 /*const std::string SLA_SUPPORT_POINTS_FILE = "Metadata/Slic3r_PE_sla_support_points.txt";
 const std::string SLA_DRAIN_HOLES_FILE = "Metadata/Slic3r_PE_sla_drain_holes.txt";*/
 const std::string CUSTOM_GCODE_PER_PRINT_Z_FILE = "Metadata/custom_gcode_per_layer.xml";
@@ -936,6 +938,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         typedef std::map<int, std::vector<coordf_t>> IdToLayerHeightsProfileMap;
         typedef std::map<int, t_layer_config_ranges> IdToLayerConfigRangesMap;
         typedef std::map<int, BrimPoints>             IdToBrimPointsMap;
+        struct ScaffoldPointsData
+        {
+            ScaffoldPoints       points;
+            ScaffoldPointsStatus status;
+            Matrix3d             pose;
+            BoundingBoxf3        mesh_box;
+        };
+        typedef std::map<int, ScaffoldPointsData>     IdToScaffoldMap;
         /*typedef std::map<int, std::vector<sla::SupportPoint>> IdToSlaSupportPointsMap;
         typedef std::map<int, std::vector<sla::DrainHole>> IdToSlaDrainHolesMap;*/
         using PathToEmbossShapeFileMap = std::map<std::string, std::shared_ptr<std::string>>;
@@ -1131,6 +1141,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         IdToLayerHeightsProfileMap m_layer_heights_profiles;
         IdToLayerConfigRangesMap m_layer_config_ranges;
         IdToBrimPointsMap m_brim_ear_points;
+        IdToScaffoldMap m_scaffold_points;
         /*IdToSlaSupportPointsMap m_sla_support_points;
         IdToSlaDrainHolesMap    m_sla_drain_holes;*/
         PathToEmbossShapeFileMap m_path_to_emboss_shape_files;
@@ -1212,6 +1223,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         void _extract_sla_support_points_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         void _extract_sla_drain_holes_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         void _extract_brim_ear_points_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
+        void _extract_scaffold_points_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
 
         void _extract_custom_gcode_per_print_z_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         void _extract_filament_sequence_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
@@ -1419,6 +1431,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         m_layer_heights_profiles.clear();
         m_layer_config_ranges.clear();
         m_brim_ear_points.clear();
+        m_scaffold_points.clear();
         //m_sla_support_points.clear();
         m_curr_metadata_name.clear();
         m_curr_characters.clear();
@@ -1936,6 +1949,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     // extract slic3r config file
                     _extract_brim_ear_points_from_archive(archive, stat);
                 }
+                else if (boost::algorithm::iequals(name, SCAFFOLD_POINTS_FILE)) {
+                    _extract_scaffold_points_from_archive(archive, stat);
+                }
                 //BBS: disable SLA related files currently
                 /*else if (boost::algorithm::iequals(name, SLA_SUPPORT_POINTS_FILE)) {
                     // extract sla support points file
@@ -2137,6 +2153,14 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             if (obj_brim_points != m_brim_ear_points.end())
                 model_object->brim_points = std::move(obj_brim_points->second);
 
+            IdToScaffoldMap::iterator obj_scaffold_points = m_scaffold_points.find(object.second + 1);
+            if (obj_scaffold_points != m_scaffold_points.end()) {
+                model_object->scaffold_points          = std::move(obj_scaffold_points->second.points);
+                model_object->scaffold_points_status   = obj_scaffold_points->second.status;
+                model_object->scaffold_points_pose     = obj_scaffold_points->second.pose;
+                model_object->scaffold_points_mesh_box = obj_scaffold_points->second.mesh_box;
+            }
+
             // m_sla_support_points are indexed by a 1 based model object index.
             /*IdToSlaSupportPointsMap::iterator obj_sla_support_points = m_sla_support_points.find(object.second + 1);
             if (obj_sla_support_points != m_sla_support_points.end() && !obj_sla_support_points->second.empty()) {
@@ -2241,7 +2265,16 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                         const Slic3r::Geometry::Transformation &inst_trafo = i->get_transformation();
                         i->set_offset((inst_trafo * vol_trafo).get_offset());
                     }
+                    // Zeroing the volume offset moves the object's raw-mesh frame by that offset, and brim ears, the
+                    // scaffold points and their mesh box are stored in that frame, so they move with it.
+                    const Vec3d shift = -v->get_offset();
                     v->set_offset(Vec3d::Zero());
+                    for (BrimPoint &point : o->brim_points)
+                        point.pos += shift.cast<float>();
+                    for (ScaffoldPoint &point : o->scaffold_points)
+                        point.pos += shift.cast<float>();
+                    if (o->scaffold_points_mesh_box.defined)
+                        o->scaffold_points_mesh_box.translate(shift);
                 }
             }
         }
@@ -3059,6 +3092,114 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     m_brim_ear_points.insert({ object_id, brim_ear_points });
             }
         }
+    }
+
+    // Reads the file _add_scaffold_points_file_to_archive writes. A file that fails anywhere but inside one point loads no
+    // list at all, because half a list would build a scaffold the user never saw; a bad point alone is dropped alone.
+    void _BBS_3MF_Importer::_extract_scaffold_points_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat)
+    {
+        if (stat.m_uncomp_size == 0)
+            return;
+        std::string buffer((size_t)stat.m_uncomp_size, 0);
+        if (mz_zip_reader_extract_to_mem(&archive, stat.m_file_index, (void*)buffer.data(), (size_t)stat.m_uncomp_size, 0) == 0) {
+            add_error("Error while reading scaffold points data to buffer");
+            return;
+        }
+        if (buffer.back() == '\n')
+            buffer.pop_back();
+
+        std::vector<std::string> lines;
+        boost::split(lines, buffer, boost::is_any_of("\n"), boost::token_compress_off);
+
+        // Every number must parse whole: std::stoi throws out of the load and atof reads garbage as 0, a valid size.
+        auto parse = [](const std::string &text, auto &value) {
+            const char *end = text.data() + text.size();
+            if constexpr (std::is_integral_v<std::decay_t<decltype(value)>>) {
+                auto [ptr, ec] = std::from_chars(text.data(), end, value);
+                return !text.empty() && ec == std::errc() && ptr == end;
+            } else {
+                auto [ptr, ec] = fast_float::from_chars(text.data(), end, value);
+                return !text.empty() && ec == std::errc() && ptr == end;
+            }
+        };
+        auto parse_finite = [&parse](const std::vector<std::string> &numbers, size_t count, auto &&value_at) {
+            if (numbers.size() != count)
+                return false;
+            for (size_t i = 0; i < count; ++i)
+                if (!parse(numbers[i], value_at(i)) || !std::isfinite(value_at(i)))
+                    return false;
+            return true;
+        };
+        auto value_of = [](const std::string &field, const std::string &key, std::string &value) {
+            if (field.compare(0, key.size(), key) != 0)
+                return false;
+            value = field.substr(key.size());
+            return true;
+        };
+
+        const std::string header = "scaffold_points_format_version=";
+        std::string       version_text;
+        int               version = -1;
+        if (!value_of(lines.front(), header, version_text) || !parse(version_text, version) || version != scaffold_points_format_version) {
+            BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": no scaffold point list loaded, unknown header \"" << lines.front() << "\"";
+            return;
+        }
+
+        auto parse_line = [&](const std::string &line, int &object_id, ScaffoldPointsData &data) {
+            std::vector<std::string> fields;
+            boost::split(fields, line, boost::is_any_of("|"), boost::token_compress_off);
+            std::string id_text, status_text, pose_text, box_text;
+            if (fields.size() != 5 || !value_of(fields[0], "object_id=", id_text) || !value_of(fields[1], "status=", status_text) ||
+                !value_of(fields[2], "pose=", pose_text) || !value_of(fields[3], "box=", box_text))
+                return false;
+            int status = 0;
+            if (!parse(id_text, object_id) || object_id < 1 || !parse(status_text, status) ||
+                (status != int(ScaffoldPointsStatus::AutoGenerated) && status != int(ScaffoldPointsStatus::UserModified)))
+                return false;
+            data.status = ScaffoldPointsStatus(status);
+
+            std::vector<std::string> numbers;
+            boost::split(numbers, pose_text, boost::is_any_of(" "), boost::token_compress_off);
+            if (!parse_finite(numbers, 9, [&data](size_t i) -> double & { return data.pose(i / 3, i % 3); }))
+                return false;
+            boost::split(numbers, box_text, boost::is_any_of(" "), boost::token_compress_off);
+            Vec3d corners[2];
+            if (!parse_finite(numbers, 6, [&corners](size_t i) -> double & { return corners[i / 3][i % 3]; }))
+                return false;
+            data.mesh_box = BoundingBoxf3(corners[0], corners[1]);
+
+            if (fields[4].empty())
+                return true;
+            boost::split(numbers, fields[4], boost::is_any_of(" "), boost::token_compress_off);
+            if (numbers.size() % 5 != 0)
+                return false;
+            for (size_t i = 0; i < numbers.size(); i += 5) {
+                Vec3f pos;
+                int   size = 0, enforced = 0;
+                if (!parse(numbers[i], pos.x()) || !parse(numbers[i + 1], pos.y()) || !parse(numbers[i + 2], pos.z()) ||
+                    !parse(numbers[i + 3], size) || !parse(numbers[i + 4], enforced))
+                    return false;
+                if (!pos.allFinite() || (size != 0 && size != 1) || (enforced != 0 && enforced != 1)) {
+                    BOOST_LOG_TRIVIAL(warning) << "_extract_scaffold_points_from_archive: object " << object_id << " drops scaffold point "
+                                               << i / 5 << ", \"" << numbers[i] << " " << numbers[i + 1] << " " << numbers[i + 2] << " "
+                                               << numbers[i + 3] << " " << numbers[i + 4] << "\"";
+                    continue;
+                }
+                data.points.push_back({ pos, ScaffoldHeadSize(size), enforced == 1 });
+            }
+            return true;
+        };
+
+        IdToScaffoldMap objects;
+        for (size_t i = 1; i < lines.size(); ++i) {
+            int                object_id = 0;
+            ScaffoldPointsData data;
+            if (!parse_line(lines[i], object_id, data) || !objects.emplace(object_id, std::move(data)).second) {
+                BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": no scaffold point list loaded, cannot read line " << i + 1 << " \"" << lines[i] << "\"";
+                return;
+            }
+        }
+        m_scaffold_points = std::move(objects);
     }
     /*
     void _BBS_3MF_Importer::_extract_sla_support_points_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat)
@@ -6024,6 +6165,7 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         bool _add_cad_recipe_file_to_archive(mz_zip_archive& archive, Model& model);
         bool _add_layer_config_ranges_file_to_archive(mz_zip_archive& archive, Model& model);
         bool _add_brim_ear_points_file_to_archive(mz_zip_archive& archive, Model& model);
+        bool _add_scaffold_points_file_to_archive(mz_zip_archive& archive, Model& model);
         bool _add_sla_support_points_file_to_archive(mz_zip_archive& archive, Model& model);
         bool _add_sla_drain_holes_file_to_archive(mz_zip_archive& archive, Model& model);
         bool _add_print_config_file_to_archive(mz_zip_archive& archive, const DynamicPrintConfig &config);
@@ -6440,6 +6582,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             }
 
             if (!_add_brim_ear_points_file_to_archive(archive, model)) {
+                close_zip_writer(&archive);
+                return false;
+            }
+
+            if (!_add_scaffold_points_file_to_archive(archive, model)) {
                 close_zip_writer(&archive);
                 return false;
             }
@@ -7777,6 +7924,46 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
             if (!mz_zip_writer_add_mem(&archive, BRIM_EAR_POINTS_FILE.c_str(), (const void*)out.data(), out.length(), MZ_DEFAULT_COMPRESSION)) {
                 add_error("Unable to add brim ear points file to archive");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool _BBS_3MF_Exporter::_add_scaffold_points_file_to_archive(mz_zip_archive& archive, Model& model)
+    {
+        assert(is_decimal_separator_point());
+        std::string out = "";
+        char buffer[1024];
+
+        unsigned int count = 0;
+        for (const ModelObject* object : model.objects) {
+            ++count;
+            if (object->scaffold_points_status == ScaffoldPointsStatus::NoPoints)
+                continue;
+            // %.17g and %.9g are the widths that bring every double and every float back bit for bit.
+            const Matrix3d&      pose = object->scaffold_points_pose;
+            const BoundingBoxf3& box  = object->scaffold_points_mesh_box;
+            snprintf(buffer, sizeof(buffer),
+                     "object_id=%d|status=%d|pose=%.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g %.17g|box=%.17g %.17g %.17g %.17g %.17g %.17g|",
+                     count, int(object->scaffold_points_status), pose(0, 0), pose(0, 1), pose(0, 2), pose(1, 0), pose(1, 1), pose(1, 2),
+                     pose(2, 0), pose(2, 1), pose(2, 2), box.min.x(), box.min.y(), box.min.z(), box.max.x(), box.max.y(), box.max.z());
+            out += buffer;
+
+            const ScaffoldPoints& points = object->scaffold_points;
+            for (size_t i = 0; i < points.size(); ++i) {
+                snprintf(buffer, sizeof(buffer), (i == 0 ? "%.9g %.9g %.9g %d %d" : " %.9g %.9g %.9g %d %d"), double(points[i].pos.x()),
+                         double(points[i].pos.y()), double(points[i].pos.z()), int(points[i].size), int(points[i].enforced));
+                out += buffer;
+            }
+            out += "\n";
+        }
+
+        if (!out.empty()) {
+            out = std::string("scaffold_points_format_version=") + std::to_string(scaffold_points_format_version) + std::string("\n") + out;
+
+            if (!mz_zip_writer_add_mem(&archive, SCAFFOLD_POINTS_FILE.c_str(), (const void*)out.data(), out.length(), MZ_DEFAULT_COMPRESSION)) {
+                add_error("Unable to add scaffold points file to archive");
                 return false;
             }
         }
