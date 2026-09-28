@@ -212,7 +212,8 @@ private:
     LayerGrid                m_prev_grid;
     std::vector<float>       m_prev_run;
     const LayerGrid         *m_grid = nullptr;
-    std::vector<float>       m_dist;
+    std::vector<float>       m_dist, m_tip_dist;
+    std::vector<size_t>      m_heads;      // the cells under the heads placed on the layer being walked
 
     const std::vector<SupportAnalysis::Piece> &pieces() const { return m_in.components.pieces; }
     Point centre(int x, int y) const { return m_in.origin + Point(coord_t((x + 0.5) * m_in.cell), coord_t((y + 0.5) * m_in.cell)); }
@@ -239,7 +240,7 @@ private:
                     m_anchor_z[root] = std::max(m_anchor_z[root], m_anchor_z[r]);
                     append(m_anchors[root], std::move(m_anchors[r]));
                     m_rooted[root]  = m_rooted[root] || m_rooted[r];
-                    m_slender[root] = m_slender[root] && m_slender[r];
+                    m_slender[root] = m_slender[root] || m_slender[r];
                     m_sets.join(root, r);
                 }
             m_sets.join(root, p);
@@ -300,6 +301,7 @@ private:
                     if (g.at(x, y) == 0)
                         continue;
                     const size_t i = size_t(y - g.y0) * size_t(g.w) + size_t(x - g.x0);
+                    m_heads.push_back(i);
                     if (m_dist[i] > 0.f) {
                         m_dist[i] = 0.f;
                         heap->emplace(0.f, i);
@@ -393,12 +395,15 @@ private:
                             }
             }
 
+        m_heads.clear();
         births(l, heap);
         for (const TipSite &tip : enforced)
             place(tip, TipNeed::Enforced, &heap);
         spread(heap);
+        spread_tips();
 
-        // Tips where a run exceeds the reach, until none does or no eligible cell is left to answer it.
+        // Tips where a run exceeds the reach, until none does or no eligible cell is left to answer it. The due cell
+        // whose run is nearest twice the reach goes first, so a head covers the band past the reach on both sides.
         const float reach = float(m_need.reach_mm), aa = float(a);
         const auto  run_of = [&](size_t i) { return std::max(0.f, m_dist[i] - aa); };
         for (;;) {
@@ -415,6 +420,7 @@ private:
                 if (eligible(l, p)) {
                     place(site_at(l, p, 0.), TipNeed::Underside, &heap);
                     spread(heap);
+                    spread_tips();
                     placed = true;
                     break;
                 }
@@ -430,11 +436,29 @@ private:
             }
         }
 
+        // What the layer above hangs from. Material within the reach of a head on this layer spans to that head as a
+        // line bridges to its anchor, so it holds what grows on it as the layer below holds; the rest passes its run on.
         m_prev_grid = g;
         m_prev_run.assign(cells, 0.f);
         for (size_t i = 0; i < cells; ++ i)
-            if (kind[i] != 0)
+            if (kind[i] != 0 && m_tip_dist[i] > reach)
                 m_prev_run[i] = m_dist[i] == unreached ? 0.f : run_of(i);
+    }
+
+    // `m_tip_dist` from every head placed on the layer being walked, through its material.
+    void spread_tips()
+    {
+        const LayerGrid &g = *m_grid;
+        m_tip_dist.assign(g.cells.size(), unreached);
+        Heap heap;
+        for (size_t i : m_heads)
+            if (m_tip_dist[i] > 0.f) {
+                m_tip_dist[i] = 0.f;
+                heap.emplace(0.f, i);
+            }
+        std::swap(m_dist, m_tip_dist);
+        spread(heap);
+        std::swap(m_dist, m_tip_dist);
     }
 
     // Each island starting on slab `l` takes one tip at its deepest point, unless it is debris, merges before it could
@@ -498,8 +522,9 @@ private:
     }
 
     // A part turns slender when it stands over its highest anchor by more than the stability minimum and by more than
-    // `slender_ratio` of its section's narrowest width: it takes a heavy tip on its down-facing surface within that
-    // last stretch, the point farthest from its anchors, or is counted once when it has none.
+    // `slender_ratio` of its section's narrowest width: it takes a heavy tip on its down-facing surface above that
+    // anchor, the point farthest from its anchors, which favours the highest. A part with no such point is counted
+    // once and measured again from here, since a face further up may still take a tip.
     void stability(size_t l)
     {
         const auto [first, last] = m_in.components.slab_range[l];
@@ -509,7 +534,7 @@ private:
                 roots.push_back(r);
         const double top = m_in.slabs[l].print_z;
         for (size_t r : roots) {
-            if (m_rooted[r] || m_slender[r] || top - m_anchor_z[r] <= stability_min_mm + EPSILON)
+            if (m_rooted[r] || top - m_anchor_z[r] <= stability_min_mm + EPSILON)
                 continue;
             Points hull_points;
             for (size_t p = first; p < last; ++ p)
@@ -521,7 +546,7 @@ private:
             double best = -1.;
             Point  spot;
             size_t spot_layer = 0;
-            for (size_t k = l + 1; k-- > 0 && m_in.slabs[k].bottom_z >= top - window - EPSILON;)
+            for (size_t k = l + 1; k-- > 0 && m_in.slabs[k].bottom_z > m_anchor_z[r] + EPSILON;)
                 for (const ExPolygon &face : m_in.down_facing[k]) {
                     const Point p = face.contour.points[face.contour.size() / 2];
                     if (root_at(k, p) != r || ! eligible(k, p))
@@ -537,8 +562,10 @@ private:
                     }
                 }
             if (best < 0.) {
-                m_slender[r] = 1;
-                ++ m_plan.islands_slender;
+                if (! m_slender[r])
+                    ++ m_plan.islands_slender;
+                m_slender[r]   = 1;
+                m_anchor_z[r]  = top;
                 BOOST_LOG_TRIVIAL(debug) << "scaffold part slender at " << top << ": no down-facing point";
                 continue;
             }
