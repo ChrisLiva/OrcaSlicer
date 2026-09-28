@@ -43,9 +43,10 @@ TriangleMesh merged(std::initializer_list<TriangleMesh> parts)
     return out;
 }
 
-// Slices `mesh` at 0.1 mm with no support, so the plan reads plain object layers, and plans on the object's mesh with
-// the config's 10 mm `max_bridge_length`, as `place_tips` does. A fixture coordinate maps into the sliced frame by the
-// offset between the mesh's bounding box and the layers' extents; every fixture touches z 0.
+// Slices `mesh` at `layer_mm`, 0.1 mm unless a case asks for another, with no support, so the plan reads plain object
+// layers, and plans on the object's mesh with the config's 10 mm `max_bridge_length`, as `place_tips` does. A fixture
+// coordinate maps into the sliced frame by the offset between the mesh's bounding box and the layers' extents; every
+// fixture touches z 0.
 struct Sliced
 {
     Print                       print;
@@ -54,11 +55,12 @@ struct Sliced
     PlanInput                   input;
     Vec2d                       shift = Vec2d::Zero();   // sliced frame minus fixture frame, mm
 
-    Sliced(const TriangleMesh &fixture)
+    Sliced(const TriangleMesh &fixture, double layer_mm = 0.1)
     {
-        TriangleMesh copy = fixture;
-        init_print({ std::move(copy) }, print, model, fixture_config({ { "enable_support", "0" }, { "layer_height", "0.1" },
-                                                                        { "initial_layer_print_height", "0.1" },
+        TriangleMesh      copy   = fixture;
+        const std::string height = std::to_string(layer_mm);
+        init_print({ std::move(copy) }, print, model, fixture_config({ { "enable_support", "0" }, { "layer_height", height },
+                                                                        { "initial_layer_print_height", height },
                                                                         { "layer_change_gcode", "G92 E0" } }));
         print.process();
         const PrintObject &object = *print.objects().front();
@@ -101,6 +103,19 @@ size_t count_in(const Sliced &s, const Plan &plan, const BoundingBoxf3 &box, std
         return (needs.empty() || needs.count(tip.need) > 0) && inside(s, tip, box);
     }));
 }
+
+// The islands of `plan` whose birth point lies in `box`, in the fixture frame.
+std::vector<const Island *> islands_in(const Sliced &s, const Plan &plan, const BoundingBoxf3 &box)
+{
+    std::vector<const Island *> found;
+    for (const Island &island : plan.islands)
+        if (const Vec3d p(island.birth.x() - s.shift.x(), island.birth.y() - s.shift.y(), island.birth.z()); box.contains(p))
+            found.push_back(&island);
+    return found;
+}
+
+// How far `axis` leans from straight down, in degrees.
+double lean_deg(const Vec3f &axis) { return Geometry::rad2deg(std::acos(std::clamp(-double(axis.z()), -1., 1.))); }
 
 } // namespace
 
@@ -484,33 +499,60 @@ TEST_CASE("A blade widening from its point takes stability tips along its spine"
     CHECK(end <= window + 0.5);
 }
 
-TEST_CASE("Small island starts go without a tip only when they meet a held part", "[ScaffoldPlan]")
+namespace {
+// A 4 x 4 x 10 column standing on the bed carries a 12 x 10 x 2 slab at z 8..10. Three 0.6 x 0.6 mm nubs hang under the
+// slab at y 1.7..2.3: A at x 4.3..4.9 and B at x 7..7.6 from z 7.93, C at x 9..9.6 from z 7.83. At 0.05 mm layers A and
+// B print one layer, 0.05 mm free, before the slab takes them in, and C three, 0.15 mm free; at 0.1 mm layers A and B
+// print one layer 0.1 mm free. A's far edge stands 0.9 mm off the column and B's 3.6 mm.
+TriangleMesh nubs_under_slab()
 {
-    // A 12 x 10 slab at z 8..10 on a column standing on the bed. Under it hangs a 0.6 mm nub, z 7.9..8, that meets the
-    // slab one layer up: it prints as it hangs. Beside it two 0.6 mm nubs at z 5..5.1 meet each other one layer up and
-    // grow on as a strand into the slab: neither part is held where they meet, so one of them takes a tip.
-    Sliced s(merged({ box(0, 0, 0, 4, 4, 10), box(0, 0, 8, 12, 10, 2), box(7, 2, 7.9, 0.6, 0.6, 0.1), box(7, 6, 5, 0.6, 0.6, 0.1),
-                      box(7.9, 6, 5, 0.6, 0.6, 0.1), box(7, 6, 5.1, 1.5, 0.6, 2.9) }));
+    return merged({ box(0, 0, 0, 4, 4, 10), box(0, 0, 8, 12, 10, 2), box(4.3, 1.7, 7.93, 0.6, 0.6, 0.07), box(7, 1.7, 7.93, 0.6, 0.6, 0.07),
+                    box(9, 1.7, 7.83, 0.6, 0.6, 0.17) });
+}
+const BoundingBoxf3 nub_a(Vec3d(4.1, 1.5, 7.8), Vec3d(5.1, 2.5, 7.99)), nub_b(Vec3d(6.8, 1.5, 7.8), Vec3d(7.8, 2.5, 7.99)),
+                    nub_c(Vec3d(8.8, 1.5, 7.8), Vec3d(9.8, 2.5, 7.99));
+} // namespace
+
+TEST_CASE("A one-layer nub beside a held part hangs from it and one farther off or taller takes a tip", "[ScaffoldPlan]")
+{
+    // At 0.05 mm layers the merge layer carries a = 0.13 mm, and a nub hangs from the part it meets when all of it lies
+    // within a + R = 0.97 mm of that part's material under the merge: A does, and hangs from the column the bed roots.
+    // B stands farther off and takes its birth tip at the merge, and C stands free longer than the nub bound, 0.1 mm.
+    Sliced     s(nubs_under_slab(), 0.05);
     const Plan plan = s.plan();
+    CHECK(count_in(s, plan, nub_a) == 0);
+    CHECK(count_in(s, plan, nub_b, { TipNeed::Birth }) == 1);
+    CHECK(count_in(s, plan, nub_c, { TipNeed::Birth }) == 1);
+    CHECK(plan.islands_unheld == 0);
+    const std::vector<const Island *> a = islands_in(s, plan, nub_a);
+    REQUIRE(a.size() == 1);
+    CHECK(a.front()->reason == IslandReason::Hung);
+    CHECK(a.front()->rooted);
+}
+
+TEST_CASE("The same nub takes a tip at 0.1 mm layers", "[ScaffoldPlan]")
+{
+    // At 0.1 mm layers nub A stands 0.1 mm free before the slab takes it in, a birth the reference tips: the hang holds
+    // only a nub standing free less than 0.1 mm, whatever the layer height.
+    Sliced     s(nubs_under_slab(), 0.1);
+    const Plan plan = s.plan();
+    CHECK(count_in(s, plan, nub_a, { TipNeed::Birth }) == 1);
+    CHECK(plan.islands_unheld == 0);
+}
+
+TEST_CASE("Two nubs that meet only each other take one tip", "[ScaffoldPlan]")
+{
+    // Two 0.6 mm nubs 0.3 mm apart at z 5..5.07 meet each other one 0.05 mm layer up and grow on as a strand into the
+    // slab of a column standing on the bed. Neither part is held where they meet, so the first takes its birth tip,
+    // which holds its part, and the second, within a + R of it, hangs from it.
+    Sliced s(merged({ box(0, 0, 0, 4, 4, 10), box(0, 0, 8, 12, 10, 2), box(7, 6, 5, 0.6, 0.6, 0.07), box(7.9, 6, 5, 0.6, 0.6, 0.07),
+                      box(7, 6, 5.07, 1.5, 0.6, 2.93) }),
+             0.05);
+    const Plan          plan = s.plan();
     const BoundingBoxf3 pair(Vec3d(6.8, 5.8, 4.9), Vec3d(8.7, 6.8, 7.95));
-    CHECK(count_in(s, plan, BoundingBoxf3(Vec3d(6.8, 1.8, 7.7), Vec3d(7.8, 2.8, 7.95))) == 0);
     CHECK(count_in(s, plan, pair, { TipNeed::Birth }) == 1);
     CHECK(plan.islands_unheld == 0);
-
-    // The plan lists every island with how it is held: the lone nub hangs from the slab the column roots, and of the
-    // pair one takes the birth tip and the other hangs from it.
-    const auto island_in = [&](double x0, double y0, double x1, double y1) {
-        std::vector<const Island *> found;
-        for (const Island &island : plan.islands)
-            if (const Vec2d xy = Vec2d(island.birth.x(), island.birth.y()) - s.shift;
-                xy.x() >= x0 && xy.x() <= x1 && xy.y() >= y0 && xy.y() <= y1)
-                found.push_back(&island);
-        return found;
-    };
-    const std::vector<const Island *> lone = island_in(6.8, 1.8, 7.8, 2.8), paired = island_in(6.8, 5.8, 8.7, 6.8);
-    REQUIRE(lone.size() == 1);
-    CHECK(lone.front()->reason == IslandReason::Hung);
-    CHECK(lone.front()->rooted);
+    const std::vector<const Island *> paired = islands_in(s, plan, BoundingBoxf3(Vec3d(6.8, 5.8, 4.9), Vec3d(8.7, 6.8, 5.1)));
     REQUIRE(paired.size() == 2);
     const auto tipped = std::find_if(paired.begin(), paired.end(), [](const Island *i) { return i->reason == IslandReason::Tip; });
     const auto hung   = std::find_if(paired.begin(), paired.end(), [](const Island *i) { return i->reason == IslandReason::Hung; });
@@ -521,4 +563,197 @@ TEST_CASE("Small island starts go without a tip only when they meet a held part"
     CHECK(inside(s, plan.tips[(*tipped)->holders.front()], pair));
     CHECK((*hung)->holders == (*tipped)->holders);
     CHECK_FALSE((*hung)->rooted);
+}
+
+TEST_CASE("A birth sliver within the self-support step takes no tip and counts nothing", "[ScaffoldPlan]")
+{
+    // A fin 0.12 mm thick stands 0.12 mm off the +x face of a 4 x 4 x 10 column standing on the bed, from z 3 to 10. The
+    // gap is wider than the slicer's closing radius shuts, so the fin starts as its own piece with nothing under it, but
+    // its farthest point, 0.24 mm off the column, lies within the 0.26 mm the layer below carries at 0.1 mm layers: it
+    // continues that layer as an overhang does and is no island.
+    Sliced              s(merged({ box(0, 0, 0, 4, 4, 10), box(4.12, 1, 3, 0.12, 2, 7) }));
+    const Plan          plan = s.plan();
+    const BoundingBoxf3 fin(Vec3d(4., 0.8, 2.9), Vec3d(4.5, 3.2, 10.));
+    CHECK(count_in(s, plan, fin) == 0);
+    CHECK(islands_in(s, plan, fin).empty());
+    CHECK(plan.islands_unheld == 0);
+}
+
+TEST_CASE("A far nub held by its own underside head gets no second tip", "[ScaffoldPlan]")
+{
+    // A nub 0.82 mm square and 0.07 mm tall hangs under the slab of the nub fixture's column at x 5.05..5.87, 1.05 to
+    // 1.87 mm off the column: at 0.05 mm layers it prints one layer before the slab takes it in. Its cells hang from the
+    // column, the material nearest them on their layer, past the reach plus half a cell, 0.95 mm, and its 16 lattice
+    // cells cover more than a small head's disc, 13 cells, so its own layer takes an underside head. That head holds it
+    // at the merge, where it would otherwise stand too far from the column to hang.
+    Sliced s(merged({ box(0, 0, 0, 4, 4, 10), box(0, 0, 8, 12, 10, 2), box(5.05, 1.69, 7.93, 0.82, 0.82, 0.07) }), 0.05);
+    const Plan          plan = s.plan();
+    const BoundingBoxf3 nub(Vec3d(4.9, 1.5, 7.8), Vec3d(6.0, 2.7, 7.99));
+    REQUIRE(count_in(s, plan, nub) == 1);
+    const auto tip = std::find_if(plan.tips.begin(), plan.tips.end(), [&](const PlannedTip &t) { return inside(s, t, nub); });
+    CHECK(tip->need == TipNeed::Underside);
+    const std::vector<const Island *> found = islands_in(s, plan, nub);
+    REQUIRE(found.size() == 1);
+    CHECK(found.front()->holders == std::vector<size_t>{ size_t(tip - plan.tips.begin()) });
+    CHECK(plan.islands_unheld == 0);
+}
+
+TEST_CASE("A birth over a shelf takes a tilted tip", "[ScaffoldPlan]")
+{
+    // A 0.8 mm rod hangs from the slab of a 4 x 4 column standing on the bed down to z 4, at x 7..7.8, over a shelf off
+    // the column at z 2..3 that ends at x 7.5, under the rod. Every neck straight down from the rod ends within the xy
+    // distance of the shelf, and one leaning away from it, past x 8, clears it: the birth tip takes the least lean that
+    // clears, which no smaller lean at its spot does, and hands the builder that axis. With no lean allowed no tip
+    // stands under the rod and the plan counts its island unheld.
+    Sliced s(merged({ box(0, 0, 0, 4, 4, 10), box(0, 0, 8, 12, 10, 2), box(4, 3, 2, 3.5, 3, 1), box(7, 4.6, 4, 0.8, 0.8, 4) }));
+    const BoundingBoxf3 rod(Vec3d(6.8, 4.4, 3.9), Vec3d(8., 5.6, 4.1));
+    const Plan          plan = s.plan();
+    REQUIRE(count_in(s, plan, rod, { TipNeed::Birth }) == 1);
+    const PlannedTip &tip = *std::find_if(plan.tips.begin(), plan.tips.end(), [&](const PlannedTip &t) { return inside(s, t, rod); });
+    const double      lean = lean_deg(tip.site.axis);
+    INFO("birth tip at (" << s.at(tip).x() << ", " << s.at(tip).y() << ", " << tip.site.print_z << ") leaning " << lean
+                          << " degrees along (" << tip.site.axis.x() << ", " << tip.site.axis.y() << ", " << tip.site.axis.z() << ")");
+    CHECK_THAT(double(tip.site.axis.norm()), Catch::Matchers::WithinAbs(1., 1e-6));
+    CHECK(lean > 0.);
+    CHECK(lean <= 45. + 1e-6);
+    // The planner hands the tip the axis the neck search reads at its spot, the one a baked list recomputes, and at one
+    // tilt step less nothing clears there.
+    const Vec3f again = neck_axis(s.input, tip.site);
+    CHECK_THAT(double((again - tip.site.axis).norm()), Catch::Matchers::WithinAbs(0., 1e-6));
+    const double step = std::asin(s.input.cell_mm / s.input.neck_depth_mm);
+    s.input.max_tilt_rad = Geometry::deg2rad(lean) - step + 1e-9;
+    CHECK(neck_axis(s.input, tip.site).isZero());
+
+    s.input.max_tilt_rad = 0.;
+    const Plan upright = s.plan();
+    CHECK(count_in(s, upright, rod, { TipNeed::Birth }) == 0);
+    CHECK(upright.islands_unheld == 1);
+    const std::vector<const Island *> at_rod = islands_in(s, upright, rod);
+    REQUIRE(at_rod.size() == 1);
+    CHECK(at_rod.front()->reason == IslandReason::NoNeck);
+}
+
+TEST_CASE("A birth whose straight neck crosses a thin shelf leans past the shelf", "[ScaffoldPlan]")
+{
+    // The rod of the shelf case hangs to z 4 over a shelf 0.3 mm thick at z 3..3.3 off the column that runs under the
+    // whole rod to x 8.2. A neck straight down from the rod ends at z 2.58 under the shelf, clear of the model, but its
+    // shaft crosses the shelf: the birth tip leans away from the column past the shelf's edge, and with no lean allowed
+    // no neck clears.
+    Sliced s(merged({ box(0, 0, 0, 4, 4, 10), box(0, 0, 8, 12, 10, 2), box(4, 3, 3, 4.2, 4, 0.3), box(7, 4.6, 4, 0.8, 0.8, 4) }));
+    const BoundingBoxf3 rod(Vec3d(6.8, 4.4, 3.9), Vec3d(8., 5.6, 4.1));
+    const Plan          plan = s.plan();
+    REQUIRE(count_in(s, plan, rod, { TipNeed::Birth }) == 1);
+    const PlannedTip &tip = *std::find_if(plan.tips.begin(), plan.tips.end(), [&](const PlannedTip &t) { return inside(s, t, rod); });
+    INFO("birth tip at (" << s.at(tip).x() << ", " << s.at(tip).y() << ", " << tip.site.print_z << ") leaning " << lean_deg(tip.site.axis)
+                          << " degrees along (" << tip.site.axis.x() << ", " << tip.site.axis.y() << ", " << tip.site.axis.z() << ")");
+    CHECK_FALSE(tip.site.axis.isZero());
+    CHECK(tip.site.axis.x() > 0.f);
+
+    s.input.max_tilt_rad = 0.;
+    const Plan upright = s.plan();
+    CHECK(count_in(s, upright, rod, { TipNeed::Birth }) == 0);
+    CHECK(upright.islands_unheld == 1);
+}
+
+TEST_CASE("A leaning neck takes the azimuth whose end stands farthest from the model", "[ScaffoldPlan]")
+{
+    // A lattice built by hand, 0.21 mm cells and 0.1 mm slabs, so every cell a neck reads is known exactly. The tip
+    // stands at the centre of cell (0, 0) on the bottom of slab 40, z 4, over a one-cell plate on slab 34, whose middle
+    // lies 0.55 mm under it, and beside a wall three cells thick from cell x 6 on, 1.26 mm off, on every slab under the
+    // tip. Straight down and at the first lean, 8.5 degrees, the shaft stays in the plate's cell; at 17 degrees it
+    // leaves it at every azimuth, and every end stands clear of the wall. The end leaning toward the wall stands 0.85 mm
+    // from it and one leaning away beyond the neck depth, so the lean points away from the wall.
+    PlanInput in;
+    in.cell           = scaled<coord_t>(0.21);
+    in.cell_mm        = unscale<double>(in.cell);
+    in.neck_depth_mm  = neck_mm;
+    in.xy_distance_mm = xy_mm;
+    const auto grid = [](int x0, int y0, int w, int h) {
+        LayerGrid g;
+        g.x0 = x0, g.y0 = y0, g.w = w, g.h = h;
+        g.cells.assign(size_t(w) * size_t(h), 1);
+        return g;
+    };
+    const LayerGrid wall = grid(6, -10, 3, 21);
+    ExPolygon       wall_outline;
+    wall_outline.contour = Polygon({ Point(6 * in.cell, -10 * in.cell), Point(9 * in.cell, -10 * in.cell), Point(9 * in.cell, 11 * in.cell),
+                                     Point(6 * in.cell, 11 * in.cell) });
+    for (int j = 0; j <= 40; ++ j) {
+        in.slabs.push_back({ 0.1 * j, 0.1 * (j + 1), {} });
+        in.blocked.emplace_back();
+        in.material.push_back(j == 40 ? LayerGrid() : wall);
+        in.wall_band.push_back(j == 40 ? ExPolygons() : offset_ex(wall_outline, scaled<float>(xy_mm)));
+    }
+    LayerGrid &plate = in.material[34];
+    plate            = grid(0, -10, 9, 21);
+    std::fill(plate.cells.begin(), plate.cells.end(), 0);
+    for (int y = -10; y <= 10; ++ y)
+        for (int x = 6; x <= 8; ++ x)
+            plate.cells[size_t(y + 10) * size_t(plate.w) + size_t(x)] = 1;
+    plate.cells[size_t(10) * size_t(plate.w)] = 1;
+
+    const TipSite site { Point(in.cell / 2, in.cell / 2), 4., 39 };
+    const Vec3f   axis = neck_axis(in, site);
+    INFO("axis (" << axis.x() << ", " << axis.y() << ", " << axis.z() << ") leaning " << lean_deg(axis) << " degrees");
+    CHECK_THAT(lean_deg(axis), Catch::Matchers::WithinAbs(Geometry::rad2deg(2. * std::asin(in.cell_mm / neck_mm)), 1e-3));
+    // More than half the lean points away from the wall: an end leaning toward it, or across it, stands nearer.
+    CHECK(axis.x() < -0.5f * std::sin(float(Geometry::deg2rad(lean_deg(axis)))));
+}
+
+namespace {
+// The birth piece of `s`'s plan input whose outline holds `box`'s middle at its height, in the fixture frame.
+size_t birth_piece(const Sliced &s, const BoundingBoxf3 &box)
+{
+    const Vec3d middle = box.center();
+    const Point at     = Point::new_scale(middle.x() + s.shift.x(), middle.y() + s.shift.y());
+    const auto &pieces = s.input.components.pieces;
+    for (size_t p = 0; p < pieces.size(); ++ p)
+        if (pieces[p].below.empty() && pieces[p].bottom_z >= box.min.z() && pieces[p].bottom_z <= box.max.z() && pieces[p].polygon.contains(at))
+            return p;
+    return size_t(-1);
+}
+} // namespace
+
+TEST_CASE("A list's tipless nub hangs only where the planner would hang it", "[ScaffoldPlan]")
+{
+    // A baked list reads each tipless birth by the planner's rule, so a nub hangs only from a part the list's tips or
+    // the bed hold within its hang. Under the nub fixture's slab at 0.05 mm layers A hangs from the column the bed roots,
+    // while B stands too far off and C stands free too long: both need their tip.
+    {
+        Sliced       s(nubs_under_slab(), 0.05);
+        const size_t a = birth_piece(s, nub_a), b = birth_piece(s, nub_b), c = birth_piece(s, nub_c);
+        REQUIRE(a != size_t(-1));
+        REQUIRE(b != size_t(-1));
+        REQUIRE(c != size_t(-1));
+        const std::vector<BirthRead> reads = read_births(s.input, { a, b, c }, {});
+        CHECK(reads[0].hold == BirthHold::Nub);
+        CHECK(reads[1].hold == BirthHold::Tip);
+        CHECK(reads[2].hold == BirthHold::Tip);
+    }
+    // The far nub of the underside head case needs its tip until the list holds the head its own layer places.
+    {
+        Sliced s(merged({ box(0, 0, 0, 4, 4, 10), box(0, 0, 8, 12, 10, 2), box(5.05, 1.69, 7.93, 0.82, 0.82, 0.07) }), 0.05);
+        const size_t nub = birth_piece(s, BoundingBoxf3(Vec3d(4.9, 1.5, 7.8), Vec3d(6.0, 2.7, 7.99)));
+        REQUIRE(nub != size_t(-1));
+        std::vector<TipSite> list;
+        for (const PlannedTip &tip : s.plan().tips)
+            list.push_back(tip.site);
+        CHECK(read_births(s.input, { nub }, {}).front().hold == BirthHold::Tip);
+        CHECK(read_births(s.input, { nub }, list).front().hold == BirthHold::Nub);
+    }
+    // Of two nubs meeting only each other the first needs its tip and the second hangs from it, as the plan places one.
+    {
+        Sliced s(merged({ box(0, 0, 0, 4, 4, 10), box(0, 0, 8, 12, 10, 2), box(7, 6, 5, 0.6, 0.6, 0.07), box(7.9, 6, 5, 0.6, 0.6, 0.07),
+                          box(7, 6, 5.07, 1.5, 0.6, 2.93) }),
+                 0.05);
+        const size_t first = birth_piece(s, BoundingBoxf3(Vec3d(6.9, 5.9, 4.9), Vec3d(7.7, 6.7, 5.1)));
+        const size_t second = birth_piece(s, BoundingBoxf3(Vec3d(7.8, 5.9, 4.9), Vec3d(8.6, 6.7, 5.1)));
+        REQUIRE(first != size_t(-1));
+        REQUIRE(second != size_t(-1));
+        const std::vector<BirthRead> reads = read_births(s.input, { first, second }, {});
+        const size_t tipped = size_t(std::count_if(reads.begin(), reads.end(), [](const BirthRead &r) { return r.hold == BirthHold::Tip; }));
+        const size_t hung   = size_t(std::count_if(reads.begin(), reads.end(), [](const BirthRead &r) { return r.hold == BirthHold::Nub; }));
+        CHECK(tipped == 1);
+        CHECK(hung == 1);
+    }
 }

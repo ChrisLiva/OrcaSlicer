@@ -3,6 +3,7 @@
 #include <random>
 #include <numeric>
 #include <cstdint>
+#include <optional>
 
 #include "sla_test_utils.hpp"
 
@@ -61,6 +62,51 @@ sla::SupportTreeConfig blocked_lip_config()
 }
 
 const sla::SupportPoints BLOCKED_LIP_POINTS = {sla::SupportPoint(Vec3f(20.f, 20.f, 12.f), 0.2f)};
+
+// A 10x10x2 slab at x 0..10, y 0..10, z 10..12 on a 2x2x10 post at x 0..2,
+// y 0..2 that pins the ground at z 0; with `wall`, a 1x10x10 wall at
+// x 5.5..6.5 stands from the ground up to the slab. RAISED_SLAB_POINTS puts
+// one point under the slab's centre at (5, 5, 10), 0.5 mm beside the wall.
+indexed_triangle_set raised_slab_mesh(bool wall)
+{
+    auto box = [](double x, double y, double z, float dx, float dy, float dz) {
+        TriangleMesh m = make_cube(x, y, z);
+        m.translate(dx, dy, dz);
+        return m;
+    };
+
+    indexed_triangle_set its = box(10., 10., 2., 0.f, 0.f, 10.f).its;
+    its_merge(its, box(2., 2., 10., 0.f, 0.f, 0.f).its);
+    if (wall)
+        its_merge(its, box(1., 10., 10., 5.5f, 0.f, 0.f).its);
+
+    return its;
+}
+
+const sla::SupportPoints RAISED_SLAB_POINTS = {sla::SupportPoint(Vec3f(5.f, 5.f, 10.f), 0.2f)};
+
+// A unit axis leaning `deg` degrees from straight down toward +x.
+Vec3f leaning_axis(double deg)
+{
+    const double rad = deg * M_PI / 180.;
+    return Vec3f(float(std::sin(rad)), 0.f, float(-std::cos(rad)));
+}
+
+// The one head the builder puts under the raised slab, given `axes`, or none.
+std::optional<sla::Head> raised_slab_head(bool wall, std::vector<Vec3f> axes)
+{
+    indexed_triangle_set   mesh = raised_slab_mesh(wall);
+    sla::SupportTreeConfig cfg;
+    cfg.object_elevation_mm = 0.;
+    cfg.allow_model_anchors = false;
+    sla::SupportTreeBuilder builder;
+    sla::SupportableMesh    sm{mesh, RAISED_SLAB_POINTS, cfg};
+    sm.head_axes = std::move(axes);
+    sla::SupportTreeBuildsteps::execute(builder, sm);
+    if (builder.heads().size() != 1)
+        return std::nullopt;
+    return builder.heads().front();
+}
 
 // A 2x40x30 wall at x 0..2, y 0..40, z 0..30, a 0.2 mm ground plate at
 // x 4.5..plate_x_end, y 0..40, and a 6x6x2 slab at x 2..8, y 17..23, z h..h+2
@@ -284,6 +330,44 @@ TEST_CASE("A model-facing head is dropped when model anchors are forbidden", "[S
         CHECK(pillar.endpt.z() >= 3.9);
         CHECK(pillar.endpt.z() <= 12.0);
     }
+}
+
+TEST_CASE("A head given an axis points along it capped at the bridge slope", "[SLASupportGeneration]") {
+    // The builder aims a head along the axis it is handed in place of the mesh normal, and saturates it at the bridge
+    // slope, 45 degrees from down, as it saturates a normal. With no axis, or a zero one, the head takes the normal of
+    // the slab's underside, straight down.
+    const std::optional<sla::Head> at30 = raised_slab_head(false, {leaning_axis(30.)});
+    REQUIRE(at30.has_value());
+    REQUIRE(at30->is_valid());
+    CHECK((at30->dir - leaning_axis(30.).cast<double>().normalized()).norm() < 1e-6);
+
+    const std::optional<sla::Head> at60 = raised_slab_head(false, {leaning_axis(60.)});
+    REQUIRE(at60.has_value());
+    REQUIRE(at60->is_valid());
+    const auto [polar, azimuth] = sla::dir_to_spheric(at60->dir);
+    CHECK_THAT(polar, Catch::Matchers::WithinAbs(3. * M_PI / 4., 1e-6));
+    CHECK_THAT(azimuth, Catch::Matchers::WithinAbs(0., 1e-6));
+
+    for (const std::vector<Vec3f> &axes : {std::vector<Vec3f>{}, std::vector<Vec3f>{Vec3f::Zero()}}) {
+        const std::optional<sla::Head> normal = raised_slab_head(false, axes);
+        INFO(axes.size() << " axes");
+        REQUIRE(normal.has_value());
+        REQUIRE(normal->is_valid());
+        CHECK((normal->dir - Vec3d(0., 0., -1.)).norm() < 1e-6);
+    }
+}
+
+TEST_CASE("A colliding axis falls back to the head search", "[SLASupportGeneration]") {
+    // An axis leaning 45 degrees toward the wall 0.5 mm beside the point runs the head into the wall, and the builder
+    // searches a pose clear of the model from that axis, as it does from a normal whose head collides: the head stands,
+    // aimed away from the axis, with its back clear of the wall.
+    const Vec3f                    axis = leaning_axis(45.);
+    const std::optional<sla::Head> head = raised_slab_head(true, {axis});
+    REQUIRE(head.has_value());
+    REQUIRE(head->is_valid());
+    INFO("head dir (" << head->dir.x() << ", " << head->dir.y() << ", " << head->dir.z() << "), back radius " << head->r_back_mm);
+    CHECK((head->dir - axis.cast<double>().normalized()).norm() > 1e-3);
+    CHECK(head->junction_point().x() + head->r_back_mm <= 5.5);
 }
 
 TEST_CASE("A stop condition halts the builder between steps", "[SLASupportGeneration]") {

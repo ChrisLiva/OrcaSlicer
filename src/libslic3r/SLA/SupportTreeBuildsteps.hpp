@@ -189,6 +189,7 @@ class SupportTreeBuildsteps {
     const SupportTreeConfig& m_cfg;
     const IndexedMesh& m_mesh;
     const std::vector<SupportPoint>& m_support_pts;
+    const std::vector<Vec3f>& m_head_axes;
 
     using PtIndices = std::vector<unsigned>;
 

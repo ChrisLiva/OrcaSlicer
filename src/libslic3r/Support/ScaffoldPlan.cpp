@@ -1,6 +1,7 @@
 #include "ScaffoldPlan.hpp"
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <numeric>
 #include <optional>
 #include <queue>
@@ -25,9 +26,11 @@ constexpr double stability_min_mm = 3.;
 constexpr double stability_retry_mm = 1.;
 // A birth tip under an island that carries its part higher than this takes the heavy disc where the section fuses it.
 constexpr double heavy_birth_mm   = 2.;
-// An island that never merges and stands no taller than this is mesh debris, and one whose birth stands at a wall
-// and merges within it hangs from that wall when the part it meets is held.
+// An island that never merges and stands no taller than this is mesh debris.
 constexpr double debris_mm        = 1.;
+// A birth no wider than two support lines that merges having stood free less than this is a nub: every reference birth
+// that stands free this long or longer carries a contact, whatever the layer height.
+constexpr double nub_free_mm      = 0.1;
 // How far past what the layer below carries an underside may hang, in support lines: the first line past a held edge
 // bonds its side to a held line and the second to a line that hangs by one, but a third would lie against a line that
 // itself hangs by two.
@@ -38,6 +41,8 @@ constexpr double face_cap_deg     = 60.;
 // The directions the bridge hold tries through a cell, 2.8 degrees apart: a line through the middle of a 9 mm chord
 // stays within one cell of it.
 constexpr int    bridge_directions = 64;
+// The area in mm2 a piece may leave outside a grown set and still lie within it: Clipper's rounding of the two outlines.
+constexpr double within_mm2       = 1e-4;
 
 using Heap = std::priority_queue<std::pair<float, size_t>, std::vector<std::pair<float, size_t>>, std::greater<>>;
 
@@ -165,6 +170,253 @@ Births walk_births(const PlanInput &in)
     return births;
 }
 
+// The lattice offsets within `r` cells of a cell.
+std::vector<std::pair<int, int>> disc(double r)
+{
+    std::vector<std::pair<int, int>> out;
+    for (int dy = -int(r) - 1; dy <= int(r) + 1; ++ dy)
+        for (int dx = -int(r) - 1; dx <= int(r) + 1; ++ dx)
+            if (double(dx * dx + dy * dy) <= r * r)
+                out.emplace_back(dx, dy);
+    return out;
+}
+
+std::pair<int, int> cell_of(const PlanInput &in, const Point &p)
+{
+    return { int(std::floor(double(p.x() - in.origin.x()) / double(in.cell))), int(std::floor(double(p.y() - in.origin.y()) / double(in.cell))) };
+}
+Point centre_of(const PlanInput &in, int x, int y) { return in.origin + Point(coord_t((x + 0.5) * in.cell), coord_t((y + 0.5) * in.cell)); }
+
+// The piece of slab `l` holding `p`, or npos.
+size_t piece_at(const PlanInput &in, size_t l, const Point &p)
+{
+    const auto [x, y] = cell_of(in, p);
+    if (const uint16_t label = in.material[l].at(x, y); label != 0)
+        return in.components.slab_range[l].first + label - 1;
+    for (size_t q = in.components.slab_range[l].first; q < in.components.slab_range[l].second; ++ q)
+        if (in.components.pieces[q].polygon.contains(p))
+            return q;
+    return size_t(-1);
+}
+
+// Whether every point of `piece` lies within `mm` of `set`, grown with round joins, which reach no farther than `mm`.
+bool within(const ExPolygon &piece, const Polygons &set, double mm)
+{
+    double left = 0.;
+    for (const ExPolygon &out : diff_ex(ExPolygons{ piece }, offset(set, float(scale_(mm)), ClipperLib::jtRound, scale_(0.01))))
+        left += out.area();
+    return left * SCALING_FACTOR * SCALING_FACTOR < within_mm2;
+}
+
+// How far a nub may lie from what holds it at merge slab `s`: that slab's step plus the reach, so the merge layer
+// bridges to it no farther than to any underside the planner leaves bare.
+double hang_mm(const PlanInput &in, size_t s) { return in.self_support_mm[s] + reach_lines * in.toolpath_width_mm; }
+
+// What the parts other than `own` that `held` holds, by root in `sets`, have under merge piece `q` within `hang` mm of
+// `nub`, with those parts' roots added to `holding`.
+Polygons footing(const PlanInput &in, DisjointSets &sets, size_t q, size_t own, const ExPolygon &nub, double hang,
+                 const std::function<bool(size_t)> &held, std::vector<size_t> &holding)
+{
+    const Polygons    reach    = offset(nub, float(scale_(hang)), ClipperLib::jtRound, scale_(0.01));
+    const BoundingBox near_box = get_extents(reach);
+    Polygons          out;
+    for (const size_t b : in.components.pieces[q].below)
+        if (const size_t rb = sets.find(b); rb != own && held(rb)) {
+            const Polygons part = ClipperUtils::clip_clipper_polygons_with_subject_bbox(in.components.pieces[b].polygon, near_box);
+            if (part.empty() || intersection(part, reach).empty())
+                continue;
+            append(out, part);
+            if (std::find(holding.begin(), holding.end(), rb) == holding.end())
+                holding.push_back(rb);
+        }
+    return out;
+}
+
+const Vec3d straight_down(0., 0., -1.);
+
+// The neck a head hangs from a tip by, read on the plan's lattice: one neck depth from a point on the bottom of a slab
+// along a unit axis pointing down.
+class Necks
+{
+public:
+    explicit Necks(const PlanInput &in)
+        : m_in(in), m_wall_disc(disc((in.xy_distance_mm + 0.71 * in.cell_mm) / in.cell_mm)),
+          m_step(std::asin(std::min(1., in.cell_mm / in.neck_depth_mm)))
+    {}
+
+    // Whether a neck from `p` on the bottom of slab `l` along `axis` clears the model, as the wall skip reads it: no
+    // blocker covers `p`'s cell, and the neck's end, on the first slab whose top reaches it, stands clear of the
+    // lattice's material by the xy distance plus half a cell's diagonal and outside the exact band. The lattice
+    // places the end and the wall only to within a cell each, and a tip on the model's edge, as every stability tip
+    // is, stands where that decides: the wall skip reads the band itself, so the neck does too. An end under the
+    // first slab stands by the pad. The shaft also crosses no material on the slabs between its end and its tip, a
+    // thin shelf the end has passed included. Straight down, the run of material right under the tip is the tip's
+    // own face to the lattice's resolution and is not crossed: a tip on a face's edge stands over the slab below's
+    // contour, whose cell reads material about half the time, and a steep face's column stays in its part for a few
+    // slabs. A leaning neck, a birth's, stands over no face of its own, so any material on its shaft is crossed.
+    bool clear(size_t l, const Point &p, const Vec3d &axis) const
+    {
+        const auto [x, y] = cell_of(m_in, p);
+        if (m_in.blocked[l].at(x, y) != 0)
+            return false;
+        const double depth = m_in.neck_depth_mm;
+        const double z     = m_in.slabs[l].bottom_z + depth * axis.z();
+        const size_t k     = end_slab(z);
+        if (z > m_in.slabs.front().bottom_z && k < m_in.slabs.size()) {
+            const Point               end  = along(p, axis, depth);
+            const std::pair<int, int> cell = cell_of(m_in, end);
+            const LayerGrid          &wall = m_in.material[k];
+            if (std::any_of(m_wall_disc.begin(), m_wall_disc.end(),
+                            [&](const std::pair<int, int> &d) { return wall.at(cell.first + d.first, cell.second + d.second) != 0; }))
+                return false;
+            const ExPolygons &band = m_in.wall_band[k];
+            if (std::any_of(band.begin(), band.end(), [&end](const ExPolygon &expoly) { return expoly.contains(end); }))
+                return false;
+        }
+        const double top    = m_in.slabs[l].bottom_z;
+        const size_t bottom = z <= m_in.slabs.front().bottom_z ? 0 : k + 1;
+        bool         face   = axis.x() == 0. && axis.y() == 0.;
+        for (size_t j = l; j -- > bottom;) {
+            const double mid = 0.5 * (m_in.slabs[j].bottom_z + m_in.slabs[j].print_z);
+            const auto [sx, sy] = cell_of(m_in, along(p, axis, (top - mid) / -axis.z()));
+            const bool solid = m_in.material[j].at(sx, sy) != 0;
+            if (solid && ! face)
+                return false;
+            face = face && solid;
+        }
+        return true;
+    }
+
+    // Where a tip stands under birth piece `piece` of slab `l`, whose deepest point is `deepest`, and the axis its neck
+    // takes, zero for straight down. The candidates are `deepest` and then the piece's cells, nearest it first. The first
+    // candidate whose neck clears straight down wins; failing that, the least lean, in tilt steps up to the cap, at
+    // which a candidate clears, at the first such candidate along the azimuth whose end stands farthest from the model.
+    // None where no candidate clears.
+    std::optional<std::pair<Point, Vec3f>> search(size_t l, size_t piece, const Point &deepest) const
+    {
+        if (clear(l, deepest, straight_down))
+            return std::make_pair(deepest, Vec3f::Zero().eval());
+        const LayerGrid   &g     = m_in.material[l];
+        const uint16_t     label = uint16_t(piece - m_in.components.slab_range[l].first + 1);
+        std::vector<Point> candidates { deepest };
+        for (size_t i = 0; i < g.cells.size(); ++ i)
+            if (g.cells[i] == label)
+                candidates.push_back(centre_of(m_in, g.x0 + int(i % size_t(g.w)), g.y0 + int(i / size_t(g.w))));
+        std::stable_sort(candidates.begin() + 1, candidates.end(), [&deepest](const Point &a, const Point &b) {
+            return (a - deepest).cast<double>().squaredNorm() < (b - deepest).cast<double>().squaredNorm();
+        });
+        for (auto it = candidates.begin() + 1; it != candidates.end(); ++ it)
+            if (clear(l, *it, straight_down))
+                return std::make_pair(*it, Vec3f::Zero().eval());
+        for (const double tilt : tilts())
+            for (const Point &c : candidates)
+                if (const std::optional<Vec3d> axis = lean(l, c, tilt))
+                    return std::make_pair(c, axis->cast<float>().eval());
+        return std::nullopt;
+    }
+
+    // The axis a neck from `p` on the bottom of slab `l` takes by the same rule, `p` the only candidate: zero where it
+    // clears straight down or no lean clears.
+    Vec3f axis_at(size_t l, const Point &p) const
+    {
+        if (clear(l, p, straight_down))
+            return Vec3f::Zero();
+        for (const double tilt : tilts())
+            if (const std::optional<Vec3d> axis = lean(l, p, tilt))
+                return axis->cast<float>();
+        return Vec3f::Zero();
+    }
+
+private:
+    const PlanInput                 &m_in;
+    std::vector<std::pair<int, int>> m_wall_disc;   // cells within the xy distance of a wall, by offset
+    const double                     m_step;        // the lean that moves a neck's end one cell sideways
+
+    // The first slab whose top reaches `z`, or the slab count past the last.
+    size_t end_slab(double z) const
+    {
+        return size_t(std::lower_bound(m_in.slabs.begin(), m_in.slabs.end(), z,
+                                       [](const SupportAnalysis::Slab &slab, double z) { return slab.print_z < z; }) - m_in.slabs.begin());
+    }
+    static Point along(const Point &p, const Vec3d &axis, double length)
+    {
+        return p + Point::new_scale(length * axis.x(), length * axis.y());
+    }
+    // The leans past straight down, one step apart up to the cap, which is the last.
+    std::vector<double> tilts() const
+    {
+        std::vector<double> out;
+        if (m_in.max_tilt_rad <= 0. || m_step <= 0.)
+            return out;
+        for (int i = 1; double(i) * m_step < m_in.max_tilt_rad - EPSILON; ++ i)
+            out.push_back(double(i) * m_step);
+        out.push_back(m_in.max_tilt_rad);
+        return out;
+    }
+    // Among the azimuths at lean `tilt`, one cell apart at the neck's end, the clearing axis whose end stands farthest
+    // from the material of the slab it ends on, the first on a tie; none where no azimuth clears.
+    std::optional<Vec3d> lean(size_t l, const Point &p, double tilt) const
+    {
+        const double depth = m_in.neck_depth_mm;
+        const int    n     = std::max(1, int(std::ceil(2. * M_PI * depth * std::sin(tilt) / m_in.cell_mm)));
+        const size_t k     = end_slab(m_in.slabs[l].bottom_z - depth * std::cos(tilt));
+        std::optional<Vec3d> best;
+        double               most = -1.;
+        for (int j = 0; j < n; ++ j) {
+            const double phi  = 2. * M_PI * double(j) / double(n);
+            const Vec3d  axis(std::sin(tilt) * std::cos(phi), std::sin(tilt) * std::sin(phi), -std::cos(tilt));
+            if (! clear(l, p, axis))
+                continue;
+            if (const double r = room(k, along(p, axis, depth)); r > most) {
+                most = r;
+                best = axis;
+            }
+        }
+        return best;
+    }
+    // How far `e` stands from the nearest material cell of slab `k`, up to one neck depth.
+    double room(size_t k, const Point &e) const
+    {
+        const double cap = m_in.neck_depth_mm;
+        if (k >= m_in.slabs.size())
+            return cap;
+        const int        r        = int(std::ceil(cap / m_in.cell_mm));
+        const auto       [ex, ey] = cell_of(m_in, e);
+        const LayerGrid &g        = m_in.material[k];
+        double           near     = cap;
+        for (int dy = -r; dy <= r; ++ dy)
+            for (int dx = -r; dx <= r; ++ dx)
+                if (g.at(ex + dx, ey + dy) != 0)
+                    near = std::min(near, (centre_of(m_in, ex + dx, ey + dy) - e).cast<double>().norm() * SCALING_FACTOR);
+        return near;
+    }
+};
+
+// How the birth rule reads birth piece `p` of slab `l` on its own, before a merge settles it. It continues the slab
+// below as an overhang does where every point of it lies within that slab's self-support step of the slab's material,
+// which `layer` reads as a cell the step carries: a rib stepping out less than that a layer is no island. It is debris
+// where it never merges and stands at most `debris_mm`, and a nub where it merges having stood free less than
+// `nub_free_mm` and is no wider than two support lines. Any other birth needs a neck.
+enum class BirthKind : uint8_t { Overhang, Debris, Nub, Neck };
+BirthKind birth_kind(const PlanInput &in, const Births &births, size_t l, size_t p)
+{
+    const ExPolygon &piece = in.components.pieces[p].polygon;
+    if (l > 0 && in.self_support_mm[l] > 0.) {
+        BoundingBox box = get_extents(piece);
+        box.offset(coord_t(scale_(in.self_support_mm[l])) + 1);
+        if (within(piece, ClipperUtils::clip_clipper_polygons_with_subject_bbox(in.slabs[l - 1].polygons, box), in.self_support_mm[l]))
+            return BirthKind::Overhang;
+    }
+    const bool   merges = births.merge_slab[p] < in.slabs.size();
+    const double free   = births.free_mm[p];
+    if (! merges && free <= debris_mm + EPSILON)
+        return BirthKind::Debris;
+    if (merges && free < nub_free_mm - EPSILON &&
+        unscale<double>(get_extents(piece).size().maxCoeff()) <= 2. * in.toolpath_width_mm + EPSILON)
+        return BirthKind::Nub;
+    return BirthKind::Neck;
+}
+
 // The narrowest width of a convex hull: the least, over its edges, of the farthest point from the edge.
 double min_width_mm(const Polygon &hull)
 {
@@ -193,19 +445,10 @@ public:
         m_anchor_z(in.components.pieces.size(), -std::numeric_limits<double>::max()),
         m_rearm_z(in.components.pieces.size(), -std::numeric_limits<double>::max()),
         m_anchors(in.components.pieces.size()), m_waiting(in.components.pieces.size()), m_rooted(in.components.pieces.size(), 0),
-        m_slender(in.components.pieces.size(), 0), m_flaps(0), m_reach_mm(reach_lines * in.toolpath_width_mm)
+        m_slender(in.components.pieces.size(), 0), m_necks(in), m_flaps(0), m_reach_mm(reach_lines * in.toolpath_width_mm)
     {
         m_births = walk_births(in);
-        const auto disc = [](double r) {
-            std::vector<std::pair<int, int>> out;
-            for (int dy = -int(r) - 1; dy <= int(r) + 1; ++ dy)
-                for (int dx = -int(r) - 1; dx <= int(r) + 1; ++ dx)
-                    if (double(dx * dx + dy * dy) <= r * r)
-                        out.emplace_back(dx, dy);
-            return out;
-        };
-        // Cells within the xy distance of a wall, under a small head, and within two lines, all by offset.
-        m_wall_disc  = disc((in.xy_distance_mm + 0.71 * in.cell_mm) / in.cell_mm);
+        // Cells under a small head and within two lines, by offset.
         m_head_disc  = disc(in.toolpath_width_mm / in.cell_mm);
         m_two_lines = disc(m_reach_mm / in.cell_mm);
         // A small head's own disc, pi w^2, in cells.
@@ -274,7 +517,7 @@ private:
     struct BirthPiece { size_t slab, piece; Point deepest; };
     std::vector<BirthPiece>  m_island_pieces;
     std::vector<char>        m_rooted, m_slender;
-    std::vector<std::pair<int, int>> m_wall_disc;
+    Necks                    m_necks;
     std::vector<std::pair<int, int>> m_head_disc;    // the cells under a small head, two support lines across
     std::vector<std::pair<int, int>> m_two_lines;    // the cells within two lines: the reach, the wall zone and the rim
     // Flaps: the underside hanging past the step, connected on a layer and across layers, with each one's cell count
@@ -303,12 +546,8 @@ private:
     size_t                   m_wall_bottom = 0, m_wall_top = 0;   // the layers a wall cell of the layer walked stays empty on
 
     const std::vector<SupportAnalysis::Piece> &pieces() const { return m_in.components.pieces; }
-    Point centre(int x, int y) const { return m_in.origin + Point(coord_t((x + 0.5) * m_in.cell), coord_t((y + 0.5) * m_in.cell)); }
-    std::pair<int, int> cell_of(const Point &p) const
-    {
-        return { int(std::floor(double(p.x() - m_in.origin.x()) / double(m_in.cell))),
-                 int(std::floor(double(p.y() - m_in.origin.y()) / double(m_in.cell))) };
-    }
+    Point centre(int x, int y) const { return centre_of(m_in, x, y); }
+    std::pair<int, int> cell_of(const Point &p) const { return ScaffoldSupport::cell_of(m_in, p); }
     float run_of(size_t i) const { return std::max(0.f, m_dist[i] - m_step); }
     // The run a cell holds within: the reach, and half a cell for where the lattice samples it.
     float reach_run() const { return float(m_reach_mm + 0.5 * m_in.cell_mm); }
@@ -329,7 +568,7 @@ private:
                 if (const size_t r = m_sets.find(q); std::find(roots.begin(), roots.end(), r) == roots.end())
                     roots.push_back(r);
             if (roots.size() > 1)
-                settle(roots);
+                settle(l, p, roots);
             const size_t root = roots.front();
             for (size_t i = 1; i < roots.size(); ++ i) {
                 const size_t r = roots[i];
@@ -344,70 +583,71 @@ private:
         }
     }
 
-    // Parts meeting: a birth that waited for this merge is held when a tip or the bed already holds one of the parts, and
-    // hangs from every tip on the parts held. When none is, the first waiting birth a tip can stand under takes its tip
-    // after all, which holds the rest; one that no tip can reach is counted.
-    void settle(const std::vector<size_t> &roots)
+    // Parts meeting at piece `q` of slab `s`: each nub that waited for this merge is settled, lowest first. A nub whose
+    // own part holds a tip, an underside head its layer placed, is held by that tip. One lying wholly within the merge
+    // slab's step plus the reach of what the held parts, those a tip or the bed holds, have under the merge hangs from
+    // their tips: the merge layer bridges no farther to it than to any underside the planner leaves bare. Any other nub
+    // takes its birth tip now, which holds its part for the nubs after it and takes the pending cells under its cover,
+    // or counts as unheld where no neck clears.
+    void settle(size_t s, size_t q, const std::vector<size_t> &roots)
     {
-        std::vector<size_t> holders;
-        bool                rooted = false;
-        for (size_t r : roots) {
-            rooted = rooted || m_rooted[r];
-            for (const Anchor &anchor : m_anchors[r])
-                holders.push_back(anchor.tip);
-        }
-        bool placed = rooted || ! holders.empty();
-        for (size_t r : roots) {
-            for (const size_t k : m_waiting[r]) {
-                if (placed)
-                    break;
-                const BirthPiece &birth = m_island_pieces[k];
-                if (const std::optional<Point> spot = birth_spot(birth.slab, birth.piece, birth.deepest)) {
-                    BOOST_LOG_TRIVIAL(debug) << "scaffold island at " << pieces()[birth.piece].bottom_z << " joins nothing held: tip";
-                    holders = { place(site_at(birth.slab, *spot, birth_grade(birth.slab, birth.piece, *spot)), TipNeed::Birth, nullptr) };
-                    m_plan.islands[k].reason = IslandReason::Tip;
-                    placed = true;
-                }
-            }
-        }
-        for (size_t r : roots) {
-            for (const size_t k : m_waiting[r]) {
-                Island &island = m_plan.islands[k];
-                if (! placed) {
-                    island.reason = IslandReason::NoNeck;
-                    ++ m_plan.islands_unheld;
-                    continue;
-                }
-                island.holders = holders;
-                island.rooted  = rooted;
-            }
+        std::vector<std::pair<size_t, size_t>> waiting;   // (island, its part's root)
+        for (const size_t r : roots) {
+            for (const size_t k : m_waiting[r])
+                waiting.emplace_back(k, r);
             m_waiting[r].clear();
+        }
+        std::sort(waiting.begin(), waiting.end());
+        const std::function<bool(size_t)> held = [this](size_t r) { return m_rooted[r] || ! m_anchors[r].empty(); };
+        const auto tips = [this](size_t r) {
+            std::vector<size_t> out;
+            for (const Anchor &anchor : m_anchors[r])
+                out.push_back(anchor.tip);
+            return out;
+        };
+        const double hang = hang_mm(m_in, s);
+        for (const auto &[k, r] : waiting) {
+            Island           &island = m_plan.islands[k];
+            const BirthPiece &birth  = m_island_pieces[k];
+            const ExPolygon  &nub    = pieces()[birth.piece].polygon;
+            const double      z      = pieces()[birth.piece].bottom_z;
+            if (! m_anchors[r].empty()) {
+                BOOST_LOG_TRIVIAL(debug) << "scaffold island at " << z << " held by its own tip";
+                island.holders = tips(r);
+                island.rooted  = m_rooted[r];
+                island.reason  = IslandReason::Tip;
+                continue;
+            }
+            std::vector<size_t> holding;
+            if (const Polygons under = footing(m_in, m_sets, q, r, nub, hang, held, holding); ! under.empty() && within(nub, under, hang)) {
+                BOOST_LOG_TRIVIAL(debug) << "scaffold island at " << z << " hangs from a held part";
+                island.holders.clear();
+                island.rooted = false;
+                for (const size_t rb : holding) {
+                    append(island.holders, tips(rb));
+                    island.rooted = island.rooted || m_rooted[rb];
+                }
+                island.reason = IslandReason::Hung;
+                continue;
+            }
+            if (const std::optional<std::pair<Point, Vec3f>> spot = m_necks.search(birth.slab, birth.piece, birth.deepest)) {
+                BOOST_LOG_TRIVIAL(debug) << "scaffold island at " << z << " joins nothing held near it: tip";
+                TipSite site = site_at(birth.slab, spot->first, birth_grade(birth.slab, birth.piece, spot->first));
+                site.axis    = spot->second;
+                const size_t tip = place(site, TipNeed::Birth, nullptr);
+                const auto [x, y] = cell_of(site.position);
+                take_pending(x, y, float(site.print_z), cover_mm(birth.slab) / m_in.cell_mm);
+                island.holders = { tip };
+                island.reason  = IslandReason::Tip;
+            } else {
+                island.reason = IslandReason::NoNeck;
+                ++ m_plan.islands_unheld;
+            }
         }
     }
 
-    // Whether a tip may stand at `p` on object layer `l`: not under a blocker, and its neck, one head width and one
-    // toolpath width under it, not within the xy distance of the model, as the wall skip reads it.
-    bool eligible(size_t l, const Point &p) const
-    {
-        const std::pair<int, int> cell = cell_of(p);
-        const int                 x = cell.first, y = cell.second;
-        if (m_in.blocked[l].at(x, y) != 0)
-            return false;
-        const double z = m_in.slabs[l].bottom_z - m_in.neck_depth_mm;
-        if (z <= m_in.slabs.front().bottom_z)
-            return true;
-        const auto it = std::lower_bound(m_in.slabs.begin(), m_in.slabs.end(), z,
-                                         [](const SupportAnalysis::Slab &slab, double z) { return slab.print_z < z; });
-        if (it == m_in.slabs.end())
-            return true;
-        const LayerGrid &wall = m_in.material[size_t(it - m_in.slabs.begin())];
-        if (std::any_of(m_wall_disc.begin(), m_wall_disc.end(), [&](const std::pair<int, int> &d) { return wall.at(x + d.first, y + d.second) != 0; }))
-            return false;
-        // The lattice places `p` and the wall only to within a cell each, and a tip on the model's edge, as every
-        // stability tip is, stands where that decides: the wall skip reads the band itself, so the planner does too.
-        const ExPolygons &band = m_in.wall_band[size_t(it - m_in.slabs.begin())];
-        return std::none_of(band.begin(), band.end(), [&p](const ExPolygon &expoly) { return expoly.contains(p); });
-    }
+    // Whether a tip may stand at `p` on object layer `l` with its neck straight down.
+    bool eligible(size_t l, const Point &p) const { return m_necks.clear(l, p, straight_down); }
 
     // Whether the builder aims a head at `p` on the bottom of slab `l` within the face cap of straight down: it aims the
     // head along `sla::normals` at the point, the faces' normal averaged within the head's radius, one toolpath width.
@@ -425,13 +665,8 @@ private:
     // The root of the piece of slab `l` holding `p`, or npos.
     size_t root_at(size_t l, const Point &p)
     {
-        const auto [x, y] = cell_of(p);
-        if (const uint16_t label = m_in.material[l].at(x, y); label != 0)
-            return m_sets.find(m_in.components.slab_range[l].first + label - 1);
-        for (size_t q = m_in.components.slab_range[l].first; q < m_in.components.slab_range[l].second; ++ q)
-            if (pieces()[q].polygon.contains(p))
-                return m_sets.find(q);
-        return size_t(-1);
+        const size_t q = piece_at(m_in, l, p);
+        return q == size_t(-1) ? q : m_sets.find(q);
     }
 
     // Returns the tip's index in the plan.
@@ -691,7 +926,7 @@ private:
         const LayerGrid &g      = *m_grid;
         const size_t     cells  = g.cells.size();
         const float      reach  = reach_run(), far = unmet_run();
-        const double     cover  = m_reach_mm + double(m_step) + m_in.toolpath_width_mm;
+        const double     cover  = cover_mm(l);
         const double     cover_cells = cover / m_in.cell_mm;
         const float      z      = float(m_in.slabs[l].bottom_z);
         prune_pending(z - float(cover));
@@ -753,14 +988,8 @@ private:
             const size_t tip = place(site_at(l, centre(bx, by), 2. * m_in.toolpath_width_mm), TipNeed::Underside, &heap);
             spread(heap);
             spread_tips();
-            size_t answered = size_t(std::count_if(far_due.begin(), far_due.end(), [&](size_t i) { return run_of(i) <= reach; }));
-            m_pending.erase(std::remove_if(m_pending.begin(), m_pending.end(), [&](const Pending &q) {
-                const double dx = double(q.x - bx), dy = double(q.y - by), dz = double(z - q.z) / m_in.cell_mm;
-                if (dx * dx + dy * dy + dz * dz > cover_cells * cover_cells)
-                    return false;
-                answered += q.run > far;
-                return true;
-            }), m_pending.end());
+            const size_t answered = size_t(std::count_if(far_due.begin(), far_due.end(), [&](size_t i) { return run_of(i) <= reach; })) +
+                                    take_pending(bx, by, z, cover_cells);
             m_plan.tips[tip].answered_mm2 = double(answered) * m_in.cell_mm * m_in.cell_mm;
             // What it covered in 2-D and left due hangs across a gap from it.
             for (size_t i : scored) {
@@ -941,6 +1170,25 @@ private:
     // The run past which underside no head answers counts as unmet: one and a half reaches.
     float unmet_run() const { return 1.5f * float(m_reach_mm); }
 
+    // How far a head on slab `l` covers: the reach plus the slab's step, as `m_step` holds it, plus one toolpath width.
+    double cover_mm(size_t l) const { return m_reach_mm + double(float(m_in.self_support_mm[l])) + m_in.toolpath_width_mm; }
+
+    // Takes the pending cells within `cover_cells` in 3-D of a head at lattice cell (x, y) at height `z`, and returns
+    // how many of them hung past one and a half reaches.
+    size_t take_pending(int x, int y, float z, double cover_cells)
+    {
+        const float far   = unmet_run();
+        size_t      taken = 0;
+        m_pending.erase(std::remove_if(m_pending.begin(), m_pending.end(), [&](const Pending &q) {
+            const double dx = double(q.x - x), dy = double(q.y - y), dz = double(z - q.z) / m_in.cell_mm;
+            if (dx * dx + dy * dy + dz * dz > cover_cells * cover_cells)
+                return false;
+            taken += q.run > far;
+            return true;
+        }), m_pending.end());
+        return taken;
+    }
+
     // Drops the pending cells below `z_min`, which no head placed from here on covers, counting those that hang past one
     // and a half reaches as unmet.
     void prune_pending(float z_min)
@@ -971,33 +1219,13 @@ private:
         std::swap(m_dist, m_tip_dist);
     }
 
-    // Where a tip stands under birth piece `p` of slab `l`: its deepest point `spot`, or where that stands at a wall, the
-    // eligible cell of the piece nearest it. None where every cell stands at a wall.
-    std::optional<Point> birth_spot(size_t l, size_t p, const Point &spot) const
-    {
-        if (eligible(l, spot))
-            return spot;
-        const LayerGrid &g     = m_in.material[l];
-        const uint16_t   label = uint16_t(p - m_in.components.slab_range[l].first + 1);
-        double           best  = std::numeric_limits<double>::max();
-        std::optional<Point> found;
-        for (size_t i = 0; i < g.cells.size(); ++ i)
-            if (g.cells[i] == label) {
-                const Point c = centre(g.x0 + int(i % size_t(g.w)), g.y0 + int(i / size_t(g.w)));
-                if (const double d = (c - spot).cast<double>().norm(); d < best && eligible(l, c)) {
-                    best  = d;
-                    found = c;
-                }
-            }
-        return found;
-    }
-
-    // Each island starting on slab `l` takes one tip at its deepest point, graded by `birth_grade`, unless an enforced
-    // tip already stands on its birth piece, among `enforced` the plan's tips on the slab, or it is debris. An island
-    // that merges before it could droop, or one no tip can reach that merges within the debris height, waits for its
-    // merge, which `settle` reads: it goes without a tip only when the part it meets is held. Any other island no tip can
-    // reach is counted. An island left without a tip prints as it hangs, so its cells anchor what grows on them. Every
-    // island goes into the plan with how it is held.
+    // Each island starting on slab `l` is read by the birth rule, unless an enforced tip already stands on its birth
+    // piece, among `enforced` the plan's tips on the slab. A piece `birth_kind` reads as continuing the slab below is no
+    // island. Debris takes no tip. A nub prints its layer as it hangs and waits for its merge, which `settle` reads; its
+    // cells hang from the nearest other material on their layer, what the merge bridges them from, so one standing far
+    // from it can take an underside head on its own layer. Any other island takes one tip where `Necks::search` finds a
+    // neck, graded by `birth_grade`, and counts as unheld where none clears. An island left without a tip otherwise
+    // prints as it hangs, so its cells anchor what grows on them. Every island goes into the plan with how it is held.
     void births(size_t l, const std::vector<size_t> &enforced, Heap &heap)
     {
         const LayerGrid &g     = *m_grid;
@@ -1010,51 +1238,77 @@ private:
                     heap.emplace(0.f, i);
                 }
         };
+        // A nub's cells start at their distance to the nearest other material on the layer, up to where a cell is due
+        // however far that stands.
+        const auto hang = [&](size_t p) {
+            const uint16_t label = uint16_t(p - first + 1);
+            const double   cap   = double(reach_run()) + double(m_step) + m_in.cell_mm;
+            const int      r     = int(std::ceil(cap / m_in.cell_mm));
+            for (size_t i = 0; i < g.cells.size(); ++ i) {
+                if (g.cells[i] != label)
+                    continue;
+                const int x = g.x0 + int(i % size_t(g.w)), y = g.y0 + int(i / size_t(g.w));
+                double    near = cap;
+                for (int dy = -r; dy <= r; ++ dy)
+                    for (int dx = -r; dx <= r; ++ dx)
+                        if (const uint16_t other = g.at(x + dx, y + dy); other != 0 && other != label)
+                            near = std::min(near, std::sqrt(double(dx * dx + dy * dy)) * m_in.cell_mm);
+                if (float(near) < m_dist[i]) {
+                    m_dist[i] = float(near);
+                    heap.emplace(m_dist[i], i);
+                }
+            }
+        };
         for (size_t p = first; p < last; ++ p) {
             const SupportAnalysis::Piece &piece = pieces()[p];
             if (! piece.below.empty() || m_rooted[p])
                 continue;
+            const auto held = std::find_if(enforced.begin(), enforced.end(),
+                                           [&](size_t t) { return piece.polygon.contains(m_plan.tips[t].site.position); });
+            const BirthKind kind = held != enforced.end() ? BirthKind::Neck : birth_kind(m_in, m_births, l, p);
+            if (kind == BirthKind::Overhang) {
+                BOOST_LOG_TRIVIAL(debug) << "scaffold island skipped at " << piece.bottom_z << ": continues the layer below";
+                accept(p);
+                continue;
+            }
             const Point  deepest = inscribed_point(piece.polygon);
             const Vec2d  xy      = unscale(deepest);
             const size_t k       = m_plan.islands.size();
             m_plan.islands.push_back({ Vec3d(xy.x(), xy.y(), m_in.slabs[l].bottom_z) });
             m_island_pieces.push_back({ l, p, deepest });
             Island &island = m_plan.islands.back();
-            if (const auto tip = std::find_if(enforced.begin(), enforced.end(),
-                                              [&](size_t t) { return piece.polygon.contains(m_plan.tips[t].site.position); });
-                tip != enforced.end()) {
-                island.holders = { *tip };
+            if (held != enforced.end()) {
+                island.holders = { *held };
                 island.reason  = IslandReason::Tip;
                 continue;
             }
-            const bool   merges = m_births.merge_slab[p] < m_in.slabs.size();
-            const double free   = m_births.free_mm[p];
-            if (! merges && free <= debris_mm + EPSILON) {
+            if (kind == BirthKind::Debris) {
                 BOOST_LOG_TRIVIAL(debug) << "scaffold island skipped at " << piece.bottom_z << ": debris";
                 island.reason = IslandReason::Debris;
                 accept(p);
                 continue;
             }
-            const BoundingBox box = get_extents(piece.polygon);
-            if (merges && free <= m_need.micro_merge_mm + EPSILON && unscale<double>(box.size().maxCoeff()) <= 2. * m_in.toolpath_width_mm + EPSILON) {
-                BOOST_LOG_TRIVIAL(debug) << "scaffold island at " << piece.bottom_z << " waits for its merge: micro";
+            if (kind == BirthKind::Nub) {
+                BOOST_LOG_TRIVIAL(debug) << "scaffold island at " << piece.bottom_z << " waits for its merge: nub";
                 island.reason = IslandReason::Hung;
                 m_waiting[p].push_back(k);
-                accept(p);
+                hang(p);
                 continue;
             }
-            const std::optional<Point> spot = birth_spot(l, p, deepest);
+            const std::optional<std::pair<Point, Vec3f>> spot = m_necks.search(l, p, deepest);
             if (! spot) {
-                if (merges && free <= debris_mm + EPSILON) {
-                    BOOST_LOG_TRIVIAL(debug) << "scaffold island at " << piece.bottom_z << " waits for its merge: wall";
-                    island.reason = IslandReason::Hung;
-                    m_waiting[p].push_back(k);
-                } else
-                    ++ m_plan.islands_unheld;
+                BOOST_LOG_TRIVIAL(debug) << "scaffold island at " << piece.bottom_z << ": no neck";
+                island.reason = IslandReason::NoNeck;
+                ++ m_plan.islands_unheld;
                 accept(p);
                 continue;
             }
-            island.holders = { place(site_at(l, *spot, birth_grade(l, p, *spot)), TipNeed::Birth, &heap) };
+            TipSite site = site_at(l, spot->first, birth_grade(l, p, spot->first));
+            site.axis    = spot->second;
+            if (! site.axis.isZero())
+                BOOST_LOG_TRIVIAL(debug) << "scaffold island at " << piece.bottom_z << " leans its neck "
+                                         << std::acos(std::clamp(-double(site.axis.z()), -1., 1.)) * 180. / M_PI << " degrees";
+            island.holders = { place(site, TipNeed::Birth, &heap) };
             island.reason  = IslandReason::Tip;
         }
     }
@@ -1197,6 +1451,106 @@ PlanInput prepare_plan(const PrintObject &object, double toolpath_width_mm, doub
         }
     });
     return in;
+}
+
+Vec3f neck_axis(const PlanInput &input, const TipSite &site)
+{
+    const int l = site.obj_layer_nr + 1;
+    if (input.slabs.empty() || input.cell <= 0 || l < 0 || size_t(l) >= input.slabs.size())
+        return Vec3f::Zero();
+    return Necks(input).axis_at(size_t(l), site.position);
+}
+
+std::vector<BirthRead> read_births(const PlanInput &input, const std::vector<size_t> &pieces, const std::vector<TipSite> &tips)
+{
+    std::vector<BirthRead> out(pieces.size());
+    if (input.slabs.empty() || input.cell <= 0)
+        return out;
+    const Births births = walk_births(input);
+    const Necks  necks(input);
+    const auto  &ranges  = input.components.slab_range;
+    const auto  &all     = input.components.pieces;
+    const auto   slab_of = [&ranges](size_t p) {
+        return size_t(std::upper_bound(ranges.begin(), ranges.end(), p,
+                                       [](size_t p, const std::pair<size_t, size_t> &range) { return p < range.first; }) - ranges.begin()) - 1;
+    };
+    // The tip the neck search stands under birth `i`, if any clears.
+    const auto tip = [&](size_t i) {
+        const size_t p = pieces[i], l = slab_of(p);
+        if (const auto spot = necks.search(l, p, inscribed_point(all[p].polygon))) {
+            out[i].hold      = BirthHold::Tip;
+            out[i].site      = { spot->first, input.slabs[l].bottom_z, int(l) - 1 };
+            out[i].site.axis = spot->second;
+        }
+    };
+    std::vector<std::vector<size_t>> waiting(all.size());   // per root: its nubs, as indices into `pieces`
+    bool                             nubs = false;
+    for (size_t i = 0; i < pieces.size(); ++ i)
+        switch (birth_kind(input, births, slab_of(pieces[i]), pieces[i])) {
+        case BirthKind::Overhang: out[i].hold = BirthHold::Overhang; break;
+        case BirthKind::Debris: out[i].hold = BirthHold::Debris; break;
+        case BirthKind::Nub: waiting[pieces[i]].push_back(i); nubs = true; break;
+        case BirthKind::Neck: tip(i); break;
+        }
+    if (! nubs)
+        return out;
+    // The nubs settle at their merges bottom up as the plan's `settle` settles them, a part held where the bed roots it
+    // or one of `tips` stands on it under the merge slab. A nub the rule tips holds its part for the nubs after it, as
+    // the tip the plan would place there would.
+    std::vector<char> tipped(all.size(), 0), held(all.size(), 0);   // per piece, and per root
+    for (const TipSite &site : tips)
+        if (const int l = site.obj_layer_nr + 1; l >= 0 && size_t(l) < input.slabs.size())
+            if (const size_t q = piece_at(input, size_t(l), site.position); q != size_t(-1))
+                tipped[q] = 1;
+    DisjointSets                      sets(all.size());
+    const std::function<bool(size_t)> holds = [&held](size_t r) { return held[r] != 0; };
+    for (size_t s = 0; s < input.slabs.size(); ++ s) {
+        for (size_t q = ranges[s].first; q < ranges[s].second; ++ q) {
+            const SupportAnalysis::Piece &piece = all[q];
+            if (piece.below.empty()) {
+                held[q] = piece.bottom_z <= input.slabs.front().bottom_z + EPSILON;
+                continue;
+            }
+            std::vector<size_t> roots;
+            for (const size_t b : piece.below)
+                if (const size_t r = sets.find(b); std::find(roots.begin(), roots.end(), r) == roots.end())
+                    roots.push_back(r);
+            if (roots.size() > 1) {
+                std::vector<std::pair<size_t, size_t>> due;   // (birth piece, index into `pieces`)
+                for (const size_t r : roots) {
+                    for (const size_t i : waiting[r])
+                        due.emplace_back(pieces[i], i);
+                    waiting[r].clear();
+                }
+                std::sort(due.begin(), due.end());
+                const double hang = hang_mm(input, s);
+                for (const auto &[p, i] : due) {
+                    const size_t        r = sets.find(p);
+                    std::vector<size_t> holding;
+                    if (held[r]) {
+                        out[i].hold = BirthHold::Nub;
+                    } else if (const Polygons under = footing(input, sets, q, r, all[p].polygon, hang, holds, holding);
+                               ! under.empty() && within(all[p].polygon, under, hang)) {
+                        out[i].hold = BirthHold::Nub;
+                    } else {
+                        tip(i);
+                        held[r] = out[i].hold == BirthHold::Tip;
+                    }
+                }
+            }
+            const size_t root = roots.front();
+            for (size_t k = 1; k < roots.size(); ++ k) {
+                held[root] = held[root] || held[roots[k]];
+                sets.join(root, roots[k]);
+            }
+            sets.join(root, q);
+        }
+        // A tip on this slab holds its part from the next merge on, as the plan places a slab's tips after its merges.
+        for (size_t q = ranges[s].first; q < ranges[s].second; ++ q)
+            if (tipped[q])
+                held[sets.find(q)] = 1;
+    }
+    return out;
 }
 
 Plan plan_tips(const PlanInput &input, const std::vector<TipSite> &enforced, const NeedParams &need)

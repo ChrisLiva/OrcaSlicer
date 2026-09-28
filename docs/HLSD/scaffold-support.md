@@ -187,12 +187,17 @@ and the `Params` fill still run, and the generator calls
 builder uses and adds the object's print z offset. It snaps the point's z to
 the bottom of the object layer holding it, the first layer whose top lies
 above the point or the top layer when none does, and files it on the layer
-under that one, where a contact under an overhang is filed. It then runs
-steps 2 to 4 of the auto path on those sites:
+under that one, where a contact under an overhang is filed. A list keeps no
+head axis, so `baked_tips` builds the plan input `place_tips` builds, blockers
+included, and gives each point that is not enforced the axis the planner's
+neck search reads at that spot, `neck_axis`: a birth tip Generate copied leans
+its neck as the auto slice leaned it, and the 3MF format stays as it was. It
+then runs steps 2 to 4 of the auto path on those sites:
 
-- The wall skip calls the same `wall_skip` function `place_tips` calls. A
-  point placed with the tool is enforced and never skipped; a point Generate
-  copied carries the flag its tip had.
+- The wall skip calls the same `wall_skip` function `place_tips` calls, at
+  each point's neck end along its axis. A point placed with the tool is
+  enforced and never skipped; a point Generate copied carries the flag its tip
+  had.
 - The hold floor counts the islands the list leaves under-held but seeds and
   restores no tip: where it would have seeded one, it records a bare island.
 - The alias merge runs unchanged, so a point within `sla::D_SP` of another
@@ -344,15 +349,15 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    self-support step `a`, the height of the layer below over the tangent of
    the detector's threshold angle (the threshold plus 1 degree, or 30 degrees
    when it reads 0), and the blockers rastered per layer. It also carries
-   `max_bridge_length`, the longest line an underside bridges, and the
-   object mesh with its AABB tree, a `ScaffoldSupport::ObjectMesh` that
-   `place_tips` builds once and hands to `draw`, off which the planner reads
-   the normal the builder aims a head along. The reach `R`, how far an
-   underside may hang past the step, is two support lines: the first line
-   past a held edge bonds its side to a held line and the second to a line
-   hanging by one, but a third would lie against a line hanging by two.
-   `NeedParams` holds the slender ratio 3 and the micro-merge height
-   0.12 mm. The `PlanInput` lives only through `place_tips`.
+   `max_bridge_length`, the longest line an underside bridges, the most a
+   birth's neck may lean, `max_head_tilt_rad`, and the object mesh with its
+   AABB tree, a `ScaffoldSupport::ObjectMesh` that `place_tips` builds once and
+   hands to `draw`, off which the planner reads the normal the builder aims a
+   head along. The reach `R`, how far an underside may hang past the step, is
+   two support lines: the first line past a held edge bonds its side to a held
+   line and the second to a line hanging by one, but a third would lie against
+   a line hanging by two. `NeedParams` holds the slender ratio 3. The
+   `PlanInput` lives only through `place_tips`, or `baked_tips` on a list.
 
    The planner walks the layers bottom up and tracks parts itself: a part is
    a connected set of pieces, and a part merges when a piece overlaps two
@@ -360,9 +365,34 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    islands never join the ground, and every height below runs to a merge.
    - Enforced. Every contact an enforcer asked for becomes a tip and an
      anchor.
-   - Birth. Each island takes a tip at the deepest point of its birth piece
-     (`inscribed_point`), or at the eligible cell of the piece nearest that
-     point when the point stands at a wall. An island carries its part by the
+   - Birth. Each birth piece off the bed, nothing under it, is read in turn
+     unless an enforced tip on it stands in for its tip:
+     - A piece every point of which lies within the slab below's step `a` of
+       that slab's material continues it as an overhang does, as `layer` reads
+       a cell the step carries, and is no island: a rib stepping out less than
+       `a` a layer would otherwise read as a birth on every layer.
+     - Debris, a part that never merges and stands at most 1 mm, takes no tip.
+     - A nub, a birth piece no wider than two support lines that merges having
+       stood free less than 0.1 mm, prints its layer as it hangs and waits for
+       its merge. The bound is the resin reference's, where every birth
+       standing free 0.1 mm or longer carries a contact; one counted in layers
+       would move with the layer height. A nub's cells hang from the nearest
+       other material on their layer, which the merge bridges them from, so a
+       nub standing far from it and wider than a small head's disc takes an
+       underside head on its own layer. At the merge, a nub whose own part
+       holds a tip is held by it. One lying wholly within the merge slab's `a`
+       plus `R` of what the held parts, those a tip or the bed holds, have
+       under the merge hangs from their tips: the merge layer bridges to it no
+       farther than to any underside the planner leaves bare, and it prints one
+       sagged layer. Any other nub takes its birth tip then, which holds its
+       part for the nubs after it, so of two nubs meeting each other in
+       mid-air the first takes a tip and the second hangs from it.
+     - Any other island takes one birth tip where a neck clears, at the
+       deepest point of its birth piece (`inscribed_point`) or at the cell of
+       the piece nearest it whose neck clears, straight down or leaning as the
+       neck search below finds, and one no neck clears counts as under-held.
+
+     An island carries its part by the
      elder rule: where parts meet, the one born lowest carries on, a rooted
      part first, and every other part's eldest birth ends there; a birth that
      never ends carries to its part's top. The tip takes the heavy disc, four
@@ -370,26 +400,14 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
      model within one toolpath width over the tip, the depth the pin reaches,
      fills at least twice as many lattice cells of the heavy disc as of the
      small one, and the small disc otherwise: on a thin section the heavy disc
-     adds scar and no hold. An enforced tip on
-     the birth piece stands in for it, and debris, a part that never merges
-     and stands at most 1 mm, takes none. Two kinds of island wait for their
-     merge instead: a micro-island, merging within the micro-merge height with
-     a birth piece no wider than two support lines, and an island with no
-     eligible cell that merges within 1 mm. At the merge, a tip or the bed
-     already holding one of the meeting parts holds the waiting island too,
-     which prints as a blemish no larger than a scar. When none is held, the
-     first waiting island a tip can stand under takes its birth tip after all,
-     so two strand ends meeting each other in mid-air still take one, and one
-     no tip can reach counts as under-held, as does an island with no
-     eligible cell that stands taller. An island left without a tip anchors
-     what grows on it. The plan lists every island in `Plan::islands` with its
-     birth point, the deepest point of its birth piece at the piece's bottom,
-     and how it is held: `Tip`, by its own birth tip or the enforced tip on
-     its birth piece; `Hung`, from the parts it met, with every tip on those
-     parts, whatever need placed it, as its holders and `rooted` set when the
-     bed held one of them; `NoNeck`, the under-held ones; or `Debris`. A nub
-     that took an underside head on its own slab before its merge therefore
-     hangs from that head.
+     adds scar and no hold. An island left without a tip anchors what grows on
+     it. The plan lists every island in `Plan::islands` with its birth point,
+     the deepest point of its birth piece at the piece's bottom, and how it is
+     held: `Tip`, by its own birth tip, the enforced tip on its birth piece or,
+     for a nub, the underside head its own layer placed; `Hung`, from the
+     parts it met, with every tip on the held parts within its hang, whatever
+     need placed it, as its holders and `rooted` set when the bed held one of
+     them; `NoNeck`, the under-held ones; or `Debris`.
    - Underside. Each cell carries a run, how far it hangs past what anchors
      it: 0 under a head, and otherwise the least, through the layer's
      material, of a neighbour's run plus the step between them, where a cell
@@ -470,29 +488,55 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
      then rises nearly vertical to the guard at z 15.8, where no corner
      stands clear of the band and the blade goes about 6 mm without a tip.
 
-   A point is eligible when no blocker covers its cell and it stands outside
-   the band on the layer at the neck's bottom. The lattice rejects first,
-   where a cell of the model lies within the xy distance plus half a cell's
-   diagonal, and `wall_band` then reads the band as the seam and the wall
-   skip build it, the layer's slices grown by the xy distance with miter
-   joins, which reach up to three times the distance out from a sharp
-   corner. A tip on the model's edge, as every stability tip is, stands where
-   the lattice's rounding decides, so without the exact band the wall skip
-   removed tips the planner had counted on. The planner logs
+   A tip's neck runs one neck depth, a head width plus a toolpath width, from
+   the tip along its axis. It clears when no blocker covers the tip's cell and
+   its end, on the first slab whose top reaches it, stands outside the band.
+   The lattice rejects first, where a cell of the model lies within the xy
+   distance plus half a cell's diagonal, and `wall_band` then reads the band
+   as the seam and the wall skip build it, the layer's slices grown by the xy
+   distance with miter joins, which reach up to three times the distance out
+   from a sharp corner. A tip on the model's edge, as every stability tip is,
+   stands where the lattice's rounding decides, so without the exact band the
+   wall skip removed tips the planner had counted on. The neck's shaft also
+   crosses no material at the middle of each slab between its end and the
+   tip, so a thin shelf the end has passed still turns the neck. Straight
+   down, the run of material right under the tip is the tip's own face to the
+   lattice's resolution and is not crossed: a tip on a face's edge, as every
+   stability tip is, stands over the slab below's contour, whose cell reads
+   material about half the time, and a steep face's column stays in its part
+   for a few slabs. A leaning neck, only ever a birth's, stands over no face
+   of its own, so any material on its shaft is crossed. An underside or
+   stability tip stands only where its neck clears straight down. A birth's neck search, `Necks::search`, tries the deepest point and
+   then the piece's cells nearest it first, straight down. Failing that it
+   leans the neck in steps of asin(cell / neck depth), 5.2 degrees at a
+   0.22 mm line, each moving the end one cell sideways, up to
+   `max_head_tilt_rad`, 45 degrees, the bridge slope the builder saturates a
+   head at: at the least lean at which any candidate clears, it takes the
+   first such candidate and, among azimuths one cell apart at the end, the
+   one whose end stands farthest from the model's material on the end's slab.
+   That tip carries the lean as `TipSite::axis`, which the wall skip reads its
+   band along and the builder aims its head along. Every other tip carries a
+   zero axis and keeps the builder's normal: a head on a side-on face already
+   tilts to the cap along that normal and routes there. `neck_axis` runs the
+   same search at one spot, which is how a baked list reads a point's axis
+   again. The planner logs
    `scaffold plan: <n> birth, <n> underside, <n> stability, <n> enforced
    tips` at debug level. On plate 1's figure it runs in about 0.36 s, after
    `prepare_plan` spends about 0.07 s once per slice.
 2. The wall skip. The seam clips support inside the xy distance of the model,
    so a head whose neck stood in that band would lose its neck while its ring
-   survived. The selection reads the object layer at the neck's bottom, one head
-   width plus one toolpath width under the tip, and skips a tip whose centre
-   lies within the xy distance of that layer's slices; the wall anchors that
-   band as it does under the legacy tree. The layer just under the overhang is
-   the wrong reference: on a sloped underside every contact sits a fraction of
-   a layer past it. The skip reads the tip's centre at the depth of the neck's
-   bottom, not the built neck: under a slope the head tilts along the
-   underside's normal, and the neck check in step 6 exempts a cut head whose
-   tilted neck bottoms outside the band. A skipped tip logs
+   survived. The selection reads the neck's end, one head width plus one
+   toolpath width from the tip along its axis, straight down where it has
+   none, and skips a tip whose neck end lies within the xy distance of the
+   slices of the object layer there; the wall anchors that band as it does
+   under the legacy tree. The layer just under the overhang is the wrong
+   reference: on a sloped underside every contact sits a fraction of a layer
+   past it. The skip reads the planned neck's end, not the built neck: under a
+   slope the head tilts along the underside's normal, and the neck check in
+   step 6 exempts a cut head whose tilted neck bottoms outside the band. A
+   birth whose neck clears only leaning would stand in the band straight
+   down, so without the axis the skip would take out the tip its lean
+   placed. A skipped tip logs
    `scaffold tip skipped at (x, y, z): wall` at debug level and counts as
    neither placed nor dropped. The planner already keeps its tips off the
    band on its lattice, so the skip reads the band exactly for the few its
@@ -516,12 +560,19 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    1 mm tall is mesh debris, at any height: its islands get no floor, no tip
    and no count, and log
    `scaffold island skipped at z: debris` at debug level. An island with no tip
-   and no dropped contact under it gets one tip seeded at the deepest point of
-   its birth piece, at that piece's bottom, in the small grade. When the wall
-   skip removes that seed and the island joins within 1 mm, the wall beside it
-   holds it: it gets no tip, no count, and logs
-   `scaffold island held at z: wall` at debug level. A taller island whose seed
-   stands at a wall counts as under-held. An island counts as under-held only
+   and no dropped contact under it is read by the planner's birth rule,
+   `read_births`, so a list and an auto slice hold it alike. A birth piece
+   continuing the slab below and debris get no tip and no count. A nub gets
+   none where its merge holds it as the planner's merge would, walked bottom
+   up over the list's tips: a tip of the list stands on its own part, or it
+   lies within the merge slab's `a` plus `R` of a part the bed or a tip of the
+   list holds. These log `scaffold island held at z: <why>` at debug level.
+   Any other nub, like any other birth, is tipped by the rule, and a nub
+   tipped so holds its part for the nubs meeting it after it, as the planner's
+   tip would. An island the rule tips gets that tip seeded, in the small grade
+   with its neck's axis; one no neck clears counts as under-held. The map's pieces are the plan input's, index
+   for index, since both come from `build_components` over the same slabs and
+   ground. An island counts as under-held only
    when it holds fewer tips than both its floor and the number its birth piece
    fits, the points of a hexagonal grid at the pillar diameter inside the piece
    shrunk by half a pillar diameter, never fewer than one. A tip belongs to the
@@ -532,7 +583,8 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    `sla::D_SP`. The selection visits the tips lowest first, among equals by seed
    id, and merges a tip standing within `sla::D_SP` in 3-D of a tip already
    kept into it, so no two tips it hands the builder are aliases; a kept tip is
-   enforced when any tip merged into it was. A merge logs
+   enforced when any tip merged into it was, and keeps its own axis. A merge
+   logs
    `scaffold tip merged at (x, y, z)` at debug level and counts as neither
    placed nor dropped.
 5. Grading. A tip's head fuses to the model with a disc of the width its
@@ -546,9 +598,11 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    configuration `tree_config` writes: head front, penetration and fallback
    radius at one toolpath width, pillar radius at half the pillar diameter,
    no model anchors, bridge and pillar-link lengths at the
-   scaffold bridge length, a 45 degree bridge slope, the object's xy distance
-   as the safety distance, the scaffold brace slenderness, and the brace
-   radius at half the brace diameter. The draw sets
+   scaffold bridge length, a bridge slope of `max_head_tilt_rad`, 45 degrees,
+   the object's xy distance as the safety distance, the scaffold brace
+   slenderness, and the brace radius at half the brace diameter. Each build
+   hands the builder each point's tip axis in `SupportableMesh::head_axes`, in
+   the order of the points the cuts left. The draw sets
    the elevation to the mesh's lowest z: the builder grounds pillars at that z
    less the elevation, so the ground sits at the pad's top on the bed for an
    object standing on it and for one lifted off it with auto-drop off. A
@@ -679,8 +733,8 @@ island whose own tip failed reads apart from one that hung from a failed
 part. A planned slice with islands logs
 `scaffold islands: <t> tipped, <h> hung, <u> unheld (<n> no neck, <m> not
 routed)` at info level, debris left out. The planner does not re-plan:
-corpus plate 1 reads no island unheld at plan time and two whose birth tips
-the builder cannot route.
+corpus plate 1 reads no island unheld at plan time and four whose birth tips
+the builder cannot route or cuts.
 
 The returned `Output` carries one `LayerAreas` per planned layer (base,
 interface and exempt heads), the number of
@@ -693,9 +747,16 @@ slicing with the neck checks, which
 
 ## Builder changes
 
-The SLA builder takes five additions. Each defaults to the behaviour SLA
+The SLA builder takes six additions. Each defaults to the behaviour SLA
 printing had before, except the corrector cap, whose change the SLA suite
 tolerates.
+
+- Head axes. `SupportableMesh::head_axes`, parallel to the points and empty
+  by default, gives a point the direction its head is aimed along in place of
+  the mesh normal, and a zero entry keeps the normal. The filter then
+  saturates the axis at the bridge slope, checks the pinhead's clearance and
+  searches a clear pose from it, as it does from a normal. The axes sit on the
+  mesh, not on `sla::SupportPoint`, which SLA projects serialize and compare.
 
 - Model anchors. `SupportTreeConfig::allow_model_anchors`, default true, gates
   the last-resort route of a head to the model body. The scaffold sets it
@@ -845,10 +906,14 @@ baked list on the 4 mm plank drops one or both of its points 0.6 and 1.3 mm
 off the column face, whose necks bottom in the band, with no ring left
 floating, no bare planned layer left and base in the band only under a ring,
 a head under a sheet thinner than its pin leaving nothing floating over the
-sheet, a tip placed under an unseeded
-feature start with its ring on the layer its z tops and none under debris or
-under a sliver the wall beside it holds, a sliver joining too high for its
-wall counted under-held, braces on slender pillars, pillars widening toward
+sheet, a rod hanging beside a column whose birth tip leans its neck away from
+the column, stays through the wall skip and routes, in the auto slice and as
+a baked point, `draw` called on a lifted slab's one tip with an axis leaning
+45 degrees, whose head's slice 1.2 mm under the tip stands along the axis and
+not straight under the tip, a tip placed under an unseeded
+feature start with its ring on the layer its z tops and none under debris,
+slivers beside a wall leaning their tips away from it and routing, braces on
+slender pillars, pillars widening toward
 the pad by the branch diameter angle with the same tips routed, the last two
 over a baked 6 by 6 grid under the tall shelf's slab so that they read the
 builder whatever the placement does, and a painted bar
@@ -856,7 +921,10 @@ underside and a painted column face beside the column's wall printing their
 tips there at the corpus's widths and layer height, with two interface layers
 and with none, where the unpainted bar prints none and no base but those
 enforced heads enters the band. The SLA builder changes are covered in
-`tests/sla_print/sla_print_tests.cpp`.
+`tests/sla_print/sla_print_tests.cpp`, the head axes by a head aimed along a
+30 degree axis, one saturated at 45 degrees from a 60 degree axis, the normal
+kept with no axis or a zero one, and a head whose axis runs into a wall
+searching a clear pose instead.
 
 `tests/fff_print/test_scaffold_plan.cpp` holds the `[ScaffoldPlan]` cases,
 which call `prepare_plan` and `plan_tips` on fixtures sliced without support,
@@ -880,15 +948,31 @@ a floating plate covered within one and a half reaches with no bridge hold, a
 none, a flare's runs restarting at a solid column however the column is held,
 a blade whose edges rise steeper than the threshold taking tips at three
 heights or more, stability and underside tips taking the small disc, a squat
-floating block taking no stability tip, and small nubs under a slab, where a
-lone nub hangs rooted from the slab and of two nubs meeting in mid-air one
-takes the birth tip and the other lists it as its holder.
+floating block taking no stability tip, and the birth rule: at 0.05 mm layers
+a nub within the merge slab's step plus the reach of a held column hangs rooted
+from it while one farther off and a taller one take birth tips, the same nub
+at 0.1 mm layers taking a tip, of two nubs meeting in mid-air one taking the
+birth tip and the other listing it as its holder, a fin within the step of
+the column beside it taking no tip and counting no island, a far nub wide
+enough for a head taking an underside head on its own layer and holding by it
+with no second tip, and a rod over a shelf taking a birth tip whose neck leans
+the least that clears, which `neck_axis` reads again at its spot and which no
+lean a step smaller clears, and with no lean allowed no tip and an unheld
+island, a rod over a shelf 0.3 mm thin whose straight neck ends clear under
+the shelf but crosses it leaning past the shelf's edge, and with no lean
+allowed no tip, a lattice built by hand where a one-cell plate in a neck's
+shaft makes it lean and the lean takes the azimuth whose end stands farthest
+from a wall, and a baked list's tipless nubs read by `read_births`: the near
+nub hanging from the rooted column, the far and the taller ones tipped, the far
+nub held once the list holds its underside head, and of two nubs meeting in
+mid-air one tipped and the other hanging from it.
 
 Two `[ScaffoldSupport]` cases cover the baked list on the shelf fixture. The
 first bakes an auto slice's routed tips and slices from them with no contact
 seed and at least 98 % of the points routed. It adds points by hand that read
-`Routed`, `Filtered` on the top face, `Merged` beside an alias and `Wall` in
-the column's band, and checks the dropped-points warning. It also checks that
+`Routed`, `Filtered` on the top face, `Merged` beside an alias and `Wall`
+inside the column, where no neck leaning up to 45 degrees clears the band, and
+checks the dropped-points warning. It also checks that
 paint places no tip on a baked slice, that another style records nothing,
 that an empty list builds no tip, that a revert places what the first auto
 slice placed, that a copy sharing the source's meshes prints its own list, and
@@ -911,15 +995,19 @@ and tree scaffold, first in the stored pose and then upright, times each
 requires of each scaffold slice: dropped tips at most a fifth of those placed,
 no floating piece removed, a process time at most 1.5 times the tree-slim
 slice's, `island_joins` within 2 s and a support volume at most 2.5 times the
-tree-slim slice's; the upright pose also requires at most two under-held
-islands. The stored pose places 60 tips and routes 58, and the upright pose
-places 200 and routes 178.
+tree-slim slice's; the upright pose also requires at most three under-held
+islands, all born at z 15.4 with birth tips the builder cannot route, one of
+them leaning its neck 15.5 degrees. The stored pose places 71 tips and routes
+69, eight of its births leaning their necks 5 to 21 degrees, and the upright
+pose places 217 or 218 and routes 192 or 193.
 
 The hidden case "Need-driven tips hold corpus plate 1's hand and sword with
 few contacts" slices plate 1 and requires of the tips its record holds at most
 10 on the hand over the raised knee, a heavy one at the sword's point, two
 under z 7.5 on the blade, no stretch of blade under z 15 longer than 7 mm
-without one, and at most 200 in all, and of its islands at most two
+without one, and at most 200 in all, and of its islands at most four
 under-held, each named among the record's bare islands. Plate 1's record
-holds 79 tips, 7 on the hand, 4 under z 7.5 and a largest gap of 6.84 mm,
-and two bare islands.
+holds 86 tips, 7 on the hand, 4 under z 7.5 and a largest gap of 6.84 mm,
+and four bare islands: two born at z 35.2 whose birth tips the builder cannot
+route, and two born at z 40.4 and 42.7 whose necks lean off a wall, one
+unrouted and one cut by the neck check.

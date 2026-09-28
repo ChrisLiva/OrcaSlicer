@@ -37,6 +37,7 @@ SupportTreeBuildsteps::SupportTreeBuildsteps(SupportTreeBuilder &   builder,
     : m_cfg(sm.cfg)
     , m_mesh(sm.emesh)
     , m_support_pts(sm.pts)
+    , m_head_axes(sm.head_axes)
     , m_support_nmls(sm.pts.size(), 3)
     , m_builder(builder)
     , m_points(sm.pts.size(), 3)
@@ -673,7 +674,10 @@ void SupportTreeBuildsteps::filter()
     filterfn = [this, &nmls, &heads, &filterfn](unsigned fidx, size_t i, double back_r) {
         m_thr();
 
-        auto n = nmls.row(Eigen::Index(i));
+        // A head axis handed in for the point stands in for the normal.
+        Vec3d n = nmls.row(Eigen::Index(i)).transpose();
+        if (fidx < m_head_axes.size() && ! m_head_axes[fidx].isZero())
+            n = m_head_axes[fidx].cast<double>().normalized();
 
         // for all normals we generate the spherical coordinates and
         // saturate the polar angle to 45 degrees from the bottom then

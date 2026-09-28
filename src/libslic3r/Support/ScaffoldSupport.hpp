@@ -61,8 +61,11 @@ Tips place_tips(const PrintObject &object, const std::vector<std::vector<Support
 // A tip as a list point in ModelObject::raw_mesh()'s frame: a grade over three toolpath widths reads Heavy.
 ScaffoldPoint point_of(const PrintObject &object, const Params &params, const TipSite &site, double grade_mm);
 // A baked list in the builder's frame: each point mapped through trafo_centered(), z + params.z_offset_mm, snapped
-// to the bottom of the object layer holding it; wall skip (enforced exempt), island count seeding nothing, alias merge.
-Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const Params &params);
+// to the bottom of the object layer holding it; each point not enforced leaning its neck as the planner would there,
+// read off the plan input `threshold_rad` and `blockers` build as for `place_tips`; wall skip (enforced exempt), island
+// count seeding nothing, alias merge.
+Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const Params &params, double threshold_rad,
+                const std::vector<Polygons> &blockers);
 // Whether a list baked under the linear part `pose` still holds under `linear`: the change between them keeps lengths
 // and keeps the Z axis, as a turn about Z or a mirror in X or Y does, and a tilt, a Z mirror or a scale does not.
 bool baked_pose_valid(const Matrix3d &pose, const Matrix3d &linear);

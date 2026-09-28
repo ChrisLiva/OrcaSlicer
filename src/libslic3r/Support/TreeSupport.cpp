@@ -2059,14 +2059,15 @@ void TreeSupport::generate()
             return cover;
         };
         params.interface_layers     = m_support_params.num_top_interface_layers;
+        // The planner keeps its tips off what a support blocker covers, as detect_overhangs gathers it, and a baked list
+        // leans its points' necks off the same input.
+        std::vector<Polygons> blockers = m_object->slice_support_blockers();
+        m_object->project_and_append_custom_facets(false, EnforcerBlockerType::BLOCKER, blockers);
         if (baked)
-            scaffold_tips = ScaffoldSupport::baked_tips(*m_object, m_object->model_object()->scaffold_points, params);
-        else {
-            // The planner keeps its tips off what a support blocker covers, as detect_overhangs gathers it.
-            std::vector<Polygons> blockers = m_object->slice_support_blockers();
-            m_object->project_and_append_custom_facets(false, EnforcerBlockerType::BLOCKER, blockers);
+            scaffold_tips = ScaffoldSupport::baked_tips(*m_object, m_object->model_object()->scaffold_points, params, m_threshold_rad,
+                                                        blockers);
+        else
             scaffold_tips = ScaffoldSupport::place_tips(*m_object, contact_nodes, params, m_threshold_rad, blockers);
-        }
         for (const ScaffoldSupport::TipSite &tip : scaffold_tips.sites)
             tip_tops.push_back(tip.print_z);
     }

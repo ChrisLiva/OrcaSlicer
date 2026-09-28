@@ -132,6 +132,10 @@ struct SupportableMesh
     IndexedMesh  emesh;
     SupportPoints pts;
     SupportTreeConfig cfg;
+    // Parallel to `pts` or empty: a non-zero entry is the direction the
+    // point's head is aimed along in place of the mesh normal, which the
+    // filter then saturates, checks and searches from as it would the normal.
+    std::vector<Vec3f> head_axes;
 //    PadConfig     pad_cfg;
 
     explicit SupportableMesh(const indexed_triangle_set & trmsh,

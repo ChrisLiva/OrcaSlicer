@@ -14,7 +14,10 @@ namespace ScaffoldSupport {
 // Where a tip stands. `enforced` is a contact a support enforcer asked for, painted facets or an enforcer volume
 // (`SupportNode::is_pinned`), which the wall skip keeps and whose head `clip_base` clips by the model alone.
 // `grade_mm` is the disc width the tip asks for, 0 for the small disc `draw` gives it, and `source` the point's index in
-// a baked list, -1 for any other tip. Both come after `enforced`, since tips are built by position.
+// a baked list, -1 for any other tip. `axis` is the unit direction the tip's neck leans along, pointing down, which the
+// wall skip reads the band at the neck's end by and the builder aims the head along; zero, as on every tip but a birth
+// whose neck clears only leaning, leaves the head to the mesh normal. These come after `enforced`, since tips are built
+// by position.
 struct TipSite
 {
     Point              position;
@@ -24,18 +27,23 @@ struct TipSite
     bool               enforced     = false;
     double             grade_mm     = 0.;
     int                source       = -1;
+    Vec3f              axis         = Vec3f::Zero();
 };
 
 // The deepest point of `piece`, where the hold floor and the birth need stand a tip.
 Point inscribed_point(const ExPolygon &piece);
+
+// The most a head leans from straight down: the builder saturates a head's direction at this bridge slope, so the
+// planner leans a neck no farther.
+constexpr double max_head_tilt_rad = M_PI / 4.;
 
 // The need a planned tip answers: an enforcer asked for it, an island starts there, the underside droops too far from
 // its anchors there, or a part standing free has grown too tall over its anchors.
 enum class TipNeed : uint8_t { Enforced, Birth, Underside, Stability };
 
 // What the planner asks of the model. `slender_ratio` is how many section widths a part may stand over its highest
-// anchor, and `micro_merge_mm` how soon an island no wider than two support lines has to merge to print without a tip.
-struct NeedParams { double slender_ratio = 3., micro_merge_mm = 0.12; };
+// anchor.
+struct NeedParams { double slender_ratio = 3.; };
 
 // The object's mesh in the frame its slices are in, XY centred and the bed on z 0, with the AABB tree the builder aims
 // its heads by. `place_tips` builds it once: the planner reads the faces a head meets off it and `draw` builds the tree
@@ -78,6 +86,7 @@ struct PlanInput
     double bridge_mm         = 0.;        // the longest line an underside bridges between held ends, 0 for none
     const ObjectMesh *mesh   = nullptr;   // the faces a head meets; with none the planner reads no face
     double z_offset_mm       = 0.;        // print z minus mesh z, the object's lift
+    double max_tilt_rad      = max_head_tilt_rad;   // how far a birth's neck may lean, 0 for straight down only
 };
 // `bridge_mm` is `max_bridge_length`, `threshold_rad` the overhang detector's threshold angle and `blockers` the support
 // blockers per object layer, as TreeSupport gathers them. `mesh` is the object's, which the plan reads through the
@@ -90,13 +99,15 @@ PlanInput prepare_plan(const PrintObject &object, double toolpath_width_mm, doub
 // which hangs again when the head does not route.
 struct PlannedTip { TipSite site; TipNeed need; double answered_mm2 = 0.; };
 
-// How the plan holds an island: a tip stands under its birth piece, its own or an enforced one; it waited for its
-// merge and hangs from the parts it met, which a tip or the bed held; no tip can stand under it; or it is debris, which
-// prints as it hangs and needs no hold.
+// How the plan holds an island: a tip stands under its birth piece, its own, an enforced one or, for a nub, the
+// underside head its own layer placed; it is a nub that waited for its merge and hangs from the held parts it met
+// within its hang; no tip can stand under it; or it is debris, which prints as it hangs and needs no hold.
 enum class IslandReason : uint8_t { Tip, Hung, NoNeck, Debris };
-// A birth piece off the bed with nothing under it. `birth` is its deepest point at its bottom, x and y in mm and print
-// z. `holders` index `Plan::tips`: an island's own tip, or for one that hangs, every tip on the parts it met that held
-// them, whatever need placed it. `rooted` is true where the bed held one of those parts.
+// A birth piece off the bed with nothing under it, unless every point of it lies within the slab below's step of that
+// slab's material: such a piece continues the slab below as an overhang does and is no island. `birth` is its deepest
+// point at its bottom, x and y in mm and print z. `holders` index `Plan::tips`: an island's own tips, or for one that
+// hangs, every tip on the held parts within its hang, whatever need placed it. `rooted` is true where the bed held one
+// of those parts.
 struct Island
 {
     Vec3d               birth = Vec3d::Zero();
@@ -116,5 +127,21 @@ struct Plan
 };
 // `enforced` are the contacts an enforcer asked for; each becomes a tip and an anchor.
 Plan plan_tips(const PlanInput &input, const std::vector<TipSite> &enforced, const NeedParams &need = NeedParams());
+
+// The axis a neck from `site` leans along by the planner's search, `site` the only spot tried: zero where it clears
+// straight down or no lean up to `input.max_tilt_rad` clears, else the least lean that clears, one tilt step apart, and
+// at it the azimuth whose end stands farthest from the model. A baked point carries no axis, so its list reads it again.
+Vec3f neck_axis(const PlanInput &input, const TipSite &site);
+
+// What the birth rule makes of a birth piece with no tip of a list the planner did not place: the piece continues the
+// slab below as an overhang does, it is debris, it is a nub held at its merge, or it needs a neck, which the tip at
+// `site` has, `site.axis` included, or which none clears. A nub is held as the plan's merge holds it: by a tip on its
+// own part, or by the tips or the bed holding a part it lies within the hang of. Any other nub needs a neck as any
+// birth does, and one that gets it holds its part for the nubs meeting it after it.
+enum class BirthHold : uint8_t { Overhang, Debris, Nub, Tip, NoNeck };
+struct BirthRead { BirthHold hold = BirthHold::NoNeck; TipSite site; };
+// `pieces` index `input.components.pieces`, each one a birth piece; the reads follow their order. `tips` are the list's
+// tips, which hold the parts they stand on.
+std::vector<BirthRead> read_births(const PlanInput &input, const std::vector<size_t> &pieces, const std::vector<TipSite> &tips);
 } // namespace ScaffoldSupport
 } // namespace Slic3r
