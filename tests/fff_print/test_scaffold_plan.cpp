@@ -4,8 +4,10 @@
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/SLA/IndexedMesh.hpp"
 #include "libslic3r/Support/ScaffoldPlan.hpp"
 #include <algorithm>
+#include <memory>
 #include <set>
 #include "test_helpers.hpp"
 
@@ -41,18 +43,20 @@ TriangleMesh merged(std::initializer_list<TriangleMesh> parts)
     return out;
 }
 
-// Slices `mesh` at 0.1 mm with no support, so the plan reads plain object layers. A fixture coordinate maps into the
-// sliced frame by the offset between the mesh's bounding box and the layers' extents; every fixture touches z 0.
+// Slices `mesh` at 0.1 mm with no support, so the plan reads plain object layers, and plans on the object's mesh with
+// the config's 10 mm `max_bridge_length`, as `place_tips` does. A fixture coordinate maps into the sliced frame by the
+// offset between the mesh's bounding box and the layers' extents; every fixture touches z 0.
 struct Sliced
 {
-    Print     print;
-    Model     model;
-    PlanInput input;
-    Vec2d     shift = Vec2d::Zero();   // sliced frame minus fixture frame, mm
+    Print                       print;
+    Model                       model;
+    std::unique_ptr<ObjectMesh> mesh;
+    PlanInput                   input;
+    Vec2d                       shift = Vec2d::Zero();   // sliced frame minus fixture frame, mm
 
-    Sliced(const TriangleMesh &mesh)
+    Sliced(const TriangleMesh &fixture)
     {
-        TriangleMesh copy = mesh;
+        TriangleMesh copy = fixture;
         init_print({ std::move(copy) }, print, model, fixture_config({ { "enable_support", "0" }, { "layer_height", "0.1" },
                                                                         { "initial_layer_print_height", "0.1" },
                                                                         { "layer_change_gcode", "G92 E0" } }));
@@ -63,14 +67,25 @@ struct Sliced
         for (const Layer *layer : object.layers())
             if (layer->id() > 0 && ! layer->lslices.empty())
                 extents.merge(get_extents(layer->lslices));
-        const BoundingBoxf3 bb = mesh.bounding_box();
+        const BoundingBoxf3 bb = fixture.bounding_box();
         shift = unscale(extents.min) - Vec2d(bb.min.x(), bb.min.y());
-        input = prepare_plan(object, width_mm, xy_mm, neck_mm, Geometry::deg2rad(21.), {});
+        mesh  = std::make_unique<ObjectMesh>(object);
+        input = prepare_plan(object, width_mm, xy_mm, neck_mm, object.config().max_bridge_length.value, Geometry::deg2rad(21.), {},
+                             mesh.get());
     }
 
     Plan plan() const { return plan_tips(input, {}); }
     // A tip's xy in the fixture frame.
     Vec2d at(const PlannedTip &tip) const { return unscale(tip.site.position) - shift; }
+    // How far from straight down the builder aims a head at `tip`: the normal it reads off the mesh within one head
+    // radius, one toolpath width, of the tip.
+    double from_down_deg(const PlannedTip &tip) const
+    {
+        const Vec2d   xy = unscale(tip.site.position);
+        sla::PointSet p(1, 3);
+        p.row(0) = Vec3d(xy.x(), xy.y(), tip.site.print_z - input.z_offset_mm);
+        return Geometry::rad2deg(std::acos(std::clamp(-sla::normals(p, mesh->aabb, width_mm)(0, 2), -1., 1.)));
+    }
 };
 
 bool inside(const Sliced &s, const PlannedTip &tip, const BoundingBoxf3 &box)
@@ -110,37 +125,214 @@ TEST_CASE("A rod hanging under a slab takes one tip at its lowest point", "[Scaf
     const PlannedTip &tip = *std::find_if(plan.tips.begin(), plan.tips.end(), [&](const PlannedTip &t) { return inside(s, t, rod); });
     CHECK(tip.need == TipNeed::Birth);
     CHECK_THAT(tip.site.print_z, Catch::Matchers::WithinAbs(3., 0.1 + 1e-6));
-    // It carries 5 mm of rod: the heavy disc.
-    CHECK_THAT(tip.site.grade_mm, Catch::Matchers::WithinAbs(4. * width_mm, 1e-9));
 }
 
-TEST_CASE("Ledges narrower than the reach take no tip", "[ScaffoldPlan]")
+TEST_CASE("A ledge takes a tip only when it hangs two support lines past the step", "[ScaffoldPlan]")
 {
-    // A 6 x 6 x 10 column standing on the bed with flat ledges sticking out of its faces 0.3, 0.5 and 0.8 mm at
-    // z 3, 5 and 7. At 0.1 mm layers and the 21 degree threshold the layer below carries 0.26 mm of each, so the
-    // widest hangs 0.54 mm past it, inside the 1 mm reach.
-    Sliced s(merged({ box(0, 0, 0, 6, 6, 10), box(6, 1, 3, 0.3, 4, 0.5), box(1, 6, 5, 4, 0.5, 0.5), box(-0.8, 1, 7, 0.8, 4, 0.5) }));
+    // A 6 x 6 x 10 column standing on the bed carries a 1 mm ledge off its +x face at z 3 and a 1.5 mm ledge off its -x
+    // face at z 6, each 4 mm wide. At 0.1 mm layers and the 21 degree threshold the layer below carries 0.26 mm of each,
+    // so the first hangs 0.74 mm past that and the second 1.24 mm, either side of the reach, two lines or 0.84 mm.
+    Sliced s(merged({ box(0, 0, 0, 6, 6, 10), box(6, 1, 3, 1., 4, 0.5), box(-1.5, 1, 6, 1.5, 4, 0.5) }));
     const Plan plan = s.plan();
-    CHECK(plan.tips.empty());
+    CHECK(count_in(s, plan, BoundingBoxf3(Vec3d(6., 0.9, 2.9), Vec3d(7.1, 5.1, 3.6))) == 0);
+    CHECK(count_in(s, plan, BoundingBoxf3(Vec3d(-1.6, 0.9, 5.9), Vec3d(0., 5.1, 6.6)), { TipNeed::Underside }) > 0);
     CHECK(plan.underside_unmet_mm2 == 0.);
 }
 
-TEST_CASE("A ledge hanging a head's worth past the reach takes tips", "[ScaffoldPlan]")
+TEST_CASE("A flap smaller than a head's disc prints as it hangs", "[ScaffoldPlan]")
 {
-    // A 2 mm ledge hangs 1.74 mm past what the layer below carries. A head has to answer a disc of half the reach, and
-    // the 4 mm strip past the 1 mm reach holds that much.
-    Sliced s(merged({ box(0, 0, 0, 6, 6, 10), box(6, 1, 5, 2, 4, 0.5) }));
-    const BoundingBoxf3 ledge(Vec3d(6., 0.9, 4.9), Vec3d(8.1, 5.1, 5.6));
-    CHECK(count_in(s, s.plan(), ledge) > 0);
+    // Off a 6 x 6 x 10 column standing on the bed, a fin 0.3 mm wide at z 3 and a ledge 1.2 mm wide at z 6 both stick
+    // 1.6 mm out, past the reach at their ends. What the fin hangs past the 0.26 mm step, about 0.40 mm2, is less than
+    // the small head's disc, pi w^2 or 0.55 mm2, and the scar a head would leave; the ledge hangs about 1.61 mm2.
+    Sliced s(merged({ box(0, 0, 0, 6, 6, 10), box(6, 2.85, 3, 1.6, 0.3, 0.5), box(-1.6, 2.4, 6, 1.6, 1.2, 0.5) }));
+    const Plan plan = s.plan();
+    CHECK(count_in(s, plan, BoundingBoxf3(Vec3d(6., 2.6, 2.9), Vec3d(7.7, 3.4, 3.6)), { TipNeed::Underside }) == 0);
+    CHECK(count_in(s, plan, BoundingBoxf3(Vec3d(-1.7, 2.2, 5.9), Vec3d(0., 3.8, 6.6)), { TipNeed::Underside }) == 1);
 }
 
-TEST_CASE("A floating plate takes tips within the reach of its whole underside", "[ScaffoldPlan]")
+namespace {
+// A 3 mm wide ledge sticking 1.6 mm out of the +x face of a 6 x 6 x 10 column standing on the bed, at x 6..7.6,
+// y 1.5..4.5, z 5..5.5.
+TriangleMesh cantilever() { return merged({ box(0, 0, 0, 6, 6, 10), box(6, 1.5, 5, 1.6, 3, 0.5) }); }
+const BoundingBoxf3 cantilever_ledge(Vec3d(6., 1.4, 4.9), Vec3d(7.7, 4.6, 5.6));
+} // namespace
+
+TEST_CASE("A cantilever takes its head at its far edge", "[ScaffoldPlan]")
+{
+    // Nothing reaches the ledge's far edge from the other side, so no line bridges to it: its heads stand along its rim,
+    // within two lines, the rim's width, plus a cell of its far edge or a side.
+    Sliced     s(cantilever());
+    const Plan plan = s.plan();
+    size_t     heads = 0;
+    for (const PlannedTip &tip : plan.tips)
+        if (tip.need == TipNeed::Underside && inside(s, tip, cantilever_ledge)) {
+            ++ heads;
+            const Vec2d  xy   = s.at(tip);
+            const double edge = std::min({ 7.6 - xy.x(), xy.y() - 1.5, 4.5 - xy.y() });
+            INFO("tip at (" << xy.x() << ", " << xy.y() << "), " << edge << " mm from the far or side edge");
+            CHECK(edge <= 2. * width_mm + 0.5 * width_mm);
+        }
+    CHECK(heads > 0);
+}
+
+TEST_CASE("A shallow ramp between two walls bridges between rim heads", "[ScaffoldPlan]")
+{
+    // Two 1 x 8 x 10 walls standing on the bed 4 mm apart carry a 1 mm thick floor between them whose underside rises
+    // 10 degrees along y, from z 3. Each layer its edge advances 0.57 mm, 0.31 mm past the step, and the middle of that
+    // edge hangs 2 mm from the walls, far past the reach, while the walls hold its ends: a line along the edge bridges
+    // the middle. With `max_bridge_length` 0 nothing bridges, and the middle takes heads.
+    const double       rise = 8. * std::tan(Geometry::deg2rad(10.));
+    std::vector<Vec3d> ramp;
+    for (double x : { 0.9, 5.1 })
+        for (const Vec3d &p : { Vec3d(x, 0., 3.), Vec3d(x, 8., 3. + rise), Vec3d(x, 0., 4.), Vec3d(x, 8., 4. + rise) })
+            ramp.push_back(p);
+    Sliced              s(merged({ box(0, 0, 0, 1, 8, 10), box(5, 0, 0, 1, 8, 10), hull(ramp) }));
+    const BoundingBoxf3 middle(Vec3d(2., -0.1, 2.9), Vec3d(4., 8.1, 5.5));
+    const size_t        bridged = count_in(s, s.plan(), middle, { TipNeed::Underside });
+    s.input.bridge_mm           = 0.;
+    const size_t        held    = count_in(s, s.plan(), middle, { TipNeed::Underside });
+    INFO("underside tips in the middle 2 mm: " << bridged << " with the bridge hold, " << held << " without");
+    CHECK(bridged == 0);
+    CHECK(held > 0);
+}
+
+TEST_CASE("A flat face born whole takes a ring on its rim", "[ScaffoldPlan]")
+{
+    // A disc 9 mm across floats at z 1..2.5 under a column 3 mm across up to z 4, beside a post that roots the object.
+    // The disc starts whole in mid-air: its birth tip stands at its centre and the rest of its underside hangs past
+    // the reach from it. Orca bridges a bottom along one direction it picks without the heads, so no line counts as
+    // bridged by the direction it happens to take: the rim, which the perimeters follow, takes a ring of heads, and
+    // the inside bridges to that ring, or to the rim, in every direction within `max_bridge_length`. With that
+    // length 0 the inside takes heads.
+    TriangleMesh disc = make_cylinder(4.5, 1.5), column = make_cylinder(1.5, 1.6);
+    disc.translate(0.f, 0.f, 1.f);
+    column.translate(0.f, 0.f, 2.4f);
+    Sliced     s(merged({ disc, column, box(-9, -1, 0, 2, 2, 1) }));
+    const auto from_rim = [&](const Plan &plan) {
+        std::vector<double> depths;
+        for (const PlannedTip &tip : plan.tips)
+            if (tip.need == TipNeed::Underside)
+                depths.push_back(4.5 - s.at(tip).norm());
+        return depths;
+    };
+    const std::vector<double> ring = from_rim(s.plan());
+    s.input.bridge_mm              = 0.;
+    const std::vector<double> held = from_rim(s.plan());
+    INFO(ring.size() << " underside tips, deepest " << (ring.empty() ? 0. : *std::max_element(ring.begin(), ring.end())) << " mm in; "
+                     << held.size() << " without the bridge hold, deepest "
+                     << (held.empty() ? 0. : *std::max_element(held.begin(), held.end())) << " mm in");
+    REQUIRE_FALSE(ring.empty());
+    for (const double depth : ring)
+        CHECK(depth <= 2. * width_mm + 0.5 * width_mm);
+    CHECK(std::any_of(held.begin(), held.end(), [](double depth) { return depth > 2. * width_mm + 0.5 * width_mm; }));
+}
+
+TEST_CASE("A face whose rim no head can hold takes heads inside instead of bridging to the rim", "[ScaffoldPlan]")
+{
+    // A disc 9 mm across floats at z 3..5 over a frame standing on the bed up to z 2, 9 x 9 outside with a 3 x 3
+    // opening. A head's neck, 1.42 mm deep, meets the frame everywhere but over the opening, and a head covers at most
+    // 1.52 mm, so no head reaches the disc's wall zone, within two lines of its edge: the zone hangs and its contour
+    // sags with it. Every chord of the disc is shorter than `max_bridge_length`, yet no line of the inside ends on that
+    // contour: the inside takes heads over the opening, and the zone counts as unmet.
+    TriangleMesh disc = make_cylinder(4.5, 2);
+    disc.translate(0.f, 0.f, 3.f);
+    Sliced     s(merged({ disc, box(-4.5, -4.5, 0, 9, 3, 2), box(-4.5, 1.5, 0, 9, 3, 2), box(-4.5, -1.5, 0, 3, 3, 2),
+                          box(1.5, -1.5, 0, 3, 3, 2) }));
+    const Plan plan = s.plan();
+    const auto heads_in = [&](double half) {
+        return count_in(s, plan, BoundingBoxf3(Vec3d(-half, -half, 2.9), Vec3d(half, half, 3.1)), { TipNeed::Underside });
+    };
+    const size_t inside = heads_in(1.5), all = heads_in(4.6);
+    INFO(inside << " underside heads over the opening of " << all << "; unmet " << plan.underside_unmet_mm2 << " mm2");
+    CHECK(inside > 0);
+    CHECK(inside == all);
+    CHECK(plan.underside_unmet_mm2 > 0.);
+}
+
+TEST_CASE("A rim head beside a wall stays off the wall", "[ScaffoldPlan]")
+{
+    // A ledge 0.6 mm wide sticks 1.8 mm out of the +x face of a 6 x 6 x 10 column standing on the bed at z 5, and its
+    // end face leans back over it at 45 degrees, so the ledge's far corners are acute. It is too narrow for a head's
+    // disc to stand wholly inside it, so its heads go on its rim, where the builder aims a head along the faces'
+    // normal averaged within one head radius: at the far corners that normal reads the end face and points 77
+    // degrees from down. A rim head goes only where that normal stands within 60 degrees of down.
+    std::vector<Vec3d> ledge;
+    for (double y : { 2.7, 3.3 })
+        for (const Vec3d &p : { Vec3d(5.9, y, 5.), Vec3d(7.8, y, 5.), Vec3d(5.9, y, 5.6), Vec3d(7.2, y, 5.6) })
+            ledge.push_back(p);
+    Sliced     s(merged({ box(0, 0, 0, 6, 6, 10), hull(ledge) }));
+    const Plan plan  = s.plan();
+    size_t     heads = 0;
+    for (const PlannedTip &tip : plan.tips)
+        if (tip.need == TipNeed::Underside && inside(s, tip, BoundingBoxf3(Vec3d(6., 2.5, 4.9), Vec3d(8., 3.5, 5.7)))) {
+            ++ heads;
+            const Vec2d xy = s.at(tip);
+            INFO("tip at (" << xy.x() << ", " << xy.y() << ", " << tip.site.print_z << ")");
+            CHECK(s.from_down_deg(tip) <= 60.);
+        }
+    CHECK(heads > 0);
+}
+
+TEST_CASE("The head loop ends when a covered cell hangs across a gap", "[ScaffoldPlan]")
+{
+    // A U-shaped ledge sticks out of the +x face of a 6 x 6 x 10 column standing on the bed at z 5: its near arm leaves
+    // the column at y 1.5..2.3 and runs 4 mm out, turns and runs back at y 2.8..3.6, ending 0.4 mm short of the column.
+    // The far arm hangs from the turn, and a head at its free end covers near arm cells across the 0.5 mm gap while the
+    // way to them through material runs round the turn. With `max_bridge_length` 0 no line holds those cells: they
+    // hang across the gap instead of calling a head of their own, within one and a half reaches or under the cover of
+    // the head the near arm takes at the turn, so the near arm takes that one head and nothing counts as unmet.
+    Sliced s(merged({ box(0, 0, 0, 6, 6, 10), box(6, 1.5, 5, 4, 0.8, 0.5), box(9.2, 1.5, 5, 0.8, 2.1, 0.5),
+                      box(6.4, 2.8, 5, 3.6, 0.8, 0.5) }));
+    s.input.bridge_mm = 0.;
+    const Plan   plan     = s.plan();
+    const size_t near_arm = count_in(s, plan, BoundingBoxf3(Vec3d(6., 1.4, 4.9), Vec3d(10.1, 2.35, 5.6)), { TipNeed::Underside });
+    const size_t far_arm  = count_in(s, plan, BoundingBoxf3(Vec3d(6., 2.75, 4.9), Vec3d(10.1, 3.7, 5.6)), { TipNeed::Underside });
+    INFO("near arm " << near_arm << " heads, far arm " << far_arm << ", unmet " << plan.underside_unmet_mm2 << " mm2");
+    CHECK(near_arm == 1);
+    CHECK(far_arm > 0);
+    CHECK_THAT(plan.underside_unmet_mm2, Catch::Matchers::WithinAbs(0., 1e-12));
+}
+
+TEST_CASE("A birth carrying its part takes the heavy disc where the section allows it", "[ScaffoldPlan]")
+{
+    // Rods hang 5 mm from a slab carried by a column standing on the bed, 2 x 2 mm and 0.3 x 0.3 mm. Each birth tip
+    // carries its rod's 5 mm, past the 2 mm a small disc carries, but only the thick rod's section fuses the heavy
+    // disc, four lines across, to twice the small disc's area: the thin rod keeps the small disc. Beside them a
+    // 3 x 1 mm panel starts at z 3 and a 0.3 mm nub at z 3.3 joins it at z 4.5, and the panel stands on to the slab:
+    // the panel's birth, the elder, carries 6 mm and takes the heavy disc, and the nub's ends at the join.
+    Sliced s(merged({ box(0, 0, 0, 4, 4, 11), box(0, 0, 9, 16, 10, 2), box(6, 1, 4, 2, 2, 5), box(10, 1.85, 4, 0.3, 0.3, 5),
+                      box(12, 6, 3, 3, 1, 6), box(13.35, 7.5, 3.3, 0.3, 0.3, 1.5), box(13.35, 6.5, 4.5, 0.3, 1.2, 0.4) }));
+    const Plan plan = s.plan();
+    const auto grade_in = [&](const BoundingBoxf3 &box) {
+        std::vector<double> grades;
+        for (const PlannedTip &tip : plan.tips)
+            if (tip.need == TipNeed::Birth && inside(s, tip, box))
+                grades.push_back(tip.site.grade_mm);
+        return grades;
+    };
+    const std::vector<double> thick = grade_in(BoundingBoxf3(Vec3d(5.9, 0.9, 3.9), Vec3d(8.1, 3.1, 4.1))),
+                              thin  = grade_in(BoundingBoxf3(Vec3d(9.8, 1.6, 3.9), Vec3d(10.5, 2.4, 4.1))),
+                              panel = grade_in(BoundingBoxf3(Vec3d(11.9, 5.9, 2.9), Vec3d(15.1, 7.1, 3.1))),
+                              nub   = grade_in(BoundingBoxf3(Vec3d(13.2, 7.3, 3.2), Vec3d(13.8, 7.9, 3.4)));
+    REQUIRE(thick.size() == 1);
+    REQUIRE(thin.size() == 1);
+    REQUIRE(panel.size() == 1);
+    REQUIRE(nub.size() == 1);
+    CHECK_THAT(thick.front(), Catch::Matchers::WithinAbs(4. * width_mm, 1e-9));
+    CHECK_THAT(thin.front(), Catch::Matchers::WithinAbs(2. * width_mm, 1e-9));
+    CHECK_THAT(panel.front(), Catch::Matchers::WithinAbs(4. * width_mm, 1e-9));
+    CHECK_THAT(nub.front(), Catch::Matchers::WithinAbs(2. * width_mm, 1e-9));
+}
+
+TEST_CASE("Without the bridge hold a floating plate takes tips within the reach of its whole underside", "[ScaffoldPlan]")
 {
     // A 12 x 12 x 2 plate at z 5..7 beside a column that roots the object: the plate is one island, too tall for debris.
+    // With `max_bridge_length` 0 no line bridges its underside, so the heads cover all of it.
     Sliced s(merged({ box(-6, 0, 0, 3, 3, 8), box(0, 0, 5, 12, 12, 2) }));
+    s.input.bridge_mm = 0.;
     const BoundingBoxf3 plate(Vec3d(-0.1, -0.1, 4.9), Vec3d(12.1, 12.1, 5.1));
     const Plan          plan  = s.plan();
-    const double        reach = NeedParams().reach_mm;
+    const double        reach = 2. * width_mm;
     CHECK(count_in(s, plan, plate) > 0);
     // Every underside sample on a 0.5 mm grid lies within one and a half reaches of a tip's head, the most a sliver too
     // small for a head of its own may hang: measured from the rim of the head's disc, two support lines across, plus
@@ -197,37 +389,58 @@ TEST_CASE("A flare's runs restart at a solid column however its column is held",
     CHECK(flare_tips(0.) == flare_tips(2.));
 }
 
-TEST_CASE("A blade standing free takes heavy tips up its height", "[ScaffoldPlan]")
+namespace {
+// A 1.5 mm thick blade whose lower edge rises at 60 degrees from its point at z 2, steeper than the threshold, so it
+// has no underside above its point: 9.24 mm across in x, it stands 16 mm free before a block at x 7..12, z 18..21 on a
+// rooted column at x 12..15 takes it in.
+TriangleMesh standing_blade()
 {
-    // A 1.5 mm thick blade whose lower edge rises at 60 degrees from its point at z 2, steeper than the threshold, so
-    // it has no underside above its point: 9.24 mm across in x, it stands 16 mm free before a block at x 7..12,
-    // z 18..21 on a rooted column at x 12..15 takes it in.
     const double       run = 16. / std::tan(Geometry::deg2rad(60.));
     std::vector<Vec3d> blade;
     for (double y : { 0., 1.5 })
         for (const Vec3d &p : { Vec3d(0., y, 2.), Vec3d(run, y, 18.), Vec3d(0., y, 5.), Vec3d(run, y, 21.) })
             blade.push_back(p);
-    Sliced s(merged({ hull(blade), box(7, -1, 18, 5, 3.5, 3), box(12, -1, 0, 3, 3.5, 21) }));
-    const Plan plan = s.plan();
+    return merged({ hull(blade), box(7, -1, 18, 5, 3.5, 3), box(12, -1, 0, 3, 3.5, 21) });
+}
+} // namespace
+
+TEST_CASE("A blade standing free takes tips up its height", "[ScaffoldPlan]")
+{
+    Sliced         s(standing_blade());
+    const Plan     plan = s.plan();
     std::set<long> heights;
     double         low = 1e9, high = -1e9;
-    bool           heavy_point = false;
+    bool           point = false;
     for (const PlannedTip &tip : plan.tips) {
         const Vec2d xy = s.at(tip);
         if (xy.x() > 10.5 || tip.site.print_z > 18.)
             continue;
         heights.insert(std::lround(tip.site.print_z));
-        low  = std::min(low, tip.site.print_z);
-        high = std::max(high, tip.site.print_z);
-        if (tip.need == TipNeed::Birth && tip.site.print_z < 2.2 && tip.site.grade_mm >= 4. * width_mm - 1e-9)
-            heavy_point = true;
-        if (tip.need == TipNeed::Stability)
-            CHECK(tip.site.grade_mm >= 4. * width_mm - 1e-9);
+        low   = std::min(low, tip.site.print_z);
+        high  = std::max(high, tip.site.print_z);
+        point = point || (tip.need == TipNeed::Birth && tip.site.print_z < 2.2);
     }
     INFO("tips on the blade " << heights.size() << " heights from " << low << " to " << high << ", slender " << plan.islands_slender);
-    CHECK(heavy_point);
+    CHECK(point);
     CHECK(heights.size() >= 3);
     CHECK(high - low >= 8.);
+}
+
+TEST_CASE("Stability and Underside tips take the small disc", "[ScaffoldPlan]")
+{
+    // A stability tip steadies a part that already stands on its birth, and an underside tip holds a line or two, so
+    // each takes the small disc, two lines across: on the cantilever's ledge and up the standing blade.
+    for (const TriangleMesh &fixture : { cantilever(), standing_blade() }) {
+        Sliced     s(fixture);
+        const Plan plan  = s.plan();
+        size_t     small = 0;
+        for (const PlannedTip &tip : plan.tips)
+            if (tip.need == TipNeed::Stability || tip.need == TipNeed::Underside) {
+                ++ small;
+                CHECK_THAT(tip.site.grade_mm, Catch::Matchers::WithinAbs(2. * width_mm, 1e-9));
+            }
+        CHECK(small > 0);
+    }
 }
 
 TEST_CASE("A squat floating block takes no stability tip", "[ScaffoldPlan]")

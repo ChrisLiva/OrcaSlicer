@@ -11,9 +11,7 @@
 
 #include "ClipperUtils.hpp"
 #include "ExtrusionEntity.hpp"
-#include "Model.hpp"
 #include "Print.hpp"
-#include "TriangleMesh.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "SupportComponents.hpp"
 #include "libslic3r/SLA/SupportTreeBuilder.hpp"
@@ -70,7 +68,7 @@ sla::SupportTreeConfig tree_config(const Params &params)
 // The seed a contact was placed for, or the largest id for a node the seed pass never named.
 uint64_t seed_id(const SupportNode &node) { return node.source_ids.empty() ? std::numeric_limits<uint64_t>::max() : node.source_ids.front(); }
 
-TipSite site_of(const SupportNode &node) { return { node.position, node.print_z, node.obj_layer_nr, seed_id(node), true, node.is_pinned }; }
+TipSite site_of(const SupportNode &node) { return { node.position, node.print_z, node.obj_layer_nr, seed_id(node), node.is_pinned }; }
 
 // The tips a model island needs for its unjoined height: one for a sliver, two up to 5 mm, three above. A slab z is
 // a sum of layer heights, so a band edge carries an epsilon.
@@ -379,27 +377,14 @@ size_t pad_layer_count(const std::vector<LayerHeightData> &layer_heights, const 
     return count;
 }
 
-// A tip's grade is the width of the disc it fuses to the model with: two support lines, or four where the model
-// under it hangs off a neck at least eight lines wide. The pin is half the grade. A seeded tip starts a feature
-// and keeps the small grade, and a baked point keeps the grade it asks for.
-std::vector<double> tip_grades(const std::vector<TipSite> &nodes, const ModelSupportRisk::Field &risk, const Params &params)
+// A tip's grade is the width of the disc it fuses to the model with, which the pin's radius halves: the planner's for
+// every tip it placed, the size's for a baked point, and two support lines for an enforced one, which asks for none.
+std::vector<double> tip_grades(const std::vector<TipSite> &nodes, const Params &params)
 {
-    const double w          = params.toolpath_width_mm;
-    const bool   risk_known = risk.status == ModelSupportRisk::Field::Status::Complete;
-    std::vector<double> grades(nodes.size(), 2. * w);
+    std::vector<double> grades(nodes.size(), 2. * params.toolpath_width_mm);
     for (size_t i = 0; i < nodes.size(); ++ i)
         if (nodes[i].grade_mm > 0.)
             grades[i] = nodes[i].grade_mm;
-    if (risk_known)
-        tbb::parallel_for(tbb::blocked_range<size_t>(0, nodes.size()), [&](const tbb::blocked_range<size_t> &range) {
-            for (size_t i = range.begin(); i < range.end(); ++ i) {
-                if (! nodes[i].contact || nodes[i].grade_mm > 0.)
-                    continue;
-                const ModelSupportRisk::Sample s = ModelSupportRisk::sample(risk, size_t(nodes[i].obj_layer_nr + 1), nodes[i].position);
-                if (s.status == ModelSupportRisk::Sample::Status::Known && s.neck_width_mm >= 8. * w)
-                    grades[i] = 4. * w;
-            }
-        });
     return grades;
 }
 
@@ -1003,9 +988,10 @@ Tips place_tips(const PrintObject &object, const std::vector<std::vector<Support
         for (const SupportNode *node : layer)
             if (node->is_pinned)
                 enforced.push_back(site_of(*node));
+    Tips tips;
+    tips.mesh             = std::make_shared<const ObjectMesh>(object);
     const PlanInput input = prepare_plan(object, params.toolpath_width_mm, params.xy_distance_mm, head_width_mm + params.toolpath_width_mm,
-                                         threshold_rad, blockers);
-    Tips       tips;
+                                         params.max_bridge_length_mm, threshold_rad, blockers, tips.mesh.get());
     const auto start = std::chrono::steady_clock::now();
     tips.plan               = plan_tips(input, enforced);
     tips.island_joins_ms    = ms_since(start);
@@ -1104,8 +1090,7 @@ bool baked_pose_valid(const Matrix3d &pose, const Matrix3d &linear)
 }
 
 Output draw(const PrintObject &object, const Tips &chosen, const std::vector<LayerHeightData> &layer_heights,
-            const std::vector<LayerClip> &clips, const ModelSupportRisk::Field &risk, const Params &params,
-            const std::function<void()> &throw_on_cancel)
+            const std::vector<LayerClip> &clips, const Params &params, const std::function<void()> &throw_on_cancel)
 {
     Output out;
     out.layers.resize(layer_heights.size());
@@ -1114,7 +1099,7 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
     out.stage_ms.island_joins     = chosen.island_joins_ms;
     const std::vector<TipSite> &nodes = chosen.sites;
 
-    std::vector<double> grades = tip_grades(nodes, risk, params);
+    std::vector<double> grades = tip_grades(nodes, params);
     // A head's id is its point's index, so the points keep the order of `nodes`.
     sla::SupportPoints points;
     for (size_t i = 0; i < nodes.size(); ++ i) {
@@ -1123,17 +1108,16 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
     }
     out.counts.tips_placed = points.size();
 
-    // The object in the frame its slices are in: XY centred, the bed on z 0, so an object lifted off the bed or
-    // sunk into it keeps its offset. The builder's mesh index points into it, so it lives for the whole call.
-    TriangleMesh mesh = object.model_object()->raw_mesh();
-    mesh.transform(object.trafo_centered());
+    // The object in the frame its slices are in, so an object lifted off the bed or sunk into it keeps its offset: the
+    // plan's, or for a baked list one built here. The builder's mesh index points into it, so it lives for the whole call.
+    const std::shared_ptr<const ObjectMesh> model = chosen.mesh ? chosen.mesh : std::make_shared<const ObjectMesh>(object);
 
     // The builder grounds its pillars at the mesh's lowest z less the elevation, so the elevation is that z: the
     // pillars stand on the pad on the bed however high the object floats. A lifted object's elevation is positive,
     // which lets a pillar drop straight under its underside rather than steering its foot out from under the model.
     sla::SupportTreeConfig cfg = tree_config(params);
-    cfg.object_elevation_mm    = mesh.bounding_box().min.z();
-    sla::SupportableMesh sm(mesh.its, sla::SupportPoints{}, cfg);
+    cfg.object_elevation_mm    = model->mesh.bounding_box().min.z();
+    sla::SupportableMesh sm(model->aabb, sla::SupportPoints{}, cfg);
     // The copy the SupportableMesh holds drops any ground offset its source carried, so the offset goes on
     // the copy: pillars end on the pad's top face.
     sm.emesh.ground_level_offset(params.pad_thickness_mm);

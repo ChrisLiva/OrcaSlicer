@@ -7,6 +7,7 @@
 #include "ClipperUtils.hpp"
 #include "Geometry/ConvexHull.hpp"
 #include "Layer.hpp"
+#include "Model.hpp"
 #include "Print.hpp"
 #include "DisjointSets.hpp"
 #include <boost/log/trivial.hpp>
@@ -22,11 +23,21 @@ constexpr float  unreached        = std::numeric_limits<float>::infinity();
 constexpr double stability_min_mm = 3.;
 // How much higher a part whose stability search ended short is searched again: a face a little higher may take a tip.
 constexpr double stability_retry_mm = 1.;
-// A birth tip under an island standing taller than this before it merges carries the island's weight: heavy disc.
+// A birth tip under an island that carries its part higher than this takes the heavy disc where the section fuses it.
 constexpr double heavy_birth_mm   = 2.;
 // An island that never merges and stands no taller than this is mesh debris, and one whose birth stands at a wall
 // and merges within it hangs from that wall when the part it meets is held.
 constexpr double debris_mm        = 1.;
+// How far past what the layer below carries an underside may hang, in support lines: the first line past a held edge
+// bonds its side to a held line and the second to a line that hangs by one, but a third would lie against a line that
+// itself hangs by two.
+constexpr double reach_lines      = 2.;
+// How far from straight down a face may turn and still take a head, on the normal the builder aims the head along: the
+// builder tilts a head at most 45 degrees from down, so a head on such a face meets it within 15 degrees of its normal.
+constexpr double face_cap_deg     = 60.;
+// The directions the bridge hold tries through a cell, 2.8 degrees apart: a line through the middle of a 9 mm chord
+// stays within one cell of it.
+constexpr int    bridge_directions = 64;
 
 using Heap = std::priority_queue<std::pair<float, size_t>, std::vector<std::pair<float, size_t>>, std::greater<>>;
 
@@ -83,11 +94,13 @@ LayerGrid rasterize(const ExPolygons &pieces, const Point &origin, coord_t cell)
 }
 
 // Per piece that starts a part (nothing below it): the slab where its part first overlaps another part, the slab
-// count where it never does, and how far it stands free, to that slab or to its part's top.
+// count where it never does, and how far it stands free, to that slab or to its part's top. `carry_mm` is how far it
+// carries its part by the elder rule: where parts meet, the one born lowest, a rooted part first, carries on, and every
+// other part's eldest birth ends there; a birth that never ends carries to its part's top.
 struct Births
 {
     std::vector<size_t> merge_slab;
-    std::vector<double> free_mm;
+    std::vector<double> free_mm, carry_mm;
 };
 
 Births walk_births(const PlanInput &in)
@@ -97,40 +110,58 @@ Births walk_births(const PlanInput &in)
     Births births;
     births.merge_slab.assign(pieces.size(), n);
     births.free_mm.assign(pieces.size(), 0.);
+    births.carry_mm.assign(pieces.size(), -1.);
     DisjointSets                     sets(pieces.size());
     std::vector<std::vector<size_t>> open(pieces.size());   // per root: its births that have not merged yet
+    std::vector<size_t>              eldest(pieces.size()); // per root: its birth born lowest, the lower index on a tie
     std::vector<double>              top(pieces.size(), 0.);
+    const auto older = [&pieces](size_t a, size_t b) {
+        return pieces[a].bottom_z != pieces[b].bottom_z ? pieces[a].bottom_z < pieces[b].bottom_z : a < b;
+    };
     for (size_t s = 0; s < n; ++ s) {
         const auto [first, last] = in.components.slab_range[s];
         for (size_t p = first; p < last; ++ p) {
             const SupportAnalysis::Piece &piece = pieces[p];
             if (piece.below.empty()) {
                 open[p].push_back(p);
-                top[p] = piece.print_z;
+                eldest[p] = p;
+                top[p]    = piece.print_z;
                 continue;
             }
             std::vector<size_t> roots;
             for (size_t q : piece.below)
                 if (const size_t r = sets.find(q); std::find(roots.begin(), roots.end(), r) == roots.end())
                     roots.push_back(r);
-            if (roots.size() > 1)
+            const size_t root  = roots.front();
+            size_t       elder = eldest[root];
+            if (roots.size() > 1) {
                 for (size_t r : roots) {
                     for (size_t birth : open[r])
                         births.merge_slab[birth] = s;
                     open[r].clear();
+                    if (older(eldest[r], elder))
+                        elder = eldest[r];
                 }
-            const size_t root = roots.front();
+                for (size_t r : roots)
+                    if (eldest[r] != elder)
+                        births.carry_mm[eldest[r]] = in.slabs[s].bottom_z - pieces[eldest[r]].bottom_z;
+            }
             for (size_t i = 1; i < roots.size(); ++ i) {
                 top[root] = std::max(top[root], top[roots[i]]);
                 sets.join(root, roots[i]);
             }
             sets.join(root, p);
-            top[root] = std::max(top[root], piece.print_z);
+            eldest[root] = elder;
+            top[root]    = std::max(top[root], piece.print_z);
         }
     }
     for (size_t p = 0; p < pieces.size(); ++ p)
-        if (pieces[p].below.empty())
-            births.free_mm[p] = (births.merge_slab[p] < n ? in.slabs[births.merge_slab[p]].bottom_z : top[sets.find(p)]) - pieces[p].bottom_z;
+        if (pieces[p].below.empty()) {
+            const double part_top = top[sets.find(p)];
+            births.free_mm[p] = (births.merge_slab[p] < n ? in.slabs[births.merge_slab[p]].bottom_z : part_top) - pieces[p].bottom_z;
+            if (births.carry_mm[p] < 0.)
+                births.carry_mm[p] = part_top - pieces[p].bottom_z;
+        }
     return births;
 }
 
@@ -162,20 +193,23 @@ public:
         m_anchor_z(in.components.pieces.size(), -std::numeric_limits<double>::max()),
         m_rearm_z(in.components.pieces.size(), -std::numeric_limits<double>::max()),
         m_anchors(in.components.pieces.size()), m_waiting(in.components.pieces.size()), m_rooted(in.components.pieces.size(), 0),
-        m_slender(in.components.pieces.size(), 0)
+        m_slender(in.components.pieces.size(), 0), m_flaps(0), m_reach_mm(reach_lines * in.toolpath_width_mm)
     {
         m_births = walk_births(in);
-        // Cells within the self-support step of the layer below, and within the xy distance of a wall, by offset.
-        const double wall_r = (in.xy_distance_mm + 0.71 * in.cell_mm) / in.cell_mm;
-        for (int dy = -int(wall_r) - 1; dy <= int(wall_r) + 1; ++ dy)
-            for (int dx = -int(wall_r) - 1; dx <= int(wall_r) + 1; ++ dx)
-                if (double(dx * dx + dy * dy) <= wall_r * wall_r)
-                    m_wall_disc.emplace_back(dx, dy);
-        const double head_r = in.toolpath_width_mm / in.cell_mm;
-        for (int dy = -int(head_r); dy <= int(head_r); ++ dy)
-            for (int dx = -int(head_r); dx <= int(head_r); ++ dx)
-                if (double(dx * dx + dy * dy) <= head_r * head_r)
-                    m_head_disc.emplace_back(dx, dy);
+        const auto disc = [](double r) {
+            std::vector<std::pair<int, int>> out;
+            for (int dy = -int(r) - 1; dy <= int(r) + 1; ++ dy)
+                for (int dx = -int(r) - 1; dx <= int(r) + 1; ++ dx)
+                    if (double(dx * dx + dy * dy) <= r * r)
+                        out.emplace_back(dx, dy);
+            return out;
+        };
+        // Cells within the xy distance of a wall, under a small head, and within two lines, all by offset.
+        m_wall_disc  = disc((in.xy_distance_mm + 0.71 * in.cell_mm) / in.cell_mm);
+        m_head_disc  = disc(in.toolpath_width_mm / in.cell_mm);
+        m_two_lines = disc(m_reach_mm / in.cell_mm);
+        // A small head's own disc, pi w^2, in cells.
+        m_flap_floor = size_t(std::lround(M_PI * in.toolpath_width_mm * in.toolpath_width_mm / (in.cell_mm * in.cell_mm)));
     }
 
     Plan run(const std::vector<TipSite> &enforced)
@@ -241,17 +275,32 @@ private:
     std::vector<BirthPiece>  m_island_pieces;
     std::vector<char>        m_rooted, m_slender;
     std::vector<std::pair<int, int>> m_wall_disc;
-    std::vector<std::pair<int, int>> m_head_disc;   // the cells under a small head, two support lines across
+    std::vector<std::pair<int, int>> m_head_disc;    // the cells under a small head, two support lines across
+    std::vector<std::pair<int, int>> m_two_lines;    // the cells within two lines: the reach, the wall zone and the rim
+    // Flaps: the underside hanging past the step, connected on a layer and across layers, with each one's cell count
+    // at its root. A flap's count is its projected hanging area, since a cell faces down on one layer only.
+    DisjointSets             m_flaps;
+    std::vector<size_t>      m_flap_cells;
+    size_t                   m_flap_floor = 0;   // a flap with fewer cells prints as it hangs
+    const double             m_reach_mm;         // how far an underside may hang past the step, `reach_lines` lines
     Plan                     m_plan;
-    // The layer being walked and the one under it: their window on the lattice and each cell's run.
+    // The layer being walked and the one under it: their window on the lattice, each cell's run and its flap, -1 off
+    // any flap.
     LayerGrid                m_prev_grid;
     std::vector<float>       m_prev_run;
+    std::vector<int>         m_prev_flap;
     const LayerGrid         *m_grid = nullptr;
     std::vector<float>       m_dist, m_tip_dist;
+    float                    m_step = 0.f;   // the self-support step of the layer being walked
     // Underside cells that hang past the reach with no head answering them yet: lattice x and y, bottom z and run.
     struct Pending { int x, y; float z, run; };
     std::vector<Pending>     m_pending;
-    std::vector<size_t>      m_heads;      // the cells under the heads placed on the layer being walked
+    std::vector<size_t>      m_heads;        // the cells under the heads placed on the layer being walked
+    std::vector<std::pair<int, int>> m_layer_heads;   // those heads' own cells
+    // Per cell of the layer being walked, what its underside walk has read, -1 before it has: whether it lies in the
+    // wall zone, on the rim, and whether a head may stand there.
+    std::vector<int8_t>      m_zone, m_rim, m_site_ok;
+    size_t                   m_wall_bottom = 0, m_wall_top = 0;   // the layers a wall cell of the layer walked stays empty on
 
     const std::vector<SupportAnalysis::Piece> &pieces() const { return m_in.components.pieces; }
     Point centre(int x, int y) const { return m_in.origin + Point(coord_t((x + 0.5) * m_in.cell), coord_t((y + 0.5) * m_in.cell)); }
@@ -260,6 +309,9 @@ private:
         return { int(std::floor(double(p.x() - m_in.origin.x()) / double(m_in.cell))),
                  int(std::floor(double(p.y() - m_in.origin.y()) / double(m_in.cell))) };
     }
+    float run_of(size_t i) const { return std::max(0.f, m_dist[i] - m_step); }
+    // The run a cell holds within: the reach, and half a cell for where the lattice samples it.
+    float reach_run() const { return float(m_reach_mm + 0.5 * m_in.cell_mm); }
 
     void join_parts(size_t l)
     {
@@ -312,8 +364,7 @@ private:
                 const BirthPiece &birth = m_island_pieces[k];
                 if (const std::optional<Point> spot = birth_spot(birth.slab, birth.piece, birth.deepest)) {
                     BOOST_LOG_TRIVIAL(debug) << "scaffold island at " << pieces()[birth.piece].bottom_z << " joins nothing held: tip";
-                    const double grade = m_births.free_mm[birth.piece] > heavy_birth_mm ? 4. * m_in.toolpath_width_mm : 0.;
-                    holders = { place(site_at(birth.slab, *spot, grade), TipNeed::Birth, nullptr) };
+                    holders = { place(site_at(birth.slab, *spot, birth_grade(birth.slab, birth.piece, *spot)), TipNeed::Birth, nullptr) };
                     m_plan.islands[k].reason = IslandReason::Tip;
                     placed = true;
                 }
@@ -358,6 +409,19 @@ private:
         return std::none_of(band.begin(), band.end(), [&p](const ExPolygon &expoly) { return expoly.contains(p); });
     }
 
+    // Whether the builder aims a head at `p` on the bottom of slab `l` within the face cap of straight down: it aims the
+    // head along `sla::normals` at the point, the faces' normal averaged within the head's radius, one toolpath width.
+    bool faces_down(size_t l, const Point &p) const
+    {
+        if (m_in.mesh == nullptr)
+            return true;
+        const Vec2d   xy = unscale(p);
+        sla::PointSet at(1, 3);
+        at.row(0) = Vec3d(xy.x(), xy.y(), m_in.slabs[l].bottom_z - m_in.z_offset_mm);
+        const sla::PointSet normal = sla::normals(at, m_in.mesh->aabb, m_in.toolpath_width_mm);
+        return normal.rows() == 0 || -normal(0, 2) >= std::cos(face_cap_deg * M_PI / 180.);
+    }
+
     // The root of the piece of slab `l` holding `p`, or npos.
     size_t root_at(size_t l, const Point &p)
     {
@@ -387,6 +451,7 @@ private:
         // Its head anchors the cells under its disc on the layer being walked.
         const double radius = 0.5 * (site.grade_mm > 0. ? site.grade_mm : 2. * m_in.toolpath_width_mm) / m_in.cell_mm;
         const auto [cx, cy] = cell_of(site.position);
+        m_layer_heads.emplace_back(cx, cy);
         const LayerGrid &g  = *m_grid;
         for (int dy = -int(radius) - 1; dy <= int(radius) + 1; ++ dy)
             for (int dx = -int(radius) - 1; dx <= int(radius) + 1; ++ dx)
@@ -407,9 +472,34 @@ private:
     TipSite site_at(size_t l, const Point &p, double grade_mm) const
     {
         TipSite site { p, m_in.slabs[l].bottom_z, int(l) - 1 };
-        site.contact  = true;
         site.grade_mm = grade_mm;
         return site;
+    }
+
+    // The disc a birth tip at `p` under piece `piece` of slab `l` fuses with. The heavy one, four lines across, goes
+    // where the island carries its part higher than `heavy_birth_mm` and the model the pin reaches, the slabs within one
+    // toolpath width over the tip, fills at least twice as many cells of the heavy disc as of the small one; the small
+    // one, two lines across, goes everywhere else, where the heavy disc would add scar and no hold.
+    double birth_grade(size_t l, size_t piece, const Point &p) const
+    {
+        const double w = m_in.toolpath_width_mm;
+        if (m_births.carry_mm[piece] <= heavy_birth_mm)
+            return 2. * w;
+        const auto [cx, cy] = cell_of(p);
+        const int  r        = int(std::ceil(2. * w / m_in.cell_mm)) + 1;
+        size_t     small = 0, heavy = 0;
+        for (int dy = -r; dy <= r; ++ dy)
+            for (int dx = -r; dx <= r; ++ dx) {
+                const double d = (centre(cx + dx, cy + dy) - p).cast<double>().norm() * SCALING_FACTOR;
+                if (d > 2. * w)
+                    continue;
+                bool filled = false;
+                for (size_t k = l; k < m_in.slabs.size() && m_in.slabs[k].bottom_z < m_in.slabs[l].bottom_z + w && ! filled; ++ k)
+                    filled = m_in.material[k].at(cx + dx, cy + dy) != 0;
+                heavy += filled;
+                small += filled && d <= w;
+            }
+        return heavy >= 2 * std::max<size_t>(small, 1) ? 4. * w : 2. * w;
     }
 
     // Dijkstra through the layer's material, from whatever the heap holds, over the 16 moves of a king and a knight: a
@@ -455,12 +545,14 @@ private:
                 place(tip, TipNeed::Enforced, nullptr);
             m_prev_grid = g;
             m_prev_run.clear();
+            m_prev_flap.clear();
             return;
         }
         const LayerGrid *below  = l > 0 ? &m_in.material[l - 1] : nullptr;
         const double     a      = m_in.self_support_mm[l];
         const double     a_cells = a / m_in.cell_mm;
         const size_t     cells  = g.cells.size();
+        m_step = float(a);
         // 1: material right under it, 2: within the self-support step of the layer below, 3: underside.
         std::vector<uint8_t> kind(cells, 0);
         m_dist.assign(cells, unreached);
@@ -495,87 +587,170 @@ private:
             }
 
         m_heads.clear();
+        m_layer_heads.clear();
         std::vector<size_t> enforced_tips;
         for (const TipSite &tip : enforced)
             enforced_tips.push_back(place(tip, TipNeed::Enforced, &heap));
         births(l, enforced_tips, heap);
         spread(heap);
         spread_tips();
+        std::vector<int> flap = flaps(kind);
+        underside(l, kind, flap, heap);
 
-        // Tips where a run exceeds the reach, on any cell the layer below does not stand under, the step it carries
-        // included: on a shallow slope that step is most of the surface that hangs. A head may stand on any such cell,
-        // due or not, so it can stand in from an edge and still cover what hangs there. A head covers the underside within the reach plus the self-support step
-        // plus its own radius, in 3-D, and has to answer at least a disc of half the reach of it: underside that hangs
-        // past the reach and no head answers stays pending while it lies within that cover under the layer walked, so a
-        // shallow frontier, which comes due a scattered cell at a time, calls for a head once enough of it hangs, and a
-        // sliver too small to be worth a scar prints as it hangs. Each head goes on the eligible due cell covering the
-        // most due and pending cells, candidates sampled a third of the cover apart, among equals the first listed,
-        // lowest in y, then x. A cell whose small head's disc lies wholly on the layer's material goes before one on an
-        // edge, where half the disc would hang and the scar would sit on the corner; a feature narrower than the disc
-        // takes its head on the edge. What hangs past one and a half reaches and no head covers counts as unmet, and a
-        // head keeps what of that it answers: due cells it brings within the reach and pending cells its cover takes.
-        const float  reach  = float(m_need.reach_mm + 0.5 * m_in.cell_mm), aa = float(a), far = unmet_run();
-        const auto   run_of = [&](size_t i) { return std::max(0.f, m_dist[i] - aa); };
-        const double cover  = m_need.reach_mm + a + m_in.toolpath_width_mm;
-        const double cover_cells = cover / m_in.cell_mm;
-        const int    stride      = std::max(1, int(std::lround(cover_cells / 3.)));
-        const size_t least       = std::max<size_t>(1, size_t(std::lround(M_PI * 0.25 * m_need.reach_mm * m_need.reach_mm / (m_in.cell_mm * m_in.cell_mm))));
-        const float  z           = float(m_in.slabs[l].bottom_z);
+        // What the layer above hangs from. Material within the reach of a head on this layer spans to that head as a
+        // line bridges to its anchor, so it holds what grows on it as the layer below holds; the rest passes its run
+        // on, a line bridged between held ends included.
+        const float reach = reach_run();
+        m_prev_grid = g;
+        m_prev_run.assign(cells, 0.f);
+        for (size_t i = 0; i < cells; ++ i)
+            if (kind[i] != 0 && m_tip_dist[i] > reach)
+                m_prev_run[i] = m_dist[i] == unreached ? 0.f : run_of(i);
+        m_prev_flap = std::move(flap);
+    }
+
+    // The flaps of the layer being walked, each cell's flap key or -1: the 8-connected pieces of its cells that the
+    // layer below does not stand under and that hang past the step, each continuing a flap of the layer below with a
+    // hanging cell within two cells, one toolpath width, of one of its own. Read after the births and before any
+    // underside head on the layer.
+    std::vector<int> flaps(const std::vector<uint8_t> &kind)
+    {
+        const LayerGrid &g     = *m_grid;
+        const size_t     cells = g.cells.size();
+        std::vector<int> flap(cells, -1);
+        const auto hangs = [&](size_t i) { return kind[i] >= 2 && run_of(i) > 0.f; };
+        const auto prev  = [this](int x, int y) {
+            const LayerGrid &p = m_prev_grid;
+            if (m_prev_flap.empty() || x < p.x0 || y < p.y0 || x >= p.x0 + p.w || y >= p.y0 + p.h)
+                return -1;
+            return m_prev_flap[size_t(y - p.y0) * size_t(p.w) + size_t(x - p.x0)];
+        };
+        std::vector<size_t> stack;
+        for (size_t seed = 0; seed < cells; ++ seed) {
+            if (flap[seed] >= 0 || ! hangs(seed))
+                continue;
+            const int key = int(m_flaps.parent.size());
+            m_flaps.parent.push_back(size_t(key));
+            m_flap_cells.push_back(0);
+            std::vector<int> continued;
+            flap[seed] = key;
+            stack.assign(1, seed);
+            while (! stack.empty()) {
+                const size_t i = stack.back();
+                stack.pop_back();
+                ++ m_flap_cells[size_t(key)];
+                const int x = int(i % size_t(g.w)), y = int(i / size_t(g.w));
+                for (int dy = -2; dy <= 2; ++ dy)
+                    for (int dx = -2; dx <= 2; ++ dx) {
+                        if (const int old = prev(g.x0 + x + dx, g.y0 + y + dy); old >= 0)
+                            continued.push_back(old);
+                        if (std::abs(dx) > 1 || std::abs(dy) > 1 || x + dx < 0 || y + dy < 0 || x + dx >= g.w || y + dy >= g.h)
+                            continue;
+                        const size_t j = size_t(y + dy) * size_t(g.w) + size_t(x + dx);
+                        if (flap[j] < 0 && hangs(j)) {
+                            flap[j] = key;
+                            stack.push_back(j);
+                        }
+                    }
+            }
+            std::sort(continued.begin(), continued.end());
+            continued.erase(std::unique(continued.begin(), continued.end()), continued.end());
+            for (const int old : continued)
+                if (const size_t ro = m_flaps.find(size_t(old)), rk = m_flaps.find(size_t(key)); ro != rk) {
+                    m_flaps.join(rk, ro);
+                    m_flap_cells[rk] += m_flap_cells[ro];
+                }
+        }
+        return flap;
+    }
+
+    // The underside walk of the layer being walked, after its births. Each cell carries a run, how far it hangs past
+    // the step from what anchors it. A cell the layer below does not stand under is due where its run passes the reach,
+    // plus half a cell for where the lattice samples it, and each due cell is answered in turn:
+    // - A due cell on a flap smaller than a small head's disc prints as it hangs: the scar would outweigh the sag.
+    // - A due cell a straight line bridges takes no head. Orca bridges a bottom along one direction it picks without
+    //   the heads, and its perimeters follow the layer's contour, so a cell in the wall zone, within two lines of the
+    //   contour, bridges along any line that stays within a cell of the zone and ends on held cells on both sides
+    //   within `bridge_mm`; a cell farther in than the zone bridges only where every direction ends so, on a held cell
+    //   or on the contour once the zone is answered: no cell of it left due, and none hanging where no head could
+    //   stand or across a gap from one.
+    // - The rest calls for heads, the wall zone first while any of it is due. A head covers the cells within the reach
+    //   plus the step plus its own radius, in 3-D, and goes where it covers the most due cells, and pending cells of
+    //   the layers under it, among the cells the layer below does not stand under that cover at least one due cell:
+    //   first on the rim, within two lines of a wall that stays empty for as long as a frontier at the step takes to
+    //   advance two lines, with its disc wholly on the layer's material, then on the rim, then with its disc on the
+    //   material, then anywhere. Among equals it goes nearest the due cell hanging farthest, then lowest in y, then x.
+    //   A head stands only where it may, not within the reach of a head already on the layer, and where the builder
+    //   aims it within the face cap of straight down. Due cells no head can answer hang.
+    // - A due cell a head covered in 2-D that the head leaves due hangs across a gap from it, and hangs.
+    // A cell that hangs stays pending while it lies within a head's cover under the layer walked; what falls out of
+    // that cover past one and a half reaches counts as unmet, and each head keeps what of that it answers: due cells
+    // it brings within the reach and pending cells its cover takes.
+    void underside(size_t l, const std::vector<uint8_t> &kind, const std::vector<int> &flap, Heap &heap)
+    {
+        const LayerGrid &g      = *m_grid;
+        const size_t     cells  = g.cells.size();
+        const float      reach  = reach_run(), far = unmet_run();
+        const double     cover  = m_reach_mm + double(m_step) + m_in.toolpath_width_mm;
+        const double     cover_cells = cover / m_in.cell_mm;
+        const float      z      = float(m_in.slabs[l].bottom_z);
         prune_pending(z - float(cover));
-        std::vector<char> hanging(cells, 0);
+        std::vector<char> hanging(cells, 0), bridged(cells, 0);
+        std::vector<uint8_t> witness(cells, 0);
+        bool first = true, zone_hangs = false;
         for (;;) {
             std::vector<size_t> due;
             for (size_t i = 0; i < cells; ++ i)
-                if (kind[i] >= 2 && ! hanging[i] && run_of(i) > reach)
+                if (kind[i] >= 2 && ! hanging[i] && ! bridged[i] && run_of(i) > reach)
                     due.push_back(i);
             if (due.empty())
                 break;
-            // What a head at cell `c` of this layer covers: due cells on the layer and pending cells under it.
-            const auto covers = [&](size_t c) {
-                const int    cx = g.x0 + int(c % size_t(g.w)), cy = g.y0 + int(c / size_t(g.w));
-                const double r2 = cover_cells * cover_cells;
-                size_t       n  = 0;
-                for (size_t j : due) {
-                    const double dx = double(g.x0 + int(j % size_t(g.w)) - cx), dy = double(g.y0 + int(j / size_t(g.w)) - cy);
-                    n += dx * dx + dy * dy <= r2;
-                }
-                for (const Pending &q : m_pending) {
-                    const double dx = double(q.x - cx), dy = double(q.y - cy), dz = double(z - q.z) / m_in.cell_mm;
-                    n += dx * dx + dy * dy + dz * dz <= r2;
-                }
-                return n;
-            };
-            std::vector<size_t> sites;
-            for (size_t i = 0; i < cells; ++ i)
-                if (kind[i] >= 2)
-                    sites.push_back(i);
-            size_t best = 0, best_n = 0;
-            for (int pass = 0; pass < 3 && best_n < least; ++ pass)
-                for (size_t i : sites) {
-                    const int x = g.x0 + int(i % size_t(g.w)), y = g.y0 + int(i / size_t(g.w));
-                    if (pass == 0 && (x % stride != 0 || y % stride != 0))
-                        continue;
-                    if (pass < 2 && std::any_of(m_head_disc.begin(), m_head_disc.end(), [&](const std::pair<int, int> &d) { return g.at(x + d.first, y + d.second) == 0; }))
-                        continue;
-                    const size_t n = covers(i);
-                    if (n > best_n && eligible(l, centre(x, y))) {
-                        best   = i;
-                        best_n = n;
-                    }
-                }
-            if (best_n < least) {
-                for (size_t i : due) {
-                    hanging[i] = 1;
-                    m_pending.push_back({ g.x0 + int(i % size_t(g.w)), g.y0 + int(i / size_t(g.w)), z, run_of(i) });
-                }
-                break;
+            if (first) {
+                m_zone.assign(cells, -1);
+                m_rim.assign(cells, -1);
+                m_site_ok.assign(cells, -1);
+                // A wall stays empty for as long as a frontier at the step takes to advance two lines, up to the layer
+                // whose steps above this one add up to two lines: a boundary that advances slower is a wall.
+                m_wall_bottom = m_wall_top = l;
+                for (double rise = 0.; m_wall_top + 1 < m_in.slabs.size() && rise < 2. * m_in.toolpath_width_mm - EPSILON;)
+                    rise += m_in.self_support_mm[++ m_wall_top];
+                first = false;
             }
-            const int bx = g.x0 + int(best % size_t(g.w)), by = g.y0 + int(best / size_t(g.w));
+            const auto hang = [&](size_t i) {
+                hanging[i] = 1;
+                m_pending.push_back({ g.x0 + int(i % size_t(g.w)), g.y0 + int(i / size_t(g.w)), z, run_of(i) });
+            };
+            due.erase(std::remove_if(due.begin(), due.end(), [&](size_t i) {
+                if (flap[i] >= 0 && m_flap_cells[m_flaps.find(size_t(flap[i]))] >= m_flap_floor)
+                    return false;
+                hang(i);
+                return true;
+            }), due.end());
+            if (m_in.bridge_mm > 0.)
+                bridge(due, bridged, witness, zone_hangs);
+            due.erase(std::remove_if(due.begin(), due.end(), [&](size_t i) { return bridged[i] != 0; }), due.end());
+            if (due.empty())
+                break;
+            std::vector<size_t> scored;
+            for (size_t i : due)
+                if (in_zone(g.x0 + int(i % size_t(g.w)), g.y0 + int(i / size_t(g.w))))
+                    scored.push_back(i);
+            const bool zone = ! scored.empty();
+            if (! zone)
+                scored = due;
+            const std::optional<size_t> site = head_site(l, kind, scored, cover_cells, z);
+            if (! site) {
+                for (size_t i : scored)
+                    hang(i);
+                zone_hangs = zone_hangs || zone;
+                continue;
+            }
+            const int bx = g.x0 + int(*site % size_t(g.w)), by = g.y0 + int(*site / size_t(g.w));
             std::vector<size_t> far_due;
             for (size_t i : due)
                 if (run_of(i) > far)
                     far_due.push_back(i);
-            const size_t tip = place(site_at(l, centre(bx, by), 0.), TipNeed::Underside, &heap);
+            const size_t tip = place(site_at(l, centre(bx, by), 2. * m_in.toolpath_width_mm), TipNeed::Underside, &heap);
             spread(heap);
             spread_tips();
             size_t answered = size_t(std::count_if(far_due.begin(), far_due.end(), [&](size_t i) { return run_of(i) <= reach; }));
@@ -587,19 +762,184 @@ private:
                 return true;
             }), m_pending.end());
             m_plan.tips[tip].answered_mm2 = double(answered) * m_in.cell_mm * m_in.cell_mm;
+            // What it covered in 2-D and left due hangs across a gap from it.
+            for (size_t i : scored) {
+                const double dx = double(g.x0 + int(i % size_t(g.w)) - bx), dy = double(g.y0 + int(i / size_t(g.w)) - by);
+                if (dx * dx + dy * dy <= cover_cells * cover_cells && run_of(i) > reach) {
+                    hang(i);
+                    zone_hangs = zone_hangs || zone;
+                }
+            }
         }
+    }
 
-        // What the layer above hangs from. Material within the reach of a head on this layer spans to that head as a
-        // line bridges to its anchor, so it holds what grows on it as the layer below holds; the rest passes its run on.
-        m_prev_grid = g;
-        m_prev_run.assign(cells, 0.f);
+    bool material(int x, int y) const { return m_grid->at(x, y) != 0; }
+    size_t local(int x, int y) const { return size_t(y - m_grid->y0) * size_t(m_grid->w) + size_t(x - m_grid->x0); }
+    // Whether lattice cell (x, y) of the layer being walked lies in its wall zone: material within two lines of empty.
+    bool in_zone(int x, int y)
+    {
+        if (! material(x, y))
+            return false;
+        int8_t &zone = m_zone[local(x, y)];
+        if (zone < 0)
+            zone = std::any_of(m_two_lines.begin(), m_two_lines.end(), [&](const std::pair<int, int> &d) { return ! material(x + d.first, y + d.second); });
+        return zone != 0;
+    }
+    // Within a cell of the wall zone, where a perimeter following the contour runs.
+    bool near_zone(int x, int y)
+    {
+        for (int dy = -1; dy <= 1; ++ dy)
+            for (int dx = -1; dx <= 1; ++ dx)
+                if (in_zone(x + dx, y + dy))
+                    return true;
+        return false;
+    }
+    bool held(int x, int y) const { return material(x, y) && run_of(local(x, y)) <= reach_run(); }
+
+    // Marks in `bridged` the cells of `due` a straight line bridges on the layer being walked: one sample every half
+    // cell along each of `bridge_directions` directions, both ways from the cell. `witness` keeps, per inside cell,
+    // the direction that last failed it, which the next test tries first. `zone_hangs` says a cell of the wall zone
+    // hangs unanswered, which keeps every inside cell's line off the contour.
+    void bridge(const std::vector<size_t> &due, std::vector<char> &bridged, std::vector<uint8_t> &witness, bool zone_hangs)
+    {
+        const LayerGrid &g     = *m_grid;
+        const double     limit = m_in.bridge_mm / m_in.cell_mm;
+        const int        steps = int(limit / 0.5) + 1;
+        // The distance in cells from (x, y) along direction `k`, one way, to the first sample `end` accepts, or -1
+        // where `stop` accepts one first or none comes within `steps` samples.
+        const auto walk = [&](int x, int y, int k, double sign, const auto &end, const auto &stop) {
+            const double th = M_PI * double(k) / double(bridge_directions), ux = sign * std::cos(th), uy = sign * std::sin(th);
+            for (int j = 1; j <= steps; ++ j) {
+                const double s  = 0.5 * double(j);
+                const int    sx = int(std::floor(double(x) + ux * s + 0.5)), sy = int(std::floor(double(y) + uy * s + 0.5));
+                if (stop(sx, sy))
+                    return -1.;
+                if (end(sx, sy))
+                    return s;
+            }
+            return -1.;
+        };
+        std::vector<size_t> inside;
+        bool                zone_done = ! zone_hangs;
+        for (const size_t i : due) {
+            const int x = g.x0 + int(i % size_t(g.w)), y = g.y0 + int(i / size_t(g.w));
+            if (! in_zone(x, y)) {
+                inside.push_back(i);
+                continue;
+            }
+            const auto gap  = [this](int sx, int sy) { return ! near_zone(sx, sy); };
+            const auto hold = [this](int sx, int sy) { return held(sx, sy); };
+            for (int k = 0; k < bridge_directions && ! bridged[i]; ++ k) {
+                const double one = walk(x, y, k, 1., hold, gap);
+                if (one < 0.)
+                    continue;
+                const double other = walk(x, y, k, -1., hold, gap);
+                bridged[i] = other >= 0. && one + other <= limit;
+            }
+            zone_done = zone_done && bridged[i];
+        }
+        for (const size_t i : inside) {
+            const int  x    = g.x0 + int(i % size_t(g.w)), y = g.y0 + int(i / size_t(g.w));
+            const auto ends = [this, zone_done](int sx, int sy) { return held(sx, sy) || (zone_done && ! material(sx, sy)); };
+            const auto gap  = [this, zone_done](int sx, int sy) { return ! zone_done && ! material(sx, sy); };
+            bool       all  = true;
+            for (int n = 0; n < bridge_directions && all; ++ n) {
+                const int    k   = (int(witness[i]) + n) % bridge_directions;
+                const double one = walk(x, y, k, 1., ends, gap);
+                const double other = one < 0. ? -1. : walk(x, y, k, -1., ends, gap);
+                if (other < 0. || one + other > limit) {
+                    witness[i] = uint8_t(k);
+                    all        = false;
+                }
+            }
+            bridged[i] = all;
+        }
+    }
+
+    // Whether lattice cell (x, y) of the layer being walked lies on its rim: within two lines of a wall, a cell empty on
+    // the layers from this one to `m_wall_top`.
+    bool on_rim(int x, int y)
+    {
+        int8_t &rim = m_rim[local(x, y)];
+        if (rim < 0) {
+            const auto wall = [&](int wx, int wy) {
+                for (size_t k = m_wall_bottom; k <= m_wall_top; ++ k)
+                    if (m_in.material[k].at(wx, wy) != 0)
+                        return false;
+                return true;
+            };
+            rim = std::any_of(m_two_lines.begin(), m_two_lines.end(), [&](const std::pair<int, int> &d) { return wall(x + d.first, y + d.second); });
+        }
+        return rim != 0;
+    }
+
+    // Where the next underside head goes on layer `l` for the due cells `scored`, as `underside` lays out, or none.
+    std::optional<size_t> head_site(size_t l, const std::vector<uint8_t> &kind, const std::vector<size_t> &scored, double cover_cells, float z)
+    {
+        const LayerGrid &g     = *m_grid;
+        const size_t     cells = g.cells.size();
+        // Per cell, the due cells within its cover in 2-D and the pending cells within it in 3-D.
+        std::vector<uint32_t> due_near(cells, 0), pending_near(cells, 0);
+        const int r = int(std::ceil(cover_cells));
+        const auto stamp = [&](int cx, int cy, double r2, std::vector<uint32_t> &count) {
+            for (int dy = -r; dy <= r; ++ dy)
+                for (int dx = -r; dx <= r; ++ dx) {
+                    const int x = cx + dx - g.x0, y = cy + dy - g.y0;
+                    if (x >= 0 && y >= 0 && x < g.w && y < g.h && double(dx * dx + dy * dy) <= r2)
+                        ++ count[size_t(y) * size_t(g.w) + size_t(x)];
+                }
+        };
+        size_t deepest = scored.front();
+        for (const size_t i : scored) {
+            stamp(g.x0 + int(i % size_t(g.w)), g.y0 + int(i / size_t(g.w)), cover_cells * cover_cells, due_near);
+            if (run_of(i) > run_of(deepest))
+                deepest = i;
+        }
+        for (const Pending &q : m_pending)
+            if (const double dz = double(z - q.z) / m_in.cell_mm; std::abs(dz) <= cover_cells)
+                stamp(q.x, q.y, cover_cells * cover_cells - dz * dz, pending_near);
+        const int fx = int(deepest % size_t(g.w)), fy = int(deepest / size_t(g.w));
+        std::vector<size_t> candidates;
         for (size_t i = 0; i < cells; ++ i)
-            if (kind[i] != 0 && m_tip_dist[i] > reach)
-                m_prev_run[i] = m_dist[i] == unreached ? 0.f : run_of(i);
+            if (kind[i] >= 2 && due_near[i] > 0)
+                candidates.push_back(i);
+        const auto from_deepest = [&](size_t i) {
+            const int dx = int(i % size_t(g.w)) - fx, dy = int(i / size_t(g.w)) - fy;
+            return dx * dx + dy * dy;
+        };
+        std::sort(candidates.begin(), candidates.end(), [&](size_t a, size_t b) {
+            const uint32_t na = due_near[a] + pending_near[a], nb = due_near[b] + pending_near[b];
+            return na != nb ? na > nb : from_deepest(a) != from_deepest(b) ? from_deepest(a) < from_deepest(b) : a < b;
+        });
+        const double spacing = m_reach_mm / m_in.cell_mm;
+        const auto   inset   = [&](int x, int y) {
+            return std::all_of(m_head_disc.begin(), m_head_disc.end(), [&](const std::pair<int, int> &d) { return material(x + d.first, y + d.second); });
+        };
+        const auto may_stand = [&](size_t i, int x, int y) {
+            if (std::any_of(m_layer_heads.begin(), m_layer_heads.end(), [&](const std::pair<int, int> &h) {
+                    return double((h.first - x) * (h.first - x) + (h.second - y) * (h.second - y)) <= spacing * spacing; }))
+                return false;
+            int8_t &ok = m_site_ok[i];
+            if (ok < 0)
+                ok = eligible(l, centre(x, y)) && faces_down(l, centre(x, y));
+            return ok != 0;
+        };
+        // Rim and inset, rim, inset, anywhere.
+        for (int pass = 0; pass < 4; ++ pass) {
+            const bool rim_pass = pass < 2, inset_pass = pass == 0 || pass == 2;
+            for (const size_t i : candidates) {
+                const int x = g.x0 + int(i % size_t(g.w)), y = g.y0 + int(i / size_t(g.w));
+                if ((rim_pass && ! on_rim(x, y)) || (inset_pass && ! inset(x, y)))
+                    continue;
+                if (may_stand(i, x, y))
+                    return i;
+            }
+        }
+        return std::nullopt;
     }
 
     // The run past which underside no head answers counts as unmet: one and a half reaches.
-    float unmet_run() const { return 1.5f * float(m_need.reach_mm); }
+    float unmet_run() const { return 1.5f * float(m_reach_mm); }
 
     // Drops the pending cells below `z_min`, which no head placed from here on covers, counting those that hang past one
     // and a half reaches as unmet.
@@ -652,12 +992,12 @@ private:
         return found;
     }
 
-    // Each island starting on slab `l` takes one tip at its deepest point, unless an enforced tip already stands on its
-    // birth piece, among `enforced` the plan's tips on the slab, or it is debris. An island that merges before it could
-    // droop, or one no tip can reach that merges within the debris height, waits for its merge, which `settle` reads: it
-    // goes without a tip only when the part it meets is held. Any other island no tip can reach is counted. An island
-    // left without a tip prints as it hangs, so its cells anchor what grows on them. Every island goes into the plan
-    // with how it is held.
+    // Each island starting on slab `l` takes one tip at its deepest point, graded by `birth_grade`, unless an enforced
+    // tip already stands on its birth piece, among `enforced` the plan's tips on the slab, or it is debris. An island
+    // that merges before it could droop, or one no tip can reach that merges within the debris height, waits for its
+    // merge, which `settle` reads: it goes without a tip only when the part it meets is held. Any other island no tip can
+    // reach is counted. An island left without a tip prints as it hangs, so its cells anchor what grows on them. Every
+    // island goes into the plan with how it is held.
     void births(size_t l, const std::vector<size_t> &enforced, Heap &heap)
     {
         const LayerGrid &g     = *m_grid;
@@ -714,7 +1054,7 @@ private:
                 accept(p);
                 continue;
             }
-            island.holders = { place(site_at(l, *spot, free > heavy_birth_mm ? 4. * m_in.toolpath_width_mm : 0.), TipNeed::Birth, &heap) };
+            island.holders = { place(site_at(l, *spot, birth_grade(l, p, *spot)), TipNeed::Birth, &heap) };
             island.reason  = IslandReason::Tip;
         }
     }
@@ -741,7 +1081,7 @@ private:
 
     // A part turns slender when its section reaches farther from its anchors than the stability minimum and than
     // `slender_ratio` of the section's narrowest width, the window: a blade hanging from its point turns slender as it
-    // widens, not only as it climbs. It takes a heavy tip on its down-facing surface within the window's height under
+    // widens, not only as it climbs. It takes a small tip on its down-facing surface within the window's height under
     // this layer, at the corner of a face farthest from its anchors that a tip can stand under, at least half the window
     // from them, since a tip beside an anchor shortens no lever. A part with no such corner is counted once; it, and a
     // part still slender with its new tip, is measured again `stability_retry_mm` higher.
@@ -779,7 +1119,7 @@ private:
                     break;
                 }
             if (spot != corners.end())
-                place(site_at(spot->layer, spot->p, 4. * m_in.toolpath_width_mm), TipNeed::Stability, nullptr);
+                place(site_at(spot->layer, spot->p, 2. * m_in.toolpath_width_mm), TipNeed::Stability, nullptr);
             else {
                 if (! m_slender[r])
                     ++ m_plan.islands_slender;
@@ -811,14 +1151,23 @@ Point inscribed_point(const ExPolygon &piece)
     return deepest.front().contains(middle) ? middle : deepest.front().contour.points.front();
 }
 
+ObjectMesh::ObjectMesh(const PrintObject &object) : mesh([&object] {
+    TriangleMesh framed = object.model_object()->raw_mesh();
+    framed.transform(object.trafo_centered());
+    return framed;
+}()), aabb(mesh) {}
+
 PlanInput prepare_plan(const PrintObject &object, double toolpath_width_mm, double xy_distance_mm, double neck_depth_mm,
-                       double threshold_rad, const std::vector<Polygons> &blockers)
+                       double bridge_mm, double threshold_rad, const std::vector<Polygons> &blockers, const ObjectMesh *mesh)
 {
     PlanInput in;
     in.slabs             = SupportAnalysis::model_slabs_of(object);
     in.toolpath_width_mm = toolpath_width_mm;
     in.xy_distance_mm    = xy_distance_mm;
     in.neck_depth_mm     = neck_depth_mm;
+    in.bridge_mm         = bridge_mm;
+    in.mesh              = mesh;
+    in.z_offset_mm       = object.slicing_parameters().object_print_z_min;
     if (in.slabs.empty() || toolpath_width_mm <= 0.)
         return in;
     in.components = SupportAnalysis::build_components(in.slabs, in.slabs.front().bottom_z);

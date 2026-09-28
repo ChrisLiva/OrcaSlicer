@@ -10,8 +10,7 @@ snap off the model at their necks, which leaves small marks rather than the
 broad scars a tree roof leaves on a figure's underside.
 
 The style reuses parts of the legacy tree's front half: overhang detection,
-the contacts enforcers ask for, the model risk field and the planned support
-layer heights. It places its tips with its own need planner, one where the
+the contacts enforcers ask for and the planned support layer heights. It places its tips with its own need planner, one where the
 print needs a tip rather than one per overhang, and replaces the body. `ScaffoldSupport::draw` builds
 the SLA tree on the object mesh with its ground on the bed, adds a pad and
 slices both into the planned layers, and `TreeSupport` prints those areas through the
@@ -200,8 +199,8 @@ steps 2 to 4 of the auto path on those sites:
   merges into it.
 
 Each site carries its point's index as `TipSite::source` and its size's disc
-width as `TipSite::grade_mm`, which `tip_grades` keeps in place of grading the
-tip against the risk field. From `plan_layer_heights` on, a baked slice runs as
+width as `TipSite::grade_mm`, which `tip_grades` keeps as it keeps the
+planner's grade on an auto slice. From `plan_layer_heights` on, a baked slice runs as
 an auto one: the tips' z values top planned layers, `draw` builds and checks
 the heads, and the measurement reads the printed footprints with no seed and
 the scaffold's coverage override.
@@ -325,8 +324,9 @@ cleared.
 `src/libslic3r/Support/ScaffoldSupport.{hpp,cpp}` and
 `src/libslic3r/Support/ScaffoldPlan.{hpp,cpp}` run seven steps between them.
 `ScaffoldSupport::place_tips`, the selection, runs steps 1, 2 and 4, reads no
-planned layer and returns the tips with what the planner could not meet,
-which is why it can run before the layers are planned.
+planned layer and returns the tips with what the planner could not meet and
+the object mesh the planner read, which is why it can run before the layers
+are planned.
 `ScaffoldSupport::draw` runs steps 5 to 7 on those tips and the planned
 layers, turns them into per-layer areas and counts what it did with them.
 `ScaffoldSupport::baked_tips` stands in for `place_tips` on a baked list and
@@ -343,10 +343,16 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    (`diff_ex` of its slices and the layer below's), each layer's
    self-support step `a`, the height of the layer below over the tangent of
    the detector's threshold angle (the threshold plus 1 degree, or 30 degrees
-   when it reads 0), and the blockers rastered per layer. Every slice plans
-   with one set of `NeedParams`, its defaults: the reach `R` 1 mm, the slender
-   ratio 3 and the micro-merge height 0.12 mm. The `PlanInput` lives only
-   through `place_tips`.
+   when it reads 0), and the blockers rastered per layer. It also carries
+   `max_bridge_length`, the longest line an underside bridges, and the
+   object mesh with its AABB tree, a `ScaffoldSupport::ObjectMesh` that
+   `place_tips` builds once and hands to `draw`, off which the planner reads
+   the normal the builder aims a head along. The reach `R`, how far an
+   underside may hang past the step, is two support lines: the first line
+   past a held edge bonds its side to a held line and the second to a line
+   hanging by one, but a third would lie against a line hanging by two.
+   `NeedParams` holds the slender ratio 3 and the micro-merge height
+   0.12 mm. The `PlanInput` lives only through `place_tips`.
 
    The planner walks the layers bottom up and tracks parts itself: a part is
    a connected set of pieces, and a part merges when a piece overlaps two
@@ -354,10 +360,17 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    islands never join the ground, and every height below runs to a merge.
    - Enforced. Every contact an enforcer asked for becomes a tip and an
      anchor.
-   - Birth. Each island takes a heavy tip at the deepest point of its birth
-     piece (`inscribed_point`) when it stands more than 2 mm free before it
-     merges, a small one otherwise, or at the eligible cell of the piece
-     nearest that point when the point stands at a wall. An enforced tip on
+   - Birth. Each island takes a tip at the deepest point of its birth piece
+     (`inscribed_point`), or at the eligible cell of the piece nearest that
+     point when the point stands at a wall. An island carries its part by the
+     elder rule: where parts meet, the one born lowest carries on, a rooted
+     part first, and every other part's eldest birth ends there; a birth that
+     never ends carries to its part's top. The tip takes the heavy disc, four
+     lines across, when its island carries its part more than 2 mm and the
+     model within one toolpath width over the tip, the depth the pin reaches,
+     fills at least twice as many lattice cells of the heavy disc as of the
+     small one, and the small disc otherwise: on a thin section the heavy disc
+     adds scar and no hold. An enforced tip on
      the birth piece stands in for it, and debris, a part that never merges
      and stands at most 1 mm, takes none. Two kinds of island wait for their
      merge instead: a micro-island, merging within the micro-merge height with
@@ -386,29 +399,66 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
      excess over `a`, layer by layer. A cell within the reach of a head on its
      own layer passes 0 up, as material bridging to that head holds what grows
      on it. The distance runs over the 16 moves of a king and a knight, which
-     overstate a straight line by at most 3 %. A run due past the reach, plus
-     half a cell, calls for a head only once enough hangs: a head covers the
-     cells within the reach plus `a` plus one toolpath width in 3-D, and has
-     to answer at least a disc of half the reach, so due cells that no head
-     answers stay pending while they lie within that cover under the layer
-     walked. A shallow frontier comes due a scattered cell at a time and calls
-     for a head once enough of it hangs, and a sliver prints as it hangs. Each
-     head goes on the eligible cell not stood under by the layer below that
-     covers the most due and pending cells, sampled a third of the cover
-     apart, a cell whose small disc lies wholly on the layer's material before
-     an edge cell. Pending cells that fall out of the cover unanswered and hang
-     past one and a half reaches count in `underside_unmet_mm2`. Each head
-     keeps, as `PlannedTip::answered_mm2`, what past one and a half reaches it
-     answered: the due cells it brought within the reach on its layer and the
-     pending cells its cover took, which hang again if the head does not
-     route.
+     overstate a straight line by at most 3 %. A cell the layer below does not
+     stand under is due where its run passes the reach plus half a cell, and
+     each due cell is answered in turn:
+     - The flap floor. The cells hanging past the step, connected on a layer
+       and continued across layers where one lies within two cells of a
+       hanging cell of the layer below, form a flap, whose cell count over all
+       its layers is its projected hanging area. A due cell on a flap smaller
+       than the small head's disc, pi w^2 or 0.15 mm2 at a 0.22 mm line,
+       prints as it hangs, since the scar would outweigh the sag.
+     - The bridge hold. Orca prints a bottom over tree support as a bridge
+       along one direction it picks from the model's own layers, without the
+       heads, and its perimeters follow the layer's contour. A due cell in the
+       wall zone, within two lines of the layer's contour, takes no head where
+       a straight line through it, among 64 directions 2.8 degrees apart, stays
+       within one cell of the zone and ends on held cells on both sides within
+       `max_bridge_length`. A due cell farther in than the zone takes none only
+       where every direction ends so, on a held cell or on the contour once the
+       zone is answered: no cell of it left due, and none hanging where no head
+       could stand or across a gap from one, since the contour sags with such a
+       cell. So a frontier between held ends, such as a shallow ramp between
+       two walls, bridges, and a flat face born whole takes a ring of heads on
+       its rim, which holds whichever direction Orca picks. `max_bridge_length`
+       0 bridges nothing. A bridged cell passes its run up, as any cell out of
+       a head's reach does.
+     - Heads. The rest calls for heads, the wall zone's due cells first while
+       any is left. A head covers the cells within the reach plus `a` plus one
+       toolpath width in 3-D, and goes on a cell not stood under by the layer
+       below that covers at least one due cell, the one covering the most due
+       cells and pending cells of the layers under it: first on the rim,
+       within two lines of a wall, with the small disc wholly on the layer's
+       material; then on the rim; then with the disc on the material; then
+       anywhere. A wall is a cell empty on the layer and on the layers above
+       until their steps add up to two lines, since a boundary that advances
+       slower than that is no frontier. Among equals the head goes nearest the
+       due cell that hangs farthest, then lowest in y, then x. It stands only
+       where it is eligible, not within the reach of a head already on the
+       layer, and where the builder's normal, `sla::normals` averaged within
+       the head's radius, stands within 60 degrees of straight down: the
+       builder tilts a head at most 45 degrees, so such a head meets its face
+       within 15 degrees of the normal, where a rim head beside a steep wall
+       would be aimed into the wall. Every underside head takes the small
+       disc.
+     - The termination guard. A due cell a head covered in 2-D and left due
+       hangs across a gap from it, and hangs, so no later head stands for it
+       on the strength of that cover.
+
+     Due cells no head can answer hang. A cell that hangs stays pending while
+     it lies within a head's cover under the layer walked, and one that falls
+     out of that cover unanswered past one and a half reaches counts in
+     `underside_unmet_mm2`. Each head keeps, as `PlannedTip::answered_mm2`,
+     what past one and a half reaches it answered: the due cells it brought
+     within the reach on its layer and the pending cells its cover took,
+     which hang again if the head does not route.
    - Stability. A part's lever on a layer is how far the farthest corner of
      its section's convex hull stands from the part's nearest tip in 3-D, or
      above its highest anchor while no tip holds it, so a blade hanging from
      its point reads the reach it widens by as well as the height it climbs.
      The part turns slender when its lever passes the window, the larger of
      3 mm and the slender ratio times the hull's narrowest width. It then
-     takes a heavy tip on its down-facing surface within the window's height
+     takes a small tip on its down-facing surface within the window's height
      under the layer, at the corner of a face farthest from its tips that is
      eligible and stands at least half the window from them. Every corner of
      every face is a candidate, and down-facing surface is exact, so a rising
@@ -430,7 +480,7 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    the lattice's rounding decides, so without the exact band the wall skip
    removed tips the planner had counted on. The planner logs
    `scaffold plan: <n> birth, <n> underside, <n> stability, <n> enforced
-   tips` at debug level. On plate 1 it runs in 0.29 to 0.35 s, after
+   tips` at debug level. On plate 1's figure it runs in about 0.36 s, after
    `prepare_plan` spends about 0.07 s once per slice.
 2. The wall skip. The seam clips support inside the xy distance of the model,
    so a head whose neck stood in that band would lose its neck while its ring
@@ -485,14 +535,14 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    enforced when any tip merged into it was. A merge logs
    `scaffold tip merged at (x, y, z)` at debug level and counts as neither
    placed nor dropped.
-5. Grading. A tip's head fuses to the model with a disc two support lines
-   wide, or four where the risk field reads the model under it as known and
-   hanging off a neck at least eight lines wide; a birth tip under an island
-   standing more than 2 mm free and a stability tip keep four, and a baked point
-   keeps the width its size asks for. The head's pin radius is half
-   that width.
+5. Grading. A tip's head fuses to the model with a disc of the width its
+   grade names: the planner's for every tip it placed, four support lines on
+   a birth that carries its part and two on any other, the size's for a
+   baked point, and two lines for an enforced tip, which asks for none. The
+   head's pin radius is half that width.
 6. The build. The draw hands the tips and the object mesh, in the frame the
-   object's slices use, to `sla::SupportTreeBuildsteps::execute` with the
+   object's slices use, the one `place_tips` built or on a baked list one of
+   its own, to `sla::SupportTreeBuildsteps::execute` with the
    configuration `tree_config` writes: head front, penetration and fallback
    radius at one toolpath width, pillar radius at half the pillar diameter,
    no model anchors, bridge and pillar-link lengths at the
@@ -809,17 +859,30 @@ enforced heads enters the band. The SLA builder changes are covered in
 `tests/sla_print/sla_print_tests.cpp`.
 
 `tests/fff_print/test_scaffold_plan.cpp` holds the `[ScaffoldPlan]` cases,
-which call `prepare_plan` and `plan_tips` on fixtures sliced without support:
-the lattice's area, a rod hanging under a slab taking one heavy birth tip at
-its lowest point, ledges within the reach taking none, a 2 mm ledge that
-hangs a head's worth past the reach taking tips, a floating plate covered
-within one and a half reaches, a 10 degree flare
-taking more tips than a 15 degree one and a 30 degree one none, a flare's
-runs restarting at a solid column however the column is held, a blade whose
-edges rise steeper than the threshold taking heavy tips at three heights or
-more, a squat floating block taking no stability tip, and small nubs under a
-slab, where a lone nub hangs rooted from the slab and of two nubs meeting in
-mid-air one takes the birth tip and the other lists it as its holder.
+which call `prepare_plan` and `plan_tips` on fixtures sliced without support,
+with the object mesh and the config's 10 mm `max_bridge_length`: the
+lattice's area, a rod hanging under a slab taking one birth tip at its lowest
+point, a 1 mm ledge taking no tip and a 1.5 mm one taking heads with no
+unmet area, a fin whose hanging area is under a head's disc taking none
+while a wider ledge takes one, a cantilever taking its heads within two lines
+and a cell of its far or side edges, a ramp between two walls bridging its
+middle 2 mm and taking heads there with `max_bridge_length` 0, a lifted
+9 mm disc born whole taking a ring of heads within two lines and a cell of
+its rim and heads deeper with no bridge hold, a lifted disc whose rim no
+head's neck clears taking heads inside rather than bridging to that rim, a
+narrow ledge whose end leans back taking its heads only where the builder's
+normal stands within 60 degrees of down, a U-shaped ledge with no bridge hold
+whose near arm takes one head while the cells a far arm head covers across
+the gap hang rather than call their own, births carrying their parts taking
+the heavy disc only on sections that fuse it to twice the small disc's area,
+a floating plate covered within one and a half reaches with no bridge hold, a
+10 degree flare taking more tips than a 15 degree one and a 30 degree one
+none, a flare's runs restarting at a solid column however the column is held,
+a blade whose edges rise steeper than the threshold taking tips at three
+heights or more, stability and underside tips taking the small disc, a squat
+floating block taking no stability tip, and small nubs under a slab, where a
+lone nub hangs rooted from the slab and of two nubs meeting in mid-air one
+takes the birth tip and the other lists it as its holder.
 
 Two `[ScaffoldSupport]` cases cover the baked list on the shelf fixture. The
 first bakes an auto slice's routed tips and slices from them with no contact
@@ -849,8 +912,8 @@ requires of each scaffold slice: dropped tips at most a fifth of those placed,
 no floating piece removed, a process time at most 1.5 times the tree-slim
 slice's, `island_joins` within 2 s and a support volume at most 2.5 times the
 tree-slim slice's; the upright pose also requires at most two under-held
-islands, the two born at z 15.4 whose birth tips the builder leaves unrouted,
-while the plan holds every island.
+islands. The stored pose places 60 tips and routes 58, and the upright pose
+places 200 and routes 178.
 
 The hidden case "Need-driven tips hold corpus plate 1's hand and sword with
 few contacts" slices plate 1 and requires of the tips its record holds at most
@@ -858,6 +921,5 @@ few contacts" slices plate 1 and requires of the tips its record holds at most
 under z 7.5 on the blade, no stretch of blade under z 15 longer than 7 mm
 without one, and at most 200 in all, and of its islands at most two
 under-held, each named among the record's bare islands. Plate 1's record
-holds 56 tips, 6 on the hand, 3 under z 7.5 and a largest gap of 6.84 mm,
-and two bare islands born at z 35.2 whose birth tips the builder leaves
-unrouted.
+holds 79 tips, 7 on the hand, 4 under z 7.5 and a largest gap of 6.84 mm,
+and two bare islands.

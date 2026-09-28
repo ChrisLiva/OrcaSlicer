@@ -5,22 +5,22 @@
 #include "../ExPolygon.hpp"
 #include "../Point.hpp"
 #include "../Polygon.hpp"
+#include "../TriangleMesh.hpp"
+#include "../SLA/IndexedMesh.hpp"
 #include "SupportComponents.hpp"
 namespace Slic3r {
 class PrintObject;
 namespace ScaffoldSupport {
-// Where a tip stands. `contact` is true for a tip `draw` grades against the risk field, and false for one that keeps
-// the small grade. `enforced` is a contact a support enforcer asked for, painted facets or an enforcer volume
+// Where a tip stands. `enforced` is a contact a support enforcer asked for, painted facets or an enforcer volume
 // (`SupportNode::is_pinned`), which the wall skip keeps and whose head `clip_base` clips by the model alone.
-// `grade_mm` is the disc width the tip asks for, 0 to let `draw` grade it, and `source` the point's index in a baked
-// list, -1 for any other tip. Both come after `enforced`, since tips are built by position.
+// `grade_mm` is the disc width the tip asks for, 0 for the small disc `draw` gives it, and `source` the point's index in
+// a baked list, -1 for any other tip. Both come after `enforced`, since tips are built by position.
 struct TipSite
 {
     Point              position;
     double             print_z      = 0.;
     int                obj_layer_nr = 0;
     uint64_t           seed         = std::numeric_limits<uint64_t>::max();
-    bool               contact      = false;
     bool               enforced     = false;
     double             grade_mm     = 0.;
     int                source       = -1;
@@ -33,10 +33,21 @@ Point inscribed_point(const ExPolygon &piece);
 // its anchors there, or a part standing free has grown too tall over its anchors.
 enum class TipNeed : uint8_t { Enforced, Birth, Underside, Stability };
 
-// What the planner asks of the model. `reach_mm` is how far an underside may hang past its anchors, `slender_ratio`
-// how many section widths a part may stand over its highest anchor, and `micro_merge_mm` how soon an island no wider
-// than two support lines has to merge to print without a tip.
-struct NeedParams { double reach_mm = 1., slender_ratio = 3., micro_merge_mm = 0.12; };
+// What the planner asks of the model. `slender_ratio` is how many section widths a part may stand over its highest
+// anchor, and `micro_merge_mm` how soon an island no wider than two support lines has to merge to print without a tip.
+struct NeedParams { double slender_ratio = 3., micro_merge_mm = 0.12; };
+
+// The object's mesh in the frame its slices are in, XY centred and the bed on z 0, with the AABB tree the builder aims
+// its heads by. `place_tips` builds it once: the planner reads the faces a head meets off it and `draw` builds the tree
+// on it. `aabb` points into `mesh`, so the pair never moves.
+struct ObjectMesh
+{
+    explicit ObjectMesh(const PrintObject &object);
+    ObjectMesh(const ObjectMesh &)            = delete;
+    ObjectMesh &operator=(const ObjectMesh &) = delete;
+    TriangleMesh     mesh;
+    sla::IndexedMesh aabb;
+};
 
 // One object layer on the plan's lattice, within the layer's own bounding box: per cell 0 where there is no material,
 // else 1 + the index of the piece holding it among its slab's pieces.
@@ -64,11 +75,16 @@ struct PlanInput
     std::vector<ExPolygons>            wall_band;          // one per object layer: its material grown by the xy distance, as the seam clips it
     std::vector<double>                self_support_mm;    // one per object layer: the step the layer below carries
     double toolpath_width_mm = 0., xy_distance_mm = 0., neck_depth_mm = 0.;
+    double bridge_mm         = 0.;        // the longest line an underside bridges between held ends, 0 for none
+    const ObjectMesh *mesh   = nullptr;   // the faces a head meets; with none the planner reads no face
+    double z_offset_mm       = 0.;        // print z minus mesh z, the object's lift
 };
-// `threshold_rad` is the overhang detector's threshold angle and `blockers` the support blockers per object layer, as
-// TreeSupport gathers them.
+// `bridge_mm` is `max_bridge_length`, `threshold_rad` the overhang detector's threshold angle and `blockers` the support
+// blockers per object layer, as TreeSupport gathers them. `mesh` is the object's, which the plan reads through the
+// lifetime of the input.
 PlanInput prepare_plan(const PrintObject &object, double toolpath_width_mm, double xy_distance_mm, double neck_depth_mm,
-                       double threshold_rad, const std::vector<Polygons> &blockers);
+                       double bridge_mm, double threshold_rad, const std::vector<Polygons> &blockers,
+                       const ObjectMesh *mesh = nullptr);
 
 // `answered_mm2` is, for an Underside tip, the underside past one and a half reaches its head answered on its layer,
 // which hangs again when the head does not route.

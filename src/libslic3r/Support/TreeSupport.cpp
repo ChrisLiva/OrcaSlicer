@@ -2110,7 +2110,7 @@ void TreeSupport::generate()
         });
 
         m_object->print()->set_status(60, _u8L("Generating support"));
-        const ScaffoldSupport::Output out = ScaffoldSupport::draw(*m_object, scaffold_tips, plan, clips, m_risk, params, throw_on_cancel);
+        const ScaffoldSupport::Output out = ScaffoldSupport::draw(*m_object, scaffold_tips, plan, clips, params, throw_on_cancel);
         profiler.stage_durations[STAGE_ISLAND_JOINS]   = out.stage_ms.island_joins;
         profiler.stage_durations[STAGE_SCAFFOLD_BUILD] = out.stage_ms.build;
         profiler.stage_durations[STAGE_SCAFFOLD_SLICE] = out.stage_ms.slice;

@@ -1,7 +1,7 @@
 #pragma once
 #include <limits>
+#include <memory>
 #include "TreeSupport.hpp"          // SupportNode, LayerHeightData
-#include "ModelSupportRisk.hpp"
 #include "../ScaffoldPoints.hpp"
 #include "ScaffoldPlan.hpp"
 namespace Slic3r::ScaffoldSupport {
@@ -41,9 +41,10 @@ struct Output { std::vector<LayerAreas> layers;   // one entry per planned layer
 // The tips `draw` builds heads for, the plan they came from and how long it took, with the islands the placement leaves
 // unheld: their count, and where each prints with no tip holding it, x and y in mm and print z. A baked list has no
 // plan: its unheld islands are the ones the hold floor would have seeded a tip under, and it also names the `source`
-// of each point the wall skip took out.
+// of each point the wall skip took out. `mesh` is the object mesh the plan read, which `draw` builds on; a baked list
+// leaves it to `draw`.
 struct Tips { std::vector<TipSite> sites; Plan plan; size_t islands_under_held = 0; uint32_t island_joins_ms = 0;
-              std::vector<int> wall_skipped; std::vector<Vec3d> bare_islands; };
+              std::vector<int> wall_skipped; std::vector<Vec3d> bare_islands; std::shared_ptr<const ObjectMesh> mesh; };
 // What routing left of a plan. `tips` is each planned tip's result, read off a drawn site within `sla::D_SP` of it in
 // 3-D, the alias merge's metric, and `Wall` where none stands, the wall skip having taken it out. `islands` indexes the
 // islands the plan held whose holders all failed, and `underside_mm2` is what the failed Underside heads answered.
@@ -67,6 +68,5 @@ Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const P
 bool baked_pose_valid(const Matrix3d &pose, const Matrix3d &linear);
 // clips: the clip the seam runs on each planned layer, which the neck check applies the same way.
 Output draw(const PrintObject &object, const Tips &chosen, const std::vector<LayerHeightData> &layer_heights,
-            const std::vector<LayerClip> &clips, const ModelSupportRisk::Field &risk, const Params &params,
-            const std::function<void()> &throw_on_cancel);
+            const std::vector<LayerClip> &clips, const Params &params, const std::function<void()> &throw_on_cancel);
 }
