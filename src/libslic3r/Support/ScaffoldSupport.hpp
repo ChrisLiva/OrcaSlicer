@@ -52,10 +52,10 @@ struct PlanOutcome { std::vector<ScaffoldTipResult> tips; std::vector<size_t> is
 // `sites` and `results` are the tips `draw` built and what became of each. An island counts when it has holders, is
 // not rooted, and no holder reads `Routed`; one without holders is the plan's own count.
 PlanOutcome unheld_after_routing(const Plan &plan, const std::vector<TipSite> &sites, const std::vector<ScaffoldTipResult> &results);
-// The need planner, then the wall skip and the alias merge. contacts: TreeSupport's contact_nodes before
-// plan_layer_heights re-distributes them, of which the planner keeps the ones an enforcer asked for. threshold_rad and
-// blockers: the overhang detector's threshold and the support blockers per object layer. Reads no planned layer, so
-// TreeSupport plans a layer topped at every tip's z.
+// The need planner, then the wall skip and the alias merge, each holder of an island the plan leaves unrooted marked
+// `holds_island`. contacts: TreeSupport's contact_nodes before plan_layer_heights re-distributes them, of which the
+// planner keeps the ones an enforcer asked for. threshold_rad and blockers: the overhang detector's threshold and the
+// support blockers per object layer. Reads no planned layer, so TreeSupport plans a layer topped at every tip's z.
 Tips place_tips(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts, const Params &params,
                 double threshold_rad, const std::vector<Polygons> &blockers);
 // A tip as a list point in ModelObject::raw_mesh()'s frame: a grade over three toolpath widths reads Heavy.
@@ -63,7 +63,7 @@ ScaffoldPoint point_of(const PrintObject &object, const Params &params, const Ti
 // A baked list in the builder's frame: each point mapped through trafo_centered(), z + params.z_offset_mm, snapped
 // to the bottom of the object layer holding it; each point not enforced leaning its neck as the planner would there,
 // read off the plan input `threshold_rad` and `blockers` build as for `place_tips`; wall skip (enforced exempt), island
-// count seeding nothing, alias merge.
+// count seeding nothing, each point under a mid-air island marked `holds_island`, alias merge.
 Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const Params &params, double threshold_rad,
                 const std::vector<Polygons> &blockers);
 // Whether a list baked under the linear part `pose` still holds under `linear`: the change between them keeps lengths

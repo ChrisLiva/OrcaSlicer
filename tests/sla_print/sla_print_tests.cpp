@@ -85,6 +85,91 @@ indexed_triangle_set raised_slab_mesh(bool wall)
 
 const sla::SupportPoints RAISED_SLAB_POINTS = {sla::SupportPoint(Vec3f(5.f, 5.f, 10.f), 0.2f)};
 
+// A 1x10 fin at x -0.5..0.5, y -5..5, z 4.2..8 over two 9.2x20x1.5 blocks on
+// the ground at x -10..-0.8 and 0.8..10, y -10..10, leaving a 1.6 mm slot
+// under the fin. SLOT_FIN_POINTS puts one point under the fin at (0, 0, 4.2):
+// a 0.6 mm back radius head's junction hangs 1.2 mm over the blocks, whose
+// tops its 1.1 mm scan ring hits, while a 0.22 mm head's ring, 0.72 mm at the
+// full 0.5 mm safety distance, drops down the slot to the ground.
+indexed_triangle_set slot_fin_mesh()
+{
+    auto box = [](double x, double y, double z, float dx, float dy, float dz) {
+        TriangleMesh m = make_cube(x, y, z);
+        m.translate(dx, dy, dz);
+        return m;
+    };
+
+    indexed_triangle_set its = box(9.2, 20., 1.5, -10.f, -10.f, 0.f).its;
+    its_merge(its, box(9.2, 20., 1.5, 0.8f, -10.f, 0.f).its);
+    its_merge(its, box(1., 10., 3.8, -0.5f, -5.f, 4.2f).its);
+
+    return its;
+}
+
+sla::SupportTreeConfig slot_fin_config(bool retry_thin_head)
+{
+    sla::SupportTreeConfig cfg;
+    cfg.object_elevation_mm     = 0.;
+    cfg.head_back_radius_mm     = 0.6;
+    cfg.head_fallback_radius_mm = 0.22;
+    cfg.allow_model_anchors     = false;
+    cfg.retry_thin_head         = retry_thin_head;
+
+    return cfg;
+}
+
+const sla::SupportPoints SLOT_FIN_POINTS = {sla::SupportPoint(Vec3f(0.f, 0.f, 4.2f), 0.2f)};
+
+// A 22x40x3 shelf at x -20..2, y -20..20, z 0..3 and a 6x6x1 lip at
+// x -5..1, y -3..3, z 7.4..8.4. A point under the lip at (0, 0, 7.4) takes a
+// head straight down whose junction hangs 3 mm over the shelf, 2 mm in from
+// its +x edge: every walk from that junction meets the shelf before its scan
+// ring clears the edge, while a head leaning 45 degrees toward +x starts its
+// walk a mm higher and further out and clears it.
+indexed_triangle_set shelf_lip_mesh()
+{
+    auto box = [](double x, double y, double z, float dx, float dy, float dz) {
+        TriangleMesh m = make_cube(x, y, z);
+        m.translate(dx, dy, dz);
+        return m;
+    };
+
+    indexed_triangle_set its = box(22., 40., 3., -20.f, -20.f, 0.f).its;
+    its_merge(its, box(6., 6., 1., -5.f, -3.f, 7.4f).its);
+
+    return its;
+}
+
+// A 30x3x1 ledge at x 0..30, y 0..3, z 10..11 over a 40x7.5x4.5 block at
+// x -5..35, y -5..2.5, z 0..4.5, with a 40x6x5.5 wall on the block at
+// x -5..35, y -5..1, z 4.5..10 up to the ledge. `comb_points` puts 30 points
+// 1 mm apart under the ledge at y 1.5, 0.5 mm off the wall, so each head along
+// the normal hits the wall and the filter searches a clear pose. Every head's
+// scan meets the block, and each walks out over the block's +y edge or bridges
+// to a pillar an earlier walk stood, three bridges to a pillar at most.
+indexed_triangle_set comb_mesh()
+{
+    auto box = [](double x, double y, double z, float dx, float dy, float dz) {
+        TriangleMesh m = make_cube(x, y, z);
+        m.translate(dx, dy, dz);
+        return m;
+    };
+
+    indexed_triangle_set its = box(30., 3., 1., 0.f, 0.f, 10.f).its;
+    its_merge(its, box(40., 7.5, 4.5, -5.f, -5.f, 0.f).its);
+    its_merge(its, box(40., 6., 5.5, -5.f, -5.f, 4.5f).its);
+
+    return its;
+}
+
+sla::SupportPoints comb_points()
+{
+    sla::SupportPoints pts;
+    for (int i = 0; i < 30; ++i)
+        pts.emplace_back(Vec3f(0.5f + float(i), 1.5f, 10.f), 0.2f);
+    return pts;
+}
+
 // A unit axis leaning `deg` degrees from straight down toward +x.
 Vec3f leaning_axis(double deg)
 {
@@ -368,6 +453,106 @@ TEST_CASE("A colliding axis falls back to the head search", "[SLASupportGenerati
     INFO("head dir (" << head->dir.x() << ", " << head->dir.y() << ", " << head->dir.z() << "), back radius " << head->r_back_mm);
     CHECK((head->dir - axis.cast<double>().normalized()).norm() > 1e-3);
     CHECK(head->junction_point().x() + head->r_back_mm <= 5.5);
+}
+
+TEST_CASE("A head whose 0.6 junction is blocked retries thin and reaches the pad", "[SLASupportGeneration]") {
+    // The 0.6 head fits under the fin, but its junction's scan ring meets the blocks on both sides of the slot and
+    // every walk from it meets their tops. Retried thin along the same direction, its junction drops a 0.22 pillar
+    // down the slot to the ground.
+    indexed_triangle_set mesh = slot_fin_mesh();
+    const auto build = [&mesh](bool retry) {
+        sla::SupportTreeBuilder builder;
+        sla::SupportableMesh    sm{mesh, SLOT_FIN_POINTS, slot_fin_config(retry)};
+        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(builder, sm));
+        REQUIRE(builder.heads().size() == 1);
+        return builder;
+    };
+
+    const sla::SupportTreeBuilder plain = build(false);
+    CHECK_FALSE(plain.heads().front().is_valid());
+
+    const sla::SupportTreeBuilder thin = build(true);
+    const sla::Head &head = thin.heads().front();
+    REQUIRE(head.is_valid());
+    CHECK_THAT(head.r_back_mm, Catch::Matchers::WithinAbs(0.22, 1e-9));
+    CHECK((head.dir - Vec3d(0., 0., -1.)).norm() < 1e-6);
+    REQUIRE(head.pillar_id >= 0);
+    const sla::Pillar &pillar = thin.pillars()[size_t(head.pillar_id)];
+    CHECK_THAT(pillar.endpoint().z(), Catch::Matchers::WithinAbs(thin.ground_level, 1e-6));
+}
+
+TEST_CASE("Routing the same points in order builds the same tree every run", "[SLASupportGeneration]") {
+    // Every head of the comb searches a pose clear of the wall and faces the block, and each walks out past its edge
+    // or bridges to a pillar another head stood, three bridges to a pillar at most, so the tree depends on the pose
+    // each search finds and on which head routes first. Routed at once, three runs built 10, 14 and 15 pillars; twenty
+    // runs in order build one tree.
+    indexed_triangle_set mesh = comb_mesh();
+    sla::SupportTreeConfig cfg;
+    cfg.allow_model_anchors = false;
+    cfg.route_in_order      = true;
+
+    struct Tree {
+        std::vector<std::array<double, 4>> pillars;   // end x, y, z and height
+        std::vector<std::array<double, 6>> bridges;   // start and end
+        std::vector<long>                  valid;     // the heads kept
+    };
+    const auto build = [&] {
+        sla::SupportTreeBuilder builder;
+        sla::SupportableMesh    sm{mesh, comb_points(), cfg};
+        sla::SupportTreeBuildsteps::execute(builder, sm);
+        Tree tree;
+        for (const sla::Pillar &p : builder.pillars())
+            tree.pillars.push_back({p.endpt.x(), p.endpt.y(), p.endpt.z(), p.height});
+        for (const sla::Bridge &b : builder.bridges())
+            tree.bridges.push_back({b.startp.x(), b.startp.y(), b.startp.z(), b.endp.x(), b.endp.y(), b.endp.z()});
+        for (const sla::Head &h : builder.heads())
+            if (h.is_valid())
+                tree.valid.push_back(h.id);
+        return tree;
+    };
+
+    const Tree first = build();
+    INFO(first.pillars.size() << " pillars, " << first.bridges.size() << " bridges, " << first.valid.size() << " heads kept");
+    REQUIRE(first.valid.size() >= 20);
+    REQUIRE(first.pillars.size() < first.valid.size());
+    for (int run = 1; run < 20; ++run) {
+        const Tree again = build();
+        INFO("run " << run);
+        CHECK(again.pillars == first.pillars);
+        CHECK(again.bridges == first.bridges);
+        CHECK(again.valid == first.valid);
+    }
+}
+
+TEST_CASE("An island head with no straight route routes along a retry axis", "[SLASupportGeneration]") {
+    // Under the lip the head points straight down and every walk from its junction meets the shelf. A point that
+    // starts an island retries its head along fixed axes, and leaning 45 degrees toward the shelf's edge its walk
+    // clears the edge and a pillar stands on the ground; any other point is dropped.
+    indexed_triangle_set mesh = shelf_lip_mesh();
+    sla::SupportTreeConfig cfg;
+    cfg.allow_model_anchors = false;
+    cfg.island_axis_retry   = true;
+    const auto build = [&](bool island) {
+        sla::SupportTreeBuilder builder;
+        sla::SupportableMesh    sm{mesh, {sla::SupportPoint(Vec3f(0.f, 0.f, 7.4f), 0.2f, island)}, cfg};
+        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(builder, sm));
+        REQUIRE(builder.heads().size() == 1);
+        return builder;
+    };
+
+    const sla::SupportTreeBuilder plain = build(false);
+    CHECK_FALSE(plain.heads().front().is_valid());
+
+    const sla::SupportTreeBuilder retried = build(true);
+    const sla::Head &head = retried.heads().front();
+    REQUIRE(head.is_valid());
+    const auto [polar, azimuth] = sla::dir_to_spheric(head.dir);
+    INFO("head dir (" << head.dir.x() << ", " << head.dir.y() << ", " << head.dir.z() << ")");
+    CHECK(polar <= M_PI - M_PI / 12. + 1e-9);
+    CHECK(head.bridge_id >= 0);
+    CHECK(std::any_of(retried.pillars().begin(), retried.pillars().end(), [&](const sla::Pillar &p) {
+        return std::abs(p.endpoint().z() - retried.ground_level) < 1e-6;
+    }));
 }
 
 TEST_CASE("A stop condition halts the builder between steps", "[SLASupportGeneration]") {

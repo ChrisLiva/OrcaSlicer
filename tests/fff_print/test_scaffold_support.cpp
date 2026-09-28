@@ -486,6 +486,26 @@ TriangleMesh thin_sheet_fixture()
     return column;
 }
 
+// A 12 x 20 x 3 mm shelf at x -10..2, y -10..10, a 2 x 6 x 7 mm column on it at x -10..-8, y -3..3, z 3..10, a bar
+// off the column's top at x -10..1, z 9..10, and a 2 x 6 x 1.6 mm lip hanging from the bar at x -1..1, y -3..3,
+// z 7.4..9: the lip starts in mid-air and joins the column through the bar. A head straight down from (0, 0, 7.4)
+// hangs its junction 2.4 mm over the shelf, 2 mm in from its +x edge, and every walk from there meets the shelf before
+// its scan ring clears the edge; leaning 45 degrees toward +x its walk starts higher and further out and clears it.
+TriangleMesh island_lip_fixture()
+{
+    TriangleMesh shelf = make_cube(12., 20., 3.);
+    shelf.translate(-10.f, -10.f, 0.f);
+    TriangleMesh column = make_cube(2., 6., 7.);
+    column.translate(-10.f, -3.f, 3.f);
+    TriangleMesh bar = make_cube(11., 6., 1.);
+    bar.translate(-10.f, -3.f, 9.f);
+    TriangleMesh lip = make_cube(2., 6., 1.6);
+    lip.translate(-1.f, -3.f, 7.4f);
+    for (const TriangleMesh *part : { &column, &bar, &lip })
+        shelf.merge(*part);
+    return shelf;
+}
+
 // A JSON config written to the OS temp directory and removed when the guard leaves scope.
 struct ScratchJson
 {
@@ -532,6 +552,56 @@ bool warns(const PrintObject &po, const std::string &text)
     return std::any_of(warnings.begin(), warnings.end(),
                        [&text](const PrintStateBase::Warning &w) { return w.message.find(text) != std::string::npos; });
 }
+
+// Whether any piece of `area` holds `p`.
+bool holds(const ExPolygons &area, const Point &p)
+{
+    return std::any_of(area.begin(), area.end(), [&p](const ExPolygon &expoly) { return expoly.contains(p); });
+}
+
+// A tip at `at`, fixture xy offset by the object's lowest corner above the first layer, which the elephant foot
+// compensation may shrink: on the bottom of the first layer from `from_z` up holding it, filed one layer under that
+// layer, as a contact under an overhang is.
+ScaffoldSupport::TipSite site_under(const PrintObject &object, const Vec2d &at, double from_z = 0.)
+{
+    const Point p    = get_extents(object.layers()[1]->lslices).min + Point::new_scale(at.x(), at.y());
+    size_t      over = 0;
+    while (over < object.layer_count() && (object.layers()[over]->bottom_z() < from_z - EPSILON || ! holds(object.layers()[over]->lslices, p)))
+        ++ over;
+    REQUIRE(over < object.layer_count());
+    return { p, object.layers()[over]->bottom_z(), int(over) - 1 };
+}
+
+// `draw` on the object's own layers as the planned layers, each clipped by its slices and those grown by the 0.35 mm
+// xy distance, with a 0.42 mm line, 1.2 mm pillars and 10 mm bridges.
+struct DrawOnLayers
+{
+    std::vector<LayerHeightData>            plan;
+    std::vector<ScaffoldSupport::LayerClip> clips;
+    ScaffoldSupport::Params                 params;
+
+    explicit DrawOnLayers(const PrintObject &object)
+    {
+        for (const Layer *layer : object.layers()) {
+            plan.emplace_back(layer->print_z, layer->height, size_t(layer->id()));
+            clips.push_back({ layer->lslices, offset_ex(layer->lslices, scale_(0.35)) });
+        }
+        params.toolpath_width_mm    = 0.42;
+        params.pillar_diameter_mm   = 1.2;
+        params.xy_distance_mm       = 0.35;
+        params.bridge_length_mm     = 10.;
+        params.brace_slenderness    = 10.;
+        params.max_bridge_length_mm = 10.;
+        params.brace_diameter_mm    = 0.84;
+        params.interface_width_mm   = 0.42;
+        params.base_cover           = [](const ExPolygons &base, double) { return to_polygons(base); };
+        params.pad_thickness_mm     = std::find_if(plan.begin(), plan.end(), [](const LayerHeightData &l) { return l.print_z >= 0.6 - EPSILON; })->print_z;
+    }
+    ScaffoldSupport::Output operator()(const PrintObject &object, const ScaffoldSupport::Tips &tips) const
+    {
+        return ScaffoldSupport::draw(object, tips, plan, clips, params, [] {});
+    }
+};
 
 } // namespace
 
@@ -1125,54 +1195,94 @@ TEST_CASE("Draw aims each head along its tip's axis", "[ScaffoldSupport]")
     REQUIRE(print.objects().size() == 1);
     const PrintObject &object = *print.objects().front();
     REQUIRE(object.layer_count() > 1);
-    // The column's corner, above the first layer, which the elephant foot compensation may shrink.
-    const Point origin = get_extents(object.layers()[1]->lslices).min;
-    const Point at     = origin + Point::new_scale(9., 5.);
-    const auto  holds  = [](const ExPolygons &area, const Point &p) {
-        return std::any_of(area.begin(), area.end(), [&p](const ExPolygon &expoly) { return expoly.contains(p); });
-    };
-    // The tip stands on the bottom of the first layer holding the slab over it, filed one layer under that layer.
-    size_t over = 0;
-    while (over < object.layer_count() && ! holds(object.layers()[over]->lslices, at))
-        ++ over;
-    REQUIRE(over < object.layer_count());
     ScaffoldSupport::Tips    tips;
-    ScaffoldSupport::TipSite site { at, object.layers()[over]->bottom_z(), int(over) - 1 };
+    ScaffoldSupport::TipSite site = site_under(object, Vec2d(9., 5.));
     site.axis = Vec3f(0.f, float(std::sin(M_PI / 4.)), float(-std::cos(M_PI / 4.)));
     tips.sites.push_back(site);
 
-    std::vector<LayerHeightData>            plan;
-    std::vector<ScaffoldSupport::LayerClip> clips;
-    for (const Layer *layer : object.layers()) {
-        plan.emplace_back(layer->print_z, layer->height, size_t(layer->id()));
-        clips.push_back({ layer->lslices, offset_ex(layer->lslices, scale_(0.35)) });
-    }
-    ScaffoldSupport::Params params;
-    params.toolpath_width_mm    = 0.42;
-    params.pillar_diameter_mm   = 1.2;
-    params.xy_distance_mm       = 0.35;
-    params.bridge_length_mm     = 10.;
-    params.brace_slenderness    = 10.;
-    params.max_bridge_length_mm = 10.;
-    params.brace_diameter_mm    = 0.84;
-    params.interface_width_mm   = 0.42;
-    params.base_cover           = [](const ExPolygons &base, double) { return to_polygons(base); };
-    params.pad_thickness_mm     = std::find_if(plan.begin(), plan.end(), [](const LayerHeightData &l) { return l.print_z >= 0.6 - EPSILON; })->print_z;
-    const ScaffoldSupport::Output out = ScaffoldSupport::draw(object, tips, plan, clips, params, [] {});
+    const DrawOnLayers            draw(object);
+    const ScaffoldSupport::Output out = draw(object, tips);
     REQUIRE(out.results.size() == 1);
     CHECK(out.results.front() == ScaffoldTipResult::Routed);
 
     const double z     = site.print_z - 1.2;
-    const auto   layer = std::find_if(plan.begin(), plan.end(), [z](const LayerHeightData &l) { return l.print_z - l.height <= z && z < l.print_z; });
-    REQUIRE(layer != plan.end());
-    const ScaffoldSupport::LayerAreas &areas = out.layers[size_t(layer - plan.begin())];
+    const auto   layer = std::find_if(draw.plan.begin(), draw.plan.end(), [z](const LayerHeightData &l) { return l.print_z - l.height <= z && z < l.print_z; });
+    REQUIRE(layer != draw.plan.end());
+    const ScaffoldSupport::LayerAreas &areas = out.layers[size_t(layer - draw.plan.begin())];
     ExPolygons                         head  = areas.base;
     append(head, areas.interface_);
     append(head, areas.exempt_heads);
     head = union_ex(head);
     INFO("head slice at z " << layer->print_z << ": " << head.size() << " pieces");
-    CHECK(holds(head, at + Point::new_scale(0., 1.2)));
-    CHECK_FALSE(holds(head, at));
+    CHECK(holds(head, site.position + Point::new_scale(0., 1.2)));
+    CHECK_FALSE(holds(head, site.position));
+}
+
+TEST_CASE("A tip holding an island leans its head out where no other route reaches the pad", "[ScaffoldSupport]")
+{
+    // Under the lip every route from a head straight down meets the shelf, and so does the thin head's. The tip holds
+    // the lip, an island, so the builder retries its head along leaning axes, and one reaches the pad past the shelf's
+    // edge. A tip holding no island is dropped there. A baked point at the tip stands under the lip's island, so its
+    // list marks it and it routes as the tip does. Two baked points 0.08 mm apart across the lip's -x edge are aliases:
+    // the merge keeps the one outside the lip, which holds the island for the point merged into it. The need planner
+    // holds the lip with a tip of its own, which `place_tips` marks, so an auto slice routes it and leaves no island
+    // under-held.
+    Print print;
+    Model model;
+    init_print({ island_lip_fixture() }, print, model, fixture_config({ { "enable_support", "0" }, { "layer_change_gcode", "G92 E0" } }));
+    print.process();
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    REQUIRE(object.layer_count() > 1);
+    const DrawOnLayers draw(object);
+    for (const bool island : { false, true }) {
+        ScaffoldSupport::Tips tips;
+        tips.sites.push_back(site_under(object, Vec2d(10., 10.), 5.));
+        tips.sites.front().holds_island = island;
+        const ScaffoldSupport::Output out = draw(object, tips);
+        INFO((island ? "holding an island" : "holding none"));
+        REQUIRE(out.results.size() == 1);
+        CHECK(out.results.front() == (island ? ScaffoldTipResult::Routed : ScaffoldTipResult::Unrouted));
+    }
+
+    const ScaffoldSupport::TipSite site  = site_under(object, Vec2d(10., 10.), 5.);
+    const ScaffoldPoints           point = { ScaffoldSupport::point_of(object, draw.params, site, 2. * draw.params.toolpath_width_mm) };
+    const ScaffoldSupport::Tips    baked = ScaffoldSupport::baked_tips(object, point, draw.params, M_PI / 6., {});
+    REQUIRE(baked.sites.size() == 1);
+    CHECK(baked.sites.front().holds_island);
+    const ScaffoldSupport::Output out = draw(object, baked);
+    REQUIRE(out.results.size() == 1);
+    CHECK(out.results.front() == ScaffoldTipResult::Routed);
+
+    const ScaffoldSupport::TipSite inside  = site_under(object, Vec2d(9.05, 10.), 5.);
+    ScaffoldSupport::TipSite       outside = inside;
+    outside.position -= Point::new_scale(0.08, 0.);
+    const ScaffoldPoints        pair   = { ScaffoldSupport::point_of(object, draw.params, outside, 2. * draw.params.toolpath_width_mm),
+                                           ScaffoldSupport::point_of(object, draw.params, inside, 2. * draw.params.toolpath_width_mm) };
+    const ScaffoldSupport::Tips merged = ScaffoldSupport::baked_tips(object, pair, draw.params, M_PI / 6., {});
+    REQUIRE(merged.sites.size() == 1);
+    CHECK((unscale(merged.sites.front().position) - unscale(outside.position)).norm() < 0.01);
+    CHECK(merged.sites.front().holds_island);
+
+    const ScaffoldSupport::Tips placed = ScaffoldSupport::place_tips(object, {}, draw.params, M_PI / 6., {});
+    const auto lip = std::find_if(placed.plan.islands.begin(), placed.plan.islands.end(), [](const ScaffoldSupport::Island &island) {
+        return ! island.rooted && ! island.holders.empty();
+    });
+    REQUIRE(lip != placed.plan.islands.end());
+    const ScaffoldSupport::Output planned = draw(object, placed);
+    REQUIRE(planned.results.size() == placed.sites.size());
+    for (const size_t holder : lip->holders) {
+        const ScaffoldSupport::TipSite &at   = placed.plan.tips[holder].site;
+        const auto                      kept = std::find_if(placed.sites.begin(), placed.sites.end(), [&at](const ScaffoldSupport::TipSite &t) {
+            return t.position == at.position && std::abs(t.print_z - at.print_z) < EPSILON;
+        });
+        REQUIRE(kept != placed.sites.end());
+        const Vec2d xy = unscale(kept->position);
+        INFO("the lip's holder at (" << xy.x() << ", " << xy.y() << ", " << kept->print_z << ") reads "
+                                     << Catch::StringMaker<ScaffoldTipResult>::convert(planned.results[size_t(kept - placed.sites.begin())]));
+        CHECK(kept->holds_island);
+    }
+    CHECK(ScaffoldSupport::unheld_after_routing(placed.plan, placed.sites, planned.results).islands.empty());
 }
 
 TEST_CASE("A head whose neck bottoms in the xy band is dropped while one whose neck clears it keeps its head and no ring floats",

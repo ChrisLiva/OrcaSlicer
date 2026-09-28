@@ -88,6 +88,25 @@ struct SupportTreeConfig
     // to the model body as a last resort.
     bool allow_model_anchors = true;
 
+    // Whether the heads facing the model route one at a time in the order
+    // classify listed them. Routed at once, each takes whichever pillars and
+    // bridge slots the others have claimed by then, so the tree follows
+    // thread timing.
+    bool route_in_order = false;
+
+    // Whether a head facing the model that reaches neither a pillar nor the
+    // ground retries at the fallback radius along its direction, dropping a
+    // pillar straight from the thinner head's junction where the scan down
+    // keeps the full safety distance from the model.
+    bool retry_thin_head = false;
+
+    // Whether a head at a point starting an island (`is_new_island`) that
+    // every other route failed retries along fixed axes 15, 30 and 45 degrees
+    // from down, at 24 azimuths each, least lean first: the first whose
+    // pinhead and whose walk along it keep the full safety distance from the
+    // model and reach the ground.
+    bool island_axis_retry = false;
+
     // The unbraced height-to-diameter ratio above which interconnect_pillars
     // braces a pillar. 0 keeps the cascade linking.
     double pillar_link_slenderness = 0.;

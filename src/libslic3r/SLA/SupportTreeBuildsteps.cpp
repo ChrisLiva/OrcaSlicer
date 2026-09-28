@@ -3,6 +3,7 @@
 #include <libslic3r/SLA/SpatIndex.hpp>
 #include <libslic3r/Optimize/NLoptOptimizer.hpp>
 #include <boost/log/trivial.hpp>
+#include <tbb/task_arena.h>
 
 namespace Slic3r {
 namespace sla {
@@ -758,9 +759,15 @@ void SupportTreeBuildsteps::filter()
         }
     };
 
+    // Each point's head search runs isolated: while it waits on its own ray
+    // casts its thread takes no other point's search, which would reseed
+    // NLopt's thread-local generator mid-search and make the pose it finds
+    // depend on thread timing.
     ccr::for_each(size_t(0), filtered_indices.size(),
                   [this, &filterfn, &filtered_indices] (size_t i) {
-                      filterfn(filtered_indices[i], i, m_cfg.head_back_radius_mm);
+                      tbb::this_task_arena::isolate([&] {
+                          filterfn(filtered_indices[i], i, m_cfg.head_back_radius_mm);
+                      });
                   });
 
     for (size_t i = 0; i < heads.size(); ++i)
@@ -899,15 +906,15 @@ void SupportTreeBuildsteps::routing_to_ground()
     }
 }
 
-bool SupportTreeBuildsteps::connect_to_ground(Head &head, const Vec3d &dir)
+bool SupportTreeBuildsteps::connect_to_ground(Head &head, const Vec3d &dir, double safety_d)
 {
     auto hjp = head.junction_point();
     double r = head.r_back_mm;
-    double t = bridge_mesh_distance(hjp, dir, head.r_back_mm);
+    double t = bridge_mesh_distance(hjp, dir, head.r_back_mm, safety_d);
     double d = 0, tdown = 0;
     t = std::min(t, m_cfg.max_bridge_length_mm * r / m_cfg.head_back_radius_mm);
 
-    while (d < t && !std::isinf(tdown = bridge_mesh_distance(hjp + d * dir, DOWN, r)))
+    while (d < t && !std::isinf(tdown = bridge_mesh_distance(hjp + d * dir, DOWN, r, safety_d)))
         d += r;
 
     if(!std::isinf(tdown)) return false;
@@ -1041,14 +1048,78 @@ bool SupportTreeBuildsteps::search_pillar_and_connect(const Head &source)
     return nearest_id >= 0;
 }
 
+bool SupportTreeBuildsteps::connect_thin_to_ground(Head &head)
+{
+    if (head.r_back_mm <= m_cfg.head_fallback_radius_mm) return false;
+
+    const Head before = head;
+    head.r_back_mm = m_cfg.head_fallback_radius_mm;
+    head.width_mm  = 0.;
+    const Vec3d hjp = head.junction_point();
+    if (std::isinf(bridge_mesh_distance(hjp, DOWN, head.r_back_mm, m_cfg.safety_distance_mm)) &&
+        create_ground_pillar(hjp, head.dir, head.r_back_mm, head.id))
+        return true;
+
+    head = before;
+    return false;
+}
+
+bool SupportTreeBuildsteps::connect_along_axes(Head &head)
+{
+    static const double tilts[] = {PI / 12., PI / 6., PI / 4.};
+    const size_t azimuths = 24;
+
+    // Each axis takes the full head, as the filter tries it first, and then
+    // the head's own size where the filter fell back to a thinner one.
+    struct Size { double r_back, width; };
+    std::vector<Size> sizes = {{m_cfg.head_back_radius_mm, m_cfg.head_width_mm}};
+    if (head.r_back_mm < m_cfg.head_back_radius_mm)
+        sizes.push_back({head.r_back_mm, head.width_mm});
+
+    const Head   before  = head;
+    const double azimuth = dir_to_spheric(head.dir).second;
+    size_t       tried = 0, cleared = 0;
+    for (double tilt : tilts) {
+        if (tilt > m_cfg.bridge_slope + EPSILON) break;
+        // From the head's own azimuth outwards, one side then the other.
+        for (size_t k = 0; k < azimuths; ++k) {
+            const double side = k % 2 == 0 ? 1. : -1.;
+            const double azm  = azimuth + side * double((k + 1) / 2) * 2. * PI / double(azimuths);
+            const Vec3d  axis = spheric_to_dir(PI - tilt, azm).normalized();
+            bool         clears = false;
+            ++tried;
+            for (const Size &size : sizes) {
+                // The pinhead's length the filter tests it clear over.
+                const double w = size.width + 2 * size.r_back + 2 * m_cfg.head_front_radius_mm -
+                                 m_cfg.head_penetration_mm;
+                const auto hit = pinhead_mesh_intersect(head.pos, axis, head.r_pin_mm, size.r_back, w,
+                                                        m_cfg.safety_distance_mm);
+                if (hit.distance() <= w || head.pos.z() + w * axis.z() < m_builder.ground_level)
+                    continue;
+                head.dir       = axis;
+                head.r_back_mm = size.r_back;
+                head.width_mm  = size.width;
+                clears         = true;
+                if (connect_to_ground(head, axis, m_cfg.safety_distance_mm))
+                    return true;
+            }
+            cleared += clears;
+        }
+    }
+
+    BOOST_LOG_TRIVIAL(debug) << "Island support point " << head.id << " clears the model on " << cleared
+                             << " of " << tried << " retry axes and routes along none";
+    head = before;
+    return false;
+}
+
 void SupportTreeBuildsteps::routing_to_model()
 {
     // We need to check if there is an easy way out to the bed surface.
     // If it can be routed there with a bridge shorter than
     // min_bridge_distance.
 
-    ccr::for_each(m_iheads_onmodel.begin(), m_iheads_onmodel.end(),
-                  [this] (const unsigned idx) {
+    auto route = [this] (const unsigned idx) {
         m_thr();
 
         auto& head = m_builder.head(idx);
@@ -1060,6 +1131,11 @@ void SupportTreeBuildsteps::routing_to_model()
         // a route to the ground.
         if (connect_to_ground(head)) { return; }
 
+        if (m_cfg.retry_thin_head && connect_thin_to_ground(head)) { return; }
+
+        if (m_cfg.island_axis_retry && m_support_pts[idx].is_new_island &&
+            connect_along_axes(head)) { return; }
+
         // No route to the ground, so connect to the model body as a last resort
         if (m_cfg.allow_model_anchors && connect_to_model_body(head)) { return; }
 
@@ -1068,7 +1144,17 @@ void SupportTreeBuildsteps::routing_to_model()
                 << "Failed to route model facing support point. ID: " << idx;
 
         head.invalidate();
-    });
+    };
+
+    // Each route runs isolated, as each head search in filter() does, since
+    // connect_to_ground reseeds NLopt's generator too.
+    const auto isolated = [&route] (const unsigned idx) {
+        tbb::this_task_arena::isolate([&] { route(idx); });
+    };
+    if (m_cfg.route_in_order)
+        ccr_seq::for_each(m_iheads_onmodel.begin(), m_iheads_onmodel.end(), isolated);
+    else
+        ccr::for_each(m_iheads_onmodel.begin(), m_iheads_onmodel.end(), isolated);
 }
 
 void SupportTreeBuildsteps::interconnect_pillars()

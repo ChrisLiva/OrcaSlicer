@@ -40,7 +40,9 @@ uint32_t ms_since(const std::chrono::steady_clock::time_point &start)
 
 // The SLA builder's config for a cage at zero elevation: tips as fine as one support line, pillars at the tree
 // branch diameter, bridges and braces no longer than the scaffold bridge length, a brace on every pillar standing
-// more than the brace slenderness in diameters unbraced, and nothing anchored on the model.
+// more than the brace slenderness in diameters unbraced, and nothing anchored on the model. Heads facing the model
+// route in the points' order, so one slice builds one tree, and one no route reaches retries thin and, holding an
+// island, along leaning axes.
 sla::SupportTreeConfig tree_config(const Params &params)
 {
     sla::SupportTreeConfig cfg;
@@ -62,6 +64,9 @@ sla::SupportTreeConfig tree_config(const Params &params)
     cfg.safety_distance_mm          = params.xy_distance_mm;
     cfg.pillar_link_slenderness     = params.brace_slenderness;
     cfg.pillar_link_radius_mm       = params.brace_diameter_mm / 2.;
+    cfg.route_in_order              = true;
+    cfg.retry_thin_head             = true;
+    cfg.island_axis_retry           = true;
     return cfg;
 }
 
@@ -222,7 +227,8 @@ bool hold_island(const std::vector<SupportAnalysis::Slab> &slabs, const SupportA
 // contact is read by the planner's birth rule, so a list and an automatic slice hold it alike: one the rule holds with
 // no tip, continuing the slab below or a nub the list's tips or the bed hold at its merge, is not counted, one it tips
 // gets that tip seeded, its neck's axis included, and one no neck clears is counted. Short of the floor, the dropped
-// contacts under it come back. With `bare`, a seeded tip goes there and not into `tips`.
+// contacts under it come back. With `bare`, a seeded tip goes there and not into `tips`. Every tip of `tips` under a
+// mid-air island holds it.
 size_t restore_hold_floor(const PlanInput &input, std::vector<TipSite> &tips, const std::vector<TipSite> &dropped,
                           double pillar_diameter_mm, std::vector<TipSite> *bare = nullptr)
 {
@@ -235,9 +241,11 @@ size_t restore_hold_floor(const PlanInput &input, std::vector<TipSite> &tips, co
     if (map.islands.empty())
         return 0;
     std::vector<std::vector<TipSite>> kept(map.islands.size()), spare(map.islands.size());
-    for (const TipSite &tip : tips)
-        if (const size_t k = island_of(map, tip); k < kept.size())
+    for (TipSite &tip : tips)
+        if (const size_t k = island_of(map, tip); k < kept.size()) {
+            tip.holds_island = true;
             kept[k].push_back(tip);
+        }
     for (const TipSite &tip : dropped)
         if (const size_t k = island_of(map, tip); k < spare.size())
             spare[k].push_back(tip);
@@ -290,8 +298,9 @@ size_t alias_of(const AliasGrid &kept, const Vec3d &p, const AliasCell &c)
 // A chain at the layer pitch therefore keeps every tip standing further than the distance from the kept tips under
 // it, and three tips all within the distance of each other keep one where the builder's pairs would keep two: no
 // two kept tips are aliases, so the builder filters none. A kept tip is enforced when a tip merged into it was, and
-// takes the larger head grade of the two, so a Heavy point merged into a Light one keeps its Heavy head, and keeps
-// its own axis. The kept tips sit in a grid of cells the distance wide, so a tip reads the 27 cells around its own.
+// takes the larger head grade of the two, so a Heavy point merged into a Light one keeps its Heavy head, holds an
+// island when either did, and keeps its own axis. The kept tips sit in a grid of cells the distance wide, so a tip
+// reads the 27 cells around its own.
 // `tips` keeps its order.
 void merge_aliases(std::vector<TipSite> &tips)
 {
@@ -316,6 +325,7 @@ void merge_aliases(std::vector<TipSite> &tips)
             BOOST_LOG_TRIVIAL(debug) << "scaffold tip merged at (" << p.x() << ", " << p.y() << ", " << p.z() << ")";
             tips[into].enforced = tips[into].enforced || tips[i].enforced;
             tips[into].grade_mm = std::max(tips[into].grade_mm, tips[i].grade_mm);
+            tips[into].holds_island = tips[into].holds_island || tips[i].holds_island;
             continue;
         }
         keep[i] = true;
@@ -1021,6 +1031,10 @@ Tips place_tips(const PrintObject &object, const std::vector<std::vector<Support
             tips.bare_islands.push_back(island.birth);
     for (const PlannedTip &tip : tips.plan.tips)
         tips.sites.push_back(tip.site);
+    for (const Island &island : tips.plan.islands)
+        if (! island.rooted)
+            for (const size_t tip : island.holders)
+                tips.sites[tip].holds_island = true;
     // The planner keeps its tips out of the band on its lattice; the wall skip reads the band exactly.
     const std::function<bool(const TipSite &)> at_wall = wall_skip(object, tips.sites, {}, params);
     tips.sites.erase(std::remove_if(tips.sites.begin(), tips.sites.end(), at_wall), tips.sites.end());
@@ -1127,11 +1141,13 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
     const std::vector<TipSite> &nodes = chosen.sites;
 
     std::vector<double> grades = tip_grades(nodes, params);
-    // A head's id is its point's index, so the points keep the order of `nodes`.
+    // A head's id is its point's index, so the points keep the order of `nodes`. A tip holding an island makes its point
+    // one that starts an island, whose head the builder retries along leaning axes.
     sla::SupportPoints points;
     for (size_t i = 0; i < nodes.size(); ++ i) {
         const Vec2d xy = unscale(nodes[i].position);
-        points.emplace_back(float(xy.x()), float(xy.y()), float(nodes[i].print_z - params.z_offset_mm), float(grades[i] / 2.));
+        points.emplace_back(float(xy.x()), float(xy.y()), float(nodes[i].print_z - params.z_offset_mm), float(grades[i] / 2.),
+                            nodes[i].holds_island);
     }
     out.counts.tips_placed = points.size();
 

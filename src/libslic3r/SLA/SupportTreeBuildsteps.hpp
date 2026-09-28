@@ -298,11 +298,33 @@ class SupportTreeBuildsteps {
     // Find route for a head to the ground. Inserts additional bridge from the
     // head to the pillar if cannot create pillar directly.
     // The optional dir parameter is the direction of the bridge which is the
-    // direction of the pinhead if omitted.
-    bool connect_to_ground(Head& head, const Vec3d &dir);
+    // direction of the pinhead if omitted. safety_d is the clearance the
+    // bridge and the scans under it keep from the model, the safety distance
+    // scaled by the head's radius if omitted.
+    bool connect_to_ground(Head& head, const Vec3d &dir, double safety_d);
+    bool connect_to_ground(Head& head, const Vec3d &dir)
+    {
+        return connect_to_ground(head, dir,
+                                 head.r_back_mm * m_cfg.safety_distance_mm /
+                                     m_cfg.head_back_radius_mm);
+    }
     inline bool connect_to_ground(Head& head);
     
     bool connect_to_model_body(Head &head);
+
+    // The retries of a head routing_to_model could not route, which leave the
+    // head as they found it when they fail: at the fallback radius along its
+    // direction, and along the fixed island axes. Their own tests, the thin
+    // retry's scan down and the axis retry's pinhead test, walk and scans
+    // down, keep the full safety distance from the model whatever the head's
+    // radius, where a thin head's own checks keep it scaled down by the
+    // radius: a caller that clears support off the model by the safety
+    // distance would cut a thinner route where it passes nearer, and the head
+    // with it. The pillar they stand goes through create_ground_pillar, whose
+    // corrector bridge off the pad's gap keeps the scaled clearance on a thin
+    // pillar up to 20 radii tall, which it does not widen first.
+    bool connect_thin_to_ground(Head &head);
+    bool connect_along_axes(Head &head);
 
     bool search_pillar_and_connect(const Head& source);
     

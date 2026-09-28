@@ -16,8 +16,9 @@ namespace ScaffoldSupport {
 // `grade_mm` is the disc width the tip asks for, 0 for the small disc `draw` gives it, and `source` the point's index in
 // a baked list, -1 for any other tip. `axis` is the unit direction the tip's neck leans along, pointing down, which the
 // wall skip reads the band at the neck's end by and the builder aims the head along; zero, as on every tip but a birth
-// whose neck clears only leaning, leaves the head to the mesh normal. These come after `enforced`, since tips are built
-// by position.
+// whose neck clears only leaning, leaves the head to the mesh normal. `holds_island` marks a tip holding a part the bed
+// does not hold, whose head the builder retries along leaning axes where no other route reaches the pad. These come
+// after `enforced`, since tips are built by position.
 struct TipSite
 {
     Point              position;
@@ -28,6 +29,7 @@ struct TipSite
     double             grade_mm     = 0.;
     int                source       = -1;
     Vec3f              axis         = Vec3f::Zero();
+    bool               holds_island = false;
 };
 
 // The deepest point of `piece`, where the hold floor and the birth need stand a tip.

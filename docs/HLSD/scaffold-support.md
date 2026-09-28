@@ -200,6 +200,10 @@ then runs steps 2 to 4 of the auto path on those sites:
   had.
 - The hold floor counts the islands the list leaves under-held but seeds and
   restores no tip: where it would have seeded one, it records a bare island.
+  It marks every point under a mid-air island as holding it, so the builder
+  retries that point's head along leaning axes as it retries an auto slice's
+  island holders, and a list Generate copied routes the island tips the auto
+  slice routed.
 - The alias merge runs unchanged, so a point within `sla::D_SP` of another
   merges into it.
 
@@ -583,7 +587,8 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    `sla::D_SP`. The selection visits the tips lowest first, among equals by seed
    id, and merges a tip standing within `sla::D_SP` in 3-D of a tip already
    kept into it, so no two tips it hands the builder are aliases; a kept tip is
-   enforced when any tip merged into it was, and keeps its own axis. A merge
+   enforced when any tip merged into it was, holds an island when any did,
+   and keeps its own axis. A merge
    logs
    `scaffold tip merged at (x, y, z)` at debug level and counts as neither
    placed nor dropped.
@@ -600,9 +605,16 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    no model anchors, bridge and pillar-link lengths at the
    scaffold bridge length, a bridge slope of `max_head_tilt_rad`, 45 degrees,
    the object's xy distance as the safety distance, the scaffold brace
-   slenderness, and the brace radius at half the brace diameter. Each build
+   slenderness, the brace radius at half the brace diameter, and the three
+   routing retries of Builder changes on: heads facing the model route in the
+   points' order, a head no route reaches retries thin, and one at a point
+   starting an island retries along leaning axes. Each build
    hands the builder each point's tip axis in `SupportableMesh::head_axes`, in
-   the order of the points the cuts left. The draw sets
+   the order of the points the cuts left, and marks each point whose tip holds
+   an island as starting one, `sla::SupportPoint::is_new_island`: on an auto
+   slice `place_tips` marks every holder of an island the plan leaves
+   unrooted, whatever need placed it, and on a baked list the hold floor marks
+   every point under a mid-air island. The draw sets
    the elevation to the mesh's lowest z: the builder grounds pillars at that z
    less the elevation, so the ground sits at the pad's top on the bed for an
    object standing on it and for one lifted off it with auto-drop off. A
@@ -747,9 +759,9 @@ slicing with the neck checks, which
 
 ## Builder changes
 
-The SLA builder takes six additions. Each defaults to the behaviour SLA
+The SLA builder takes eleven additions. Each defaults to the behaviour SLA
 printing had before, except the corrector cap, whose change the SLA suite
-tolerates.
+tolerates, and the isolated searches, which run on every path.
 
 - Head axes. `SupportableMesh::head_axes`, parallel to the points and empty
   by default, gives a point the direction its head is aimed along in place of
@@ -758,6 +770,68 @@ tolerates.
   searches a clear pose from it, as it does from a normal. The axes sit on the
   mesh, not on `sla::SupportPoint`, which SLA projects serialize and compare.
 
+- Ordered routing. With `SupportTreeConfig::route_in_order`, default false,
+  `routing_to_model` routes the heads facing the model one at a time in the
+  order `classify` listed them, the points' order, followed by the cluster
+  centroids whose ground pillar failed; the ray casts inside each route stay
+  parallel. Routed at once, each head searches the pillars the others have
+  stood by then and claims one of a pillar's three bridge slots first come,
+  first served, so which heads route, and how, follows thread timing: on a
+  comb of 30 heads under a ledge the same points built 10, 14 and 15 pillars
+  in three runs. In order, one set of points builds one tree.
+- Isolated searches. Each point's head search in `filter` and each route in
+  `routing_to_model` runs under `tbb::this_task_arena::isolate`. The genetic
+  searches reseed NLopt's thread-local generator, and a thread waiting on a
+  search's parallel ray casts could otherwise take another point's search,
+  which reseeds the generator mid-search: on one figure, three slices with
+  identical routing found three different sets of head poses, and its
+  support volume ranged from 1099.17 to 1115.22 mm3 over three more.
+  Isolated, a search finds the pose it finds running alone, one an SLA slice
+  could already produce, so the isolation runs on every path, and the three
+  slices build one tree.
+- Thin retry. With `retry_thin_head`, default false, a head that reached
+  neither a pillar nor the ground retries at `head_fallback_radius_mm` along
+  its direction, width zero, and drops a pillar from that thinner head's
+  junction when the scan straight down from it clears the model, widening
+  toward the pillar radius when it stands more than 20 radii tall, as any
+  thin pillar does. The filter tries the thin
+  head only when the full pinhead collides, never when a fitting head later
+  fails to route, and a narrower scan ring passes where the full one meets a
+  ledge. A retry that fails leaves the head as it was.
+- Island axis retry. With `island_axis_retry`, default false, a head at a
+  point marked `is_new_island` that every route so far failed tries fixed
+  axes 15, 30 and 45 degrees from down, none past the bridge slope, at 24
+  azimuths each, from the head's own azimuth outwards: for each axis whose
+  pinhead clears the model by the filter's ring test at the full safety
+  distance, the head is aimed along
+  it and walks straight along it until the scan down clears, as
+  `connect_to_ground`'s first attempt does, and the first axis that reaches
+  the ground wins. The retry exists because the head's own route runs from a
+  junction the mesh normal placed: under a lip over a shelf every walk from
+  there meets the shelf, while a head leaning out starts its walk higher and
+  further out. Each axis takes the full head first, as the filter does, and
+  then the head's own size where the filter fell back to the thin one. A
+  retry that fails leaves the head as it was and logs `Island support point
+  <id> clears the model on <n> of <m> retry axes and routes along none` at
+  debug level, an axis counted once whichever head size clears it. SLA points
+  carry the flag from the support point generator, so the field, not the
+  flag, keeps the SLA path as it was.
+  The retries' own tests keep the full safety distance from the model
+  whatever the head's radius: the thin retry's scan down, and the axis
+  retry's pinhead test, walk and scans down. The builder otherwise scales a
+  thin element's clearance down by its radius, 0.18 mm for a 0.22 mm head at
+  a 0.5 mm distance, and so does `create_ground_pillar`, which stands the
+  pillar either retry routes to: a thin pillar up to 20 radii tall, 4.4 mm at
+  0.22 mm, keeps no more than that scaled clearance on the corrector bridge it
+  walks off the pad's gap, which the neck check reads afterwards like any
+  other route. The seam clips base within
+  the xy distance of the model on every layer, so a thin route passing nearer
+  prints broken and the neck check cuts its head. On corpus plate 1's figure
+  in its reference pose, an island born at z 35.2 routed thin along a 45
+  degree axis at the scaled clearance; its bridge passed within the band of
+  the next lock, the clip left nothing printed at z 33.4 and the head was
+  cut. At the full distance none of the axes its head clears routes it, and
+  the island is reported instead.
 - Model anchors. `SupportTreeConfig::allow_model_anchors`, default true, gates
   the last-resort route of a head to the model body. The scaffold sets it
   false, so a head that reaches neither a pillar nor the ground is
@@ -910,7 +984,12 @@ sheet, a rod hanging beside a column whose birth tip leans its neck away from
 the column, stays through the wall skip and routes, in the auto slice and as
 a baked point, `draw` called on a lifted slab's one tip with an axis leaning
 45 degrees, whose head's slice 1.2 mm under the tip stands along the axis and
-not straight under the tip, a tip placed under an unseeded
+not straight under the tip, `draw` called on one tip under an island lip over
+a shelf, dropped as a tip holding no island and routed along a leaning axis
+as one holding the lip, a baked point there marked as holding it and
+routed, two baked points across the lip's edge merged into the one outside
+it, which holds the island for the other, and the need planner's own holder
+of the lip marked by `place_tips` and routed, a tip placed under an unseeded
 feature start with its ring on the layer its z tops and none under debris,
 slivers beside a wall leaning their tips away from it and routing, braces on
 slender pillars, pillars widening toward
@@ -924,7 +1003,12 @@ enforced heads enters the band. The SLA builder changes are covered in
 `tests/sla_print/sla_print_tests.cpp`, the head axes by a head aimed along a
 30 degree axis, one saturated at 45 degrees from a 60 degree axis, the normal
 kept with no axis or a zero one, and a head whose axis runs into a wall
-searching a clear pose instead.
+searching a clear pose instead, and the routing by a fin over a slot whose
+full head is dropped while the thin retry drops a 0.22 mm pillar down the
+slot, a comb of 30 points under a ledge that builds one tree in 20 runs
+routed in order, and a point under a lip over a shelf whose head is dropped
+unless the point starts an island, when it leans out along a retry axis and
+stands a pillar past the shelf's edge.
 
 `tests/fff_print/test_scaffold_plan.cpp` holds the `[ScaffoldPlan]` cases,
 which call `prepare_plan` and `plan_tips` on fixtures sliced without support,
@@ -999,7 +1083,8 @@ tree-slim slice's; the upright pose also requires at most three under-held
 islands, all born at z 15.4 with birth tips the builder cannot route, one of
 them leaning its neck 15.5 degrees. The stored pose places 71 tips and routes
 69, eight of its births leaning their necks 5 to 21 degrees, and the upright
-pose places 217 or 218 and routes 192 or 193.
+pose places 218 and routes 193 on every run, since the builder routes in
+order and isolates its searches.
 
 The hidden case "Need-driven tips hold corpus plate 1's hand and sword with
 few contacts" slices plate 1 and requires of the tips its record holds at most
@@ -1010,4 +1095,5 @@ under-held, each named among the record's bare islands. Plate 1's record
 holds 86 tips, 7 on the hand, 4 under z 7.5 and a largest gap of 6.84 mm,
 and four bare islands: two born at z 35.2 whose birth tips the builder cannot
 route, and two born at z 40.4 and 42.7 whose necks lean off a wall, one
-unrouted and one cut by the neck check.
+unrouted and one cut by the neck check. The three unrouted heads hold
+islands, so the builder ran its routing retries on each before dropping it.
