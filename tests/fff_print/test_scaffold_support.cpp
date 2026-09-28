@@ -466,6 +466,23 @@ Print::ApplyStatus reapply(Print &print, Model &model, const DynamicPrintConfig 
     return print.apply(model, full);
 }
 
+// Slices `mesh` from a baked list of light points on a grid, `step` mm apart over x0..x1 by y0..y1 at z, in the fixture's
+// frame: a test of the builder reads the same pillars whatever the automatic placement does.
+void process_grid(Print &print, Model &model, const DynamicPrintConfig &config, const TriangleMesh &mesh, double z, double x0, double x1,
+                  double y0, double y1, double step)
+{
+    init_print({ TriangleMesh(mesh) }, print, model, config);
+    ModelObject &mo = *model.objects.front();
+    for (double x = x0; x <= x1 + EPSILON; x += step)
+        for (double y = y0; y <= y1 + EPSILON; y += step)
+            mo.scaffold_points.push_back({ Vec3f(float(x), float(y), float(z)), ScaffoldHeadSize::Light, false });
+    mo.scaffold_points_status   = ScaffoldPointsStatus::UserModified;
+    mo.scaffold_points_pose     = mo.instances.front()->get_matrix().linear();
+    mo.scaffold_points_mesh_box = mo.raw_mesh_bounding_box();
+    reapply(print, model, config);
+    print.process();
+}
+
 // Whether the support step of `po` carries a warning whose text holds `text`.
 bool warns(const PrintObject &po, const std::string &text)
 {
@@ -667,6 +684,8 @@ TEST_CASE("A result row carries the scaffold counts", "[ScaffoldSupport]")
     r.tips_dropped            = 2;
     r.islands_under_held      = 1;
     r.pillars_unbraced        = 3;
+    r.islands_slender         = 6;
+    r.underside_unmet_mm2     = 0.25;
     r.floating_pieces_removed = 4;
 
     const SupportValidation::Metrics m = SupportValidation::metrics_of(r);
@@ -675,6 +694,8 @@ TEST_CASE("A result row carries the scaffold counts", "[ScaffoldSupport]")
     CHECK(m.tips_dropped == 2);
     CHECK(m.islands_under_held == 1);
     CHECK(m.pillars_unbraced == 3);
+    CHECK(m.islands_slender == 6);
+    CHECK_THAT(m.underside_unmet_mm2, WithinAbs(0.25, 1e-12));
     CHECK(m.floating_pieces_removed == 4);
 
     SupportValidation::CaseResult row;
@@ -688,7 +709,7 @@ TEST_CASE("A result row carries the scaffold counts", "[ScaffoldSupport]")
                              "unrooted_groups", "min_bed_margin", "max_slenderness", "unknown_contacts", "inaccessible_groups",
                              "max_group_risk", "total_group_risk", "coverage_available", "stability_available",
                              "damage_available", "tips_placed", "tips_routed", "tips_dropped", "islands_under_held",
-                             "pillars_unbraced", "floating_pieces_removed" }) {
+                             "pillars_unbraced", "islands_slender", "underside_unmet_mm2", "floating_pieces_removed" }) {
         INFO(key);
         CHECK(metrics.contains(key));
     }
@@ -697,6 +718,8 @@ TEST_CASE("A result row carries the scaffold counts", "[ScaffoldSupport]")
     CHECK(metrics.value("tips_dropped", size_t(0)) == 2);
     CHECK(metrics.value("islands_under_held", size_t(0)) == 1);
     CHECK(metrics.value("pillars_unbraced", size_t(0)) == 3);
+    CHECK(metrics.value("islands_slender", size_t(0)) == 6);
+    CHECK_THAT(metrics.value("underside_unmet_mm2", 0.), WithinAbs(0.25, 1e-12));
     CHECK(metrics.value("floating_pieces_removed", size_t(0)) == 4);
 }
 
@@ -745,10 +768,11 @@ TEST_CASE("A scaffold on the shelf fixture prints a pad with dense faces and cle
     CHECK(area_mm2(f_above) < 0.5 * a0);
     CHECK(diff_ex(f_above, offset_ex(f0, scale_(w))).empty());
     const BoundingBox box_top = get_extents(footprint(*layers[pad_top])), box_above = get_extents(f_above);
-    CHECK(box_above.min.x() - box_top.min.x() >= scale_(1.4));
-    CHECK(box_above.min.y() - box_top.min.y() >= scale_(1.4));
-    CHECK(box_top.max.x() - box_above.max.x() >= scale_(1.4));
-    CHECK(box_top.max.y() - box_above.max.y() >= scale_(1.4));
+    // A foot widens halfway to its nearest pillar, so sparse pillars stand wide feet nearer the brim's rim.
+    CHECK(box_above.min.x() - box_top.min.x() >= scale_(1.2));
+    CHECK(box_above.min.y() - box_top.min.y() >= scale_(1.2));
+    CHECK(box_top.max.x() - box_above.max.x() >= scale_(1.2));
+    CHECK(box_top.max.y() - box_above.max.y() >= scale_(1.2));
 
     // No base comes within the xy distance of the model at its own height, and all of it is on the bed. The
     // interface fuses to the model and is held to not entering it further down.
@@ -900,24 +924,37 @@ TEST_CASE("A head whose neck bottoms in the xy band is dropped while one whose n
     // At the corpus's 0.22 mm support line and 0.5 mm xy distance a small-grade neck, 0.44 mm across under its pin, fits
     // wholly inside the column's band. A head's neck under its rings is clipped by that band. When that leaves a ring over
     // nothing and the neck's lowest slice clears the band, the neck is clipped by the model alone and the head stays; a
-    // head whose neck bottoms in the column's band is dropped and the cage is built without it. On the 2 mm plank every
-    // tip keeps its head; on the 4 mm plank the two tips nearest the column face, 0.6 and 1.3 mm off it, are dropped.
+    // head whose neck bottoms in the column's band is dropped and the cage is built without it. The automatic placement
+    // leaves the plank's underside beside the column to the column, so on either plank every head stands; a baked list
+    // with points 0.6 and 1.3 mm off the face of the 4 mm plank drops one or both of them.
     // The 4 mm plank at the corpus's 0.06 mm layers and two interface layers adds rings whose printed loop stops short
     // of a neighbour the drawn ring touches, and base whose printed walls leave its inside and its slivers bare: the
     // drop reads the rings and the base as their lines cover them.
-    const auto [length_mm, layer_height, interface_layers, min_dropped, max_dropped] = GENERATE(
-        table<double, std::string, std::string, size_t, size_t>({ { 2., "0.2", "3", 0, 0 }, { 4., "0.06", "2", 1, 2 } }));
+    const auto [length_mm, layer_height, interface_layers, baked, min_dropped, max_dropped] = GENERATE(table<double, std::string, std::string, bool, size_t, size_t>(
+        { { 2., "0.2", "3", false, 0, 0 }, { 4., "0.06", "2", false, 0, 0 }, { 4., "0.06", "2", true, 1, 2 } }));
+    const DynamicPrintConfig config = scaffold_config({ { "support_line_width", "0.22" },
+                                                        { "support_object_xy_distance", "0.5" },
+                                                        { "layer_height", layer_height },
+                                                        { "support_interface_top_layers", interface_layers } });
     Print print;
-    init_and_process_print({ slope_fixture(length_mm) }, print,
-                           scaffold_config({ { "support_line_width", "0.22" },
-                                             { "support_object_xy_distance", "0.5" },
-                                             { "layer_height", layer_height },
-                                             { "support_interface_top_layers", interface_layers } }));
+    Model model;
+    init_print({ slope_fixture(length_mm) }, print, model, config);
+    if (baked) {
+        // On the underside, which falls from z 10 at the column face x 6 at 45 degrees, across the plank's middle.
+        ModelObject &mo = *model.objects.front();
+        for (const double x : { 6.6, 7.3, 8.5, 9.5 })
+            mo.scaffold_points.push_back({ Vec3f(float(x), 3.f, float(16. - x)), ScaffoldHeadSize::Light, false });
+        mo.scaffold_points_status   = ScaffoldPointsStatus::UserModified;
+        mo.scaffold_points_pose     = mo.instances.front()->get_matrix().linear();
+        mo.scaffold_points_mesh_box = mo.raw_mesh_bounding_box();
+        reapply(print, model, config);
+    }
+    print.process();
     REQUIRE(print.objects().size() == 1);
     const PrintObject &object = *print.objects().front();
     REQUIRE(object.support_analysis() != nullptr);
     const SupportAnalysis::Report &report = *object.support_analysis();
-    INFO("plank " << length_mm << " mm at " << layer_height << " mm layers: tips placed " << report.tips_placed << " routed "
+    INFO("plank " << length_mm << " mm at " << layer_height << " mm layers" << (baked ? ", baked" : "") << ": tips placed " << report.tips_placed << " routed "
                   << report.tips_routed << " dropped " << report.tips_dropped << " floating removed " << report.floating_pieces_removed);
     CHECK(report.floating_pieces_removed == 0);
     CHECK(report.tips_dropped >= min_dropped);
@@ -1107,111 +1144,13 @@ TEST_CASE("A painted enforcer beside a wall fuses its tip where the paint asks",
     }
 }
 
-TEST_CASE("Interior tips survive only where a bridge span fits", "[ScaffoldSupport]")
-{
-    // A 12 mm wide slab holds no 14 mm disc, so at a 14 mm bridge length every tip under it stands on the rim; a 10 mm
-    // disc fits, so at 10 mm the interior grid keeps a tip well inside the rim.
-    struct Reading { size_t polygons = 0; double max_depth_mm = -1e9, min_depth_mm = 1e9; };
-    const auto read = [](const char *bridge_length) {
-        Print print;
-        init_and_process_print({ floating_slab_fixture() }, print, scaffold_config({ { "max_bridge_length", bridge_length } }));
-        REQUIRE(print.objects().size() == 1);
-        const PrintObject &object = *print.objects().front();
-        Reading r;
-
-        // The first layer holds only the post, which places the fixture's (0, 0) in the object's centred frame.
-        const Point      origin = get_extents(object.layers().front()->lslices).min - Point::new_scale(42., 0.);
-        const FixtureBox slab { origin, 0., 0., 40., 12. };
-        const FixtureBox near_slab { origin, -4., -4., 41.9, 16. };
-        const auto layers = object.support_layers();
-        const size_t top = top_layer_under(layers, 3.);
-        REQUIRE(top != size_t(-1));
-        INFO("bridge length " << bridge_length << " top interface print_z " << layers[top]->print_z);
-        // Tips closer than a disc print as one polygon, so each polygon's centroid is read, and its depth is the
-        // distance inside the slab's outline, negative outside it.
-        for (const ExPolygon &poly : role_footprint(*layers[top], erSupportMaterialInterface)) {
-            const Point c = poly.contour.centroid();
-            if (! near_slab.contains(c))
-                continue;
-            const Vec2d  q     = (c - origin).cast<double>() * SCALING_FACTOR;
-            const double dx    = std::max({ slab.x0 - q.x(), 0., q.x() - slab.x1 });
-            const double dy    = std::max({ slab.y0 - q.y(), 0., q.y() - slab.y1 });
-            const double depth = slab.contains(c) ? std::min({ q.x() - slab.x0, slab.x1 - q.x(), q.y() - slab.y0, slab.y1 - q.y() })
-                                                  : -std::hypot(dx, dy);
-            ++ r.polygons;
-            r.max_depth_mm = std::max(r.max_depth_mm, depth);
-            r.min_depth_mm = std::min(r.min_depth_mm, depth);
-        }
-        return r;
-    };
-
-    const Reading wide = read("14");
-    INFO("at 14: " << wide.polygons << " polygons, depth " << wide.min_depth_mm << " to " << wide.max_depth_mm << " mm");
-    REQUIRE(wide.polygons > 0);
-    CHECK(wide.max_depth_mm <= 1.0);
-    CHECK(wide.min_depth_mm >= -1.0);
-
-    const Reading narrow = read("10");
-    INFO("at 10: " << narrow.polygons << " polygons, depth " << narrow.min_depth_mm << " to " << narrow.max_depth_mm << " mm");
-    // No tip count is compared: the key also moves the contour tips and the interior grid step before the thinning.
-    CHECK(narrow.max_depth_mm >= 2.0);
-}
-
-TEST_CASE("The hold floor restores dropped contacts under tall islands", "[ScaffoldSupport]")
-{
-    // At a 3.5 mm contact distance the decimation keeps one end of stick B's 3 mm underside. B and post C stand 2 mm
-    // from their birth at z 3 to their own tops at z 5 without joining, and cube A 3 mm to its join at z 6, so each
-    // wants two tips a pillar diameter (1.2 mm) apart: B gets its other end back, and C, 0.8 mm across, holds only
-    // one, which is all its footprint fits, so no island is under-held.
-    Print print;
-    init_and_process_print({ islands_fixture() }, print, scaffold_config({ { "support_contact_min_distance", "3.5" } }));
-    REQUIRE(print.objects().size() == 1);
-    const PrintObject &object = *print.objects().front();
-    REQUIRE(object.support_analysis() != nullptr);
-    const SupportAnalysis::Report &report = *object.support_analysis();
-    INFO("tips placed " << report.tips_placed << " routed " << report.tips_routed << " dropped " << report.tips_dropped
-                        << " floating removed " << report.floating_pieces_removed);
-    CHECK(report.islands_under_held == 0);
-
-    // The islands' undersides are at z 3, the top of a planned layer. The block's first layer places the fixture's
-    // (0, 0) in the object's centred frame. A head at the stick's end tilts, so its disc's centroid sits just past
-    // the end: the box under B reaches 0.3 mm past the stick on every side.
-    const auto   layers = object.support_layers();
-    const size_t top    = top_layer_under(layers, 3.);
-    REQUIRE(top != size_t(-1));
-    CHECK_THAT(layers[top]->print_z, WithinAbs(3., 1e-6));
-    const Point      origin = get_extents(object.layers().front()->lslices).min;
-    const FixtureBox under_a { origin, 14., 3., 18., 7. };
-    const FixtureBox under_b { origin, 21.7, 4.4, 25.3, 5.6 };
-    std::vector<Point> at_a, at_b;
-    for (const ExPolygon &poly : role_footprint(*layers[top], erSupportMaterialInterface)) {
-        const Point c = poly.contour.centroid();
-        const Vec2d q = (c - origin).cast<double>() * SCALING_FACTOR;
-        INFO("interface polygon centroid (" << q.x() << ", " << q.y() << ")");
-        if (under_a.contains(c))
-            at_a.push_back(c);
-        if (under_b.contains(c))
-            at_b.push_back(c);
-    }
-    CHECK(at_a.size() >= 2);
-    REQUIRE(at_b.size() >= 2);
-    double spread_mm = 0.;
-    for (size_t i = 0; i < at_b.size(); ++ i)
-        for (size_t j = i + 1; j < at_b.size(); ++ j)
-            spread_mm = std::max(spread_mm, unscale<double>((at_b[i] - at_b[j]).cast<double>().norm()));
-    INFO("the interface polygons under B spread " << spread_mm << " mm");
-    CHECK(spread_mm >= 1.2);
-}
-
 TEST_CASE("Scaffold density places fewer tips at Light and more at Heavy", "[ScaffoldSupport]")
 {
-    // At a 2 mm contact distance, Medium keeps a tip on every step's strip, since each strip is its own component. Light
-    // also keeps 2 mm between strips, so it thins neighbouring steps. Heavy thins inside a strip at 1 mm, so a strip's
-    // corners 1 mm apart both stand.
+    // Each tier's reach bounds how far the steps' undersides may hang past their anchors, so a longer reach calls for
+    // fewer heads.
     const auto tips = [](const char *density) {
         Print print;
-        init_and_process_print({ staircase_fixture() }, print,
-                               scaffold_config({ { "support_contact_min_distance", "2" }, { "scaffold_density", density } }));
+        init_and_process_print({ staircase_fixture() }, print, scaffold_config({ { "scaffold_density", density } }));
         REQUIRE(print.objects().size() == 1);
         const PrintObject &object = *print.objects().front();
         REQUIRE(object.support_analysis() != nullptr);
@@ -1244,7 +1183,7 @@ TEST_CASE("The density slider's candidates give back the slice's own tips at the
         REQUIRE(record != nullptr);
         REQUIRE(candidates != nullptr);
         // Once from the slice's grades and once grading every tip afresh.
-        std::vector<double>  grades = candidates->grades, fresh;
+        ScaffoldSupport::TipGrades grades = candidates->grades, fresh;
         const ScaffoldPoints points =
             ScaffoldSupport::retune_points(object, *candidates, ScaffoldSupport::tier_density(object.config().scaffold_density), grades);
         CHECK(ScaffoldSupport::retune_points(object, *candidates, ScaffoldSupport::tier_density(object.config().scaffold_density), fresh) ==
@@ -1267,8 +1206,7 @@ TEST_CASE("The density slider places fewer points toward Light and more toward H
     const PrintObject &object = *print.objects().front();
     const std::shared_ptr<const ScaffoldSupport::Candidates> candidates = object.scaffold_candidates();
     REQUIRE(candidates != nullptr);
-    // The thinning is greedy, so between the tiers a shorter distance can keep one tip fewer; only the tiers order.
-    std::vector<double> grades = candidates->grades;
+    ScaffoldSupport::TipGrades grades = candidates->grades;
     const size_t light  = ScaffoldSupport::retune_points(object, *candidates, 0., grades).size();
     const size_t medium = ScaffoldSupport::retune_points(object, *candidates, 1., grades).size();
     const size_t heavy  = ScaffoldSupport::retune_points(object, *candidates, 2., grades).size();
@@ -1410,14 +1348,16 @@ TEST_CASE("Unseeded feature starts get a scaffold tip while floating debris and 
 TEST_CASE("Slender scaffold pillars get braces and unreachable ones stand unbraced", "[ScaffoldSupport]")
 {
     // Runs that share a bridge length share their pillars: the key also bounds head clustering and routing, and only
-    // the linking pass after routing reads the slenderness. The pillars stand straight, so a brace shows as a section
+    // the linking pass after routing reads the slenderness. A baked 6 x 6 grid 2 mm apart stands the pillars under the slab. The pillars stand straight, so a brace shows as a section
     // of its own between them rather than inside a widened foot.
     struct Reading { size_t unbraced = 0, floating = 0, mid_polygons = 0; double volume_mm3 = 0.; };
     const auto read = [](const char *slenderness, const char *bridge_length) {
         Print print;
-        init_and_process_print({ tall_shelf_fixture() }, print,
-                               scaffold_config({ { "scaffold_brace_slenderness", slenderness }, { "scaffold_bridge_length", bridge_length },
-                                                 { "tree_support_branch_diameter_angle", "0" } }));
+        Model model;
+        process_grid(print, model,
+                     scaffold_config({ { "scaffold_brace_slenderness", slenderness }, { "scaffold_bridge_length", bridge_length },
+                                       { "tree_support_branch_diameter_angle", "0" } }),
+                     tall_shelf_fixture(), 28., 7., 17., -2., 8., 2.);
         REQUIRE(print.objects().size() == 1);
         const PrintObject &object = *print.objects().front();
         REQUIRE(object.support_analysis() != nullptr);
@@ -1461,9 +1401,11 @@ TEST_CASE("Scaffold braces print at their share of the pillar diameter and never
     struct Reading { size_t unbraced = 0, floating = 0; double mid_mm2 = 0.; };
     const auto read = [](const char *slenderness, const char *brace_diameter) {
         Print print;
-        init_and_process_print({ tall_shelf_fixture() }, print,
-                               scaffold_config({ { "scaffold_brace_slenderness", slenderness }, { "scaffold_brace_diameter", brace_diameter },
-                                                 { "tree_support_branch_diameter_angle", "0" } }));
+        Model model;
+        process_grid(print, model,
+                     scaffold_config({ { "scaffold_brace_slenderness", slenderness }, { "scaffold_brace_diameter", brace_diameter },
+                                       { "tree_support_branch_diameter_angle", "0" } }),
+                     tall_shelf_fixture(), 28., 7., 17., -2., 8., 2.);
         REQUIRE(print.objects().size() == 1);
         const PrintObject &object = *print.objects().front();
         REQUIRE(object.support_analysis() != nullptr);
@@ -1500,7 +1442,9 @@ TEST_CASE("Scaffold pillars widen toward the pad by the branch diameter angle", 
     struct Reading { size_t routed = 0, floating = 0; std::map<int, double> base_mm2; };
     const auto read = [](const char *angle) {
         Print print;
-        init_and_process_print({ tall_shelf_fixture() }, print, scaffold_config({ { "tree_support_branch_diameter_angle", angle } }));
+        Model model;
+        process_grid(print, model, scaffold_config({ { "tree_support_branch_diameter_angle", angle } }), tall_shelf_fixture(), 28., 7., 17.,
+                     -2., 8., 2.);
         REQUIRE(print.objects().size() == 1);
         const PrintObject &object = *print.objects().front();
         REQUIRE(object.support_analysis() != nullptr);
@@ -1509,13 +1453,13 @@ TEST_CASE("Scaffold pillars widen toward the pad by the branch diameter angle", 
         // The area inside the printed outlines under the slab: a pillar prints a ring, so its hole counts.
         const FixtureBox under_slab { get_extents(object.layers().front()->lslices).min, 6.5, -3., 18., 9. };
         const auto       layers = object.support_layers();
-        for (int z : { 2, 15, 25 }) {
+        for (int z : { 2, 15, 20 }) {
             const size_t i = top_layer_under(layers, z);
             REQUIRE(i != size_t(-1));
             r.base_mm2[z] = area_mm2(intersection_ex(layers[i]->base_areas, { ExPolygon(under_slab.polygon()) }));
         }
-        INFO("angle " << angle << ": routed " << r.routed << " floating removed " << r.floating << " base at z 2, 15, 25: "
-                      << r.base_mm2[2] << ", " << r.base_mm2[15] << ", " << r.base_mm2[25] << " mm2");
+        INFO("angle " << angle << ": routed " << r.routed << " floating removed " << r.floating << " base at z 2, 15, 20: "
+                      << r.base_mm2[2] << ", " << r.base_mm2[15] << ", " << r.base_mm2[20] << " mm2");
         CHECK(r.floating == 0);
         return r;
     };
@@ -1526,7 +1470,9 @@ TEST_CASE("Scaffold pillars widen toward the pad by the branch diameter angle", 
     INFO("base at z 2: " << straight.base_mm2.at(2) << " mm2 straight, " << tapered.base_mm2.at(2) << " mm2 tapered");
     CHECK(tapered.routed == straight.routed);
     CHECK(tapered.base_mm2.at(2) > tapered.base_mm2.at(15));
-    CHECK(tapered.base_mm2.at(15) > tapered.base_mm2.at(25));
+    // Over the last few millimetres under the slab the heads' bridges to their pillars outweigh the taper, so the
+    // pillars are read up to z 20.
+    CHECK(tapered.base_mm2.at(15) > tapered.base_mm2.at(20));
     CHECK(tapered.base_mm2.at(2) > 4. * straight.base_mm2.at(2));
 }
 
@@ -1747,13 +1693,17 @@ TEST_CASE("A baked scaffold list builds the tips it holds and reports each point
     REQUIRE(reapply(print, model, config) != Print::APPLY_STATUS_UNCHANGED);
 
     // Heavy heads print more support than light ones on the same points.
-    ScaffoldPoints heavy = auto_list;
+    ScaffoldPoints light = auto_list, heavy = auto_list;
+    for (ScaffoldPoint &pt : light)
+        pt.size = ScaffoldHeadSize::Light;
     for (ScaffoldPoint &pt : heavy)
         pt.size = ScaffoldHeadSize::Heavy;
+    bake(mo, light, ScaffoldPointsStatus::AutoGenerated, auto_pose);
+    const Slice lighter = slice(mo);
     bake(mo, heavy, ScaffoldPointsStatus::AutoGenerated, auto_pose);
     const Slice heavier = slice(mo);
     CHECK(heavier.record->baked);
-    CHECK(heavier.report.support_volume_mm3 > baked.report.support_volume_mm3);
+    CHECK(heavier.report.support_volume_mm3 > lighter.report.support_volume_mm3);
 
     // Bare islands: an empty list seeds no tip under an island the hold floor would hold, and the record names where
     // it would have. The auto slice seeds them and names none.
@@ -2031,8 +1981,8 @@ TEST_CASE("The density slider recomputes corpus plate 1 within 2 s", "[ScaffoldS
     REQUIRE(po.scaffold_record() != nullptr);
 
     // A sweep from Medium to either end and back, as a drag runs, grading each tip once.
-    std::vector<double> grades    = candidates->grades;
-    double              slowest_s = 0.;
+    ScaffoldSupport::TipGrades grades    = candidates->grades;
+    double                     slowest_s = 0.;
     for (int step : { 10, 12, 14, 16, 18, 20, 15, 10, 8, 6, 4, 2, 0, 5, 10 }) {
         const double density = 0.1 * step;
         const auto   start   = std::chrono::steady_clock::now();
@@ -2045,4 +1995,66 @@ TEST_CASE("The density slider recomputes corpus plate 1 within 2 s", "[ScaffoldS
     }
     INFO("slowest recompute " << slowest_s << " s");
     CHECK(slowest_s <= 2.);
+}
+
+// Hidden ([.]): one full Print::process() of plate 1 of the corpus, about a minute. The planner places tips only where
+// the print needs them: the hand draped over the raised knee takes a tip on each fingertip that starts in mid-air rather
+// than one on every knuckle, and the sword, which stands free from its point at z 1.1 to z 17.1 before it meets the
+// cloth, takes a heavy tip at its point and anchors up its height. Boxes are in the frame the slice builds in,
+// trafo_centered() over the raw mesh with z the mesh's own.
+TEST_CASE("Need-driven tips hold corpus plate 1's hand and sword with few contacts", "[ScaffoldSupport][.]")
+{
+    SupportValidation::use_os_temporary_dir();
+    const char *env = std::getenv("ORCA_MINIATURE_CORPUS");
+    if (env == nullptr || *env == '\0') {
+        std::cout << "corpus dir not set" << std::endl;
+        return;
+    }
+    SupportValidation::Manifest m;
+    m.version    = 1;
+    m.model_root = env;
+    SupportValidation::ManifestCase c;
+    c.id            = "plate1";
+    c.model         = "elf_test.3mf";
+    c.sha256        = "201c541805e94a2914c3cf0a0aebaee68ee3f6199cc096ae36993069fc781ba6";
+    c.selectors     = { "name:10_Dark Elves 1.stl" };
+    c.styles        = { "tree_scaffold" };
+    c.feature_modes = { "on" };
+    c.repeats       = 1;
+    SupportValidation::CorpusObject object = SupportValidation::case_object(m, c, fixture_config({ { "support_top_z_distance", "0.2" } }),
+                                                                            "tree_scaffold", "on");
+    Print print;
+    print.set_status_silent();
+    print.apply(object.model, object.config);
+    print.process();
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &po = *print.objects().front();
+    REQUIRE(po.support_analysis() != nullptr);
+    const std::shared_ptr<const ScaffoldSupport::Candidates> candidates = po.scaffold_candidates();
+    REQUIRE(candidates != nullptr);
+    const SupportAnalysis::Report &report = *po.support_analysis();
+    CHECK(report.floating_pieces_removed == 0);
+
+    ScaffoldSupport::TipGrades grades = candidates->grades;
+    for (const double density : { 0., 1. }) {
+        const ScaffoldPoints points = ScaffoldSupport::retune_points(po, *candidates, density, grades);
+        size_t               hand = 0;
+        std::set<long>       sword_heights;
+        bool                 heavy_point = false;
+        for (const ScaffoldPoint &pt : points) {
+            const Vec3d p = po.trafo_centered() * pt.pos.cast<double>();
+            if (p.x() > 8. && p.x() < 15.5 && p.z() > 20. && p.z() < 29.)
+                ++ hand;
+            if (p.x() > -10. && p.x() < -0.2 && p.y() > 2.5 && p.z() < 17.2) {
+                sword_heights.insert(std::lround(p.z()));
+                heavy_point = heavy_point || (p.z() < 1.5 && pt.size == ScaffoldHeadSize::Heavy);
+            }
+        }
+        INFO("density " << density << ": " << points.size() << " points, " << hand << " on the hand, sword at " << sword_heights.size()
+                        << " heights");
+        CHECK(hand <= 10);
+        CHECK(sword_heights.size() >= 3);
+        CHECK(heavy_point);
+        CHECK(points.size() <= 200);
+    }
 }

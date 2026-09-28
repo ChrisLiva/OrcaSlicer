@@ -4605,7 +4605,8 @@ void PrintObject::_generate_support_material()
                                     << report->seeds_restored << " / retained " << report->seeds_retained << ", tips placed "
                                     << report->tips_placed << " / routed " << report->tips_routed << " / dropped " << report->tips_dropped
                                     << ", islands under-held " << report->islands_under_held << ", pillars unbraced "
-                                    << report->pillars_unbraced << ", floating removed " << report->floating_pieces_removed;
+                                    << report->pillars_unbraced << ", parts slender " << report->islands_slender << ", underside unmet "
+                                    << report->underside_unmet_mm2 << " mm2, floating removed " << report->floating_pieces_removed;
             // posSupportMaterial is still the active step here, which is what active_step_add_warning
             // needs, and the default notification id lets the message identify itself rather than
             // borrowing an id that means something else to the notification manager.

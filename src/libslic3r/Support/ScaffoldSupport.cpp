@@ -306,43 +306,6 @@ void merge_aliases(std::vector<TipSite> &tips)
     tips.resize(next);
 }
 
-// Light density. The contact selection keeps its distance between the contacts of one overhang component only, so a
-// detailed underside that splits into many small components keeps a tip on each however close they stand. Tips are
-// visited lowest first, among equals by seed id, and a tip standing within `spacing_mm` in 3-D of a tip already kept
-// moves to `spare`, where the hold floor can restore it. An enforced tip is kept and crowds nobody.
-void space_tips(std::vector<TipSite> &tips, std::vector<TipSite> &spare, double spacing_mm)
-{
-    std::stable_sort(tips.begin(), tips.end(), [](const TipSite &a, const TipSite &b) {
-        return a.print_z != b.print_z ? a.print_z < b.print_z : a.seed < b.seed;
-    });
-    const auto point = [](const TipSite &tip) {
-        const Vec2d xy = unscale(tip.position);
-        return Vec3d(xy.x(), xy.y(), tip.print_z);
-    };
-    std::vector<Vec3d>   kept_at;
-    std::vector<TipSite> kept;
-    for (const TipSite &tip : tips) {
-        if (! tip.enforced) {
-            const Vec3d p = point(tip);
-            if (std::any_of(kept_at.begin(), kept_at.end(), [&](const Vec3d &q) { return (p - q).norm() < spacing_mm; })) {
-                spare.push_back(tip);
-                continue;
-            }
-            kept_at.push_back(p);
-        }
-        kept.push_back(tip);
-    }
-    tips = std::move(kept);
-}
-
-// Whether a kept contact stands as a tip. An interior tip stands only where its overhang holds a disc as wide as the
-// longest bridge: under a narrower overhang the tips on its rim already hold it.
-bool stands_as_tip(const SupportNode &node, double max_bridge_length_mm)
-{
-    return node.placement != SupportNode::Placement::Interior ||
-           (! node.overhang.empty() && ! offset_ex(node.overhang, -scale_(max_bridge_length_mm / 2.)).empty());
-}
-
 // The first object layer at or above the bottom of `tip`'s neck, `neck_depth_mm` under the tip, or -1 where the neck
 // bottoms under the first layer.
 int reference_layer(const PrintObject &object, const TipSite &tip, double neck_depth_mm)
@@ -985,100 +948,59 @@ ExPolygons clip_base(const ExPolygons &base, const ExPolygons &exempt_heads, con
     return out;
 }
 
-DensityDistances density_distances(double contact_min_distance_mm, double density)
-{
-    const double d = contact_min_distance_mm;
-    const double t = std::clamp(density, 0., 2.);
-    return { t <= 1. ? d : d * (1. - 0.5 * (t - 1.)), t < 1. ? d * (1. - t) : 0. };
-}
-
 double tier_density(ScaffoldDensity tier) { return tier == sdLight ? 0. : tier == sdHeavy ? 2. : 1.; }
+
+std::array<int64_t, 3> grade_key(const TipSite &site) { return { site.obj_layer_nr, site.position.x(), site.position.y() }; }
 
 double density_of(const Candidates &candidates) { return candidates.density; }
 
-std::vector<double> grades_of(const Candidates &candidates) { return candidates.grades; }
+TipGrades grades_of(const Candidates &candidates) { return candidates.grades; }
 
-Candidates collect_candidates(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts,
-                              const std::vector<SupportNode *> &dropped, const Params &params)
+Candidates collect_candidates(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts, const Params &params,
+                              double threshold_rad, const std::vector<Polygons> &blockers)
 {
     Candidates candidates;
-    const auto add = [&](const SupportNode &node, bool kept) {
-        candidates.contacts.push_back({ site_of(node), kept, stands_as_tip(node, params.max_bridge_length_mm), false });
-    };
     for (const std::vector<SupportNode *> &layer : contacts)
         for (const SupportNode *node : layer)
-            add(*node, true);
-    for (const SupportNode *node : dropped)
-        add(*node, false);
-    // The wall skip takes out a tip and a dropped contact the hold floor could restore alike, whatever the density.
-    std::vector<TipSite> sites;
-    for (const Candidate &candidate : candidates.contacts)
-        sites.push_back(candidate.site);
-    const std::function<bool(const TipSite &)> at_wall = wall_skip(object, sites, {}, params);
-    for (Candidate &candidate : candidates.contacts)
-        candidate.wall = at_wall(candidate.site);
+            if (node->is_pinned)
+                candidates.enforced.push_back(site_of(*node));
+    candidates.plan = std::make_shared<const PlanInput>(prepare_plan(object, params.toolpath_width_mm, params.xy_distance_mm,
+                                                                     head_width_mm + params.toolpath_width_mm, threshold_rad, blockers));
     candidates.params            = params;
     candidates.params.base_cover = nullptr;
     return candidates;
 }
 
-Tips place_tips(const PrintObject &object, const std::vector<Candidate> &contacts, const Params &params, double across_mm)
+Tips place_tips(const PrintObject &object, const Candidates &candidates, double density)
 {
-    std::vector<TipSite> nodes, spare;
-    for (const Candidate &candidate : contacts)
-        if (! candidate.wall) {
-            if (! candidate.kept)
-                spare.push_back(candidate.site);
-            else if (candidate.rim)
-                nodes.push_back(candidate.site);
-        }
-    if (across_mm > 0.)
-        space_tips(nodes, spare, across_mm);
-
-    // The contacts' walls are read; a tip the hold floor seeds reads its own.
-    const std::function<bool(const TipSite &)> at_wall = wall_skip(object, {}, {}, params);
     Tips       tips;
-    const auto islands_start = std::chrono::steady_clock::now();
-    tips.islands_under_held  = restore_hold_floor(object, nodes, spare, params.pillar_diameter_mm, at_wall);
-    tips.island_joins_ms     = ms_since(islands_start);
-    // The floor counted tips a pillar diameter apart, so no alias counted there twice; the merge comes after it so
-    // that a restored contact standing on a kept one merges too.
-    merge_aliases(nodes);
-    tips.sites = std::move(nodes);
+    const auto start = std::chrono::steady_clock::now();
+    const Plan plan  = candidates.plan ? plan_tips(*candidates.plan, candidates.enforced, need_params(density)) : Plan();
+    tips.island_joins_ms     = ms_since(start);
+    tips.islands_under_held  = plan.islands_unheld;
+    tips.islands_slender     = plan.islands_slender;
+    tips.underside_unmet_mm2 = plan.underside_unmet_mm2;
+    for (const PlannedTip &tip : plan.tips)
+        tips.sites.push_back(tip.site);
+    // The planner keeps its tips out of the band on its lattice; the wall skip reads the band exactly.
+    const std::function<bool(const TipSite &)> at_wall = wall_skip(object, tips.sites, {}, candidates.params);
+    tips.sites.erase(std::remove_if(tips.sites.begin(), tips.sites.end(), at_wall), tips.sites.end());
+    merge_aliases(tips.sites);
     return tips;
 }
 
-ScaffoldPoints retune_points(const PrintObject &object, const Candidates &candidates, double density, std::vector<double> &grades)
+ScaffoldPoints retune_points(const PrintObject &object, const Candidates &candidates, double density, TipGrades &grades)
 {
-    const DensityDistances distances = density_distances(candidates.contact_min_distance_mm, density);
-    std::vector<Candidate> contacts = candidates.contacts;
-    // TreeSupport runs no selection at a zero distance, so every contact stands kept.
-    if (distances.within_mm > 0.) {
-        MiniatureSupport::Problem problem = candidates.problem;
-        problem.contact_min_distance_mm   = distances.within_mm;
-        // An unmeasured field: the selection moves no contact.
-        std::vector<char> kept(problem.seeds.size(), 0);
-        for (const MiniatureSupport::ContactSeed &seed : MiniatureSupport::select_contacts(problem, ModelSupportRisk::Field()).retained)
-            kept[size_t(seed.id)] = 1;
-        for (Candidate &candidate : contacts)
-            if (candidate.site.seed < kept.size())
-                candidate.kept = kept[size_t(candidate.site.seed)] != 0;
-    } else
-        for (Candidate &candidate : contacts)
-            candidate.kept = true;
-
-    // A contact's grade reads the risk field at its own position, which no density moves: a seed graded once keeps
-    // its grade, and only the tips no earlier call graded sample the field.
-    Tips tips = place_tips(object, contacts, candidates.params, distances.across_mm);
-    grades.resize(candidates.problem.seeds.size(), 0.);
+    // A tip's grade reads the risk field at its own position: a tip graded once keeps its grade, and only the tips no
+    // earlier call graded sample the field.
+    Tips tips = place_tips(object, candidates, density);
     for (TipSite &site : tips.sites)
-        if (site.seed < grades.size())
-            site.grade_mm = grades[size_t(site.seed)];
+        if (const auto it = grades.find(grade_key(site)); it != grades.end() && site.grade_mm <= 0.)
+            site.grade_mm = it->second;
     const std::vector<double> graded = tip_grades(tips.sites, candidates.risk, candidates.params);
     ScaffoldPoints            points;
     for (size_t i = 0; i < tips.sites.size(); ++ i) {
-        if (tips.sites[i].seed < grades.size())
-            grades[size_t(tips.sites[i].seed)] = graded[i];
+        grades[grade_key(tips.sites[i])] = graded[i];
         points.push_back(point_of(object, candidates.params, tips.sites[i], graded[i]));
     }
     return points;
@@ -1152,6 +1074,8 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
     out.layers.resize(layer_heights.size());
     out.pad_layers                = pad_layer_count(layer_heights, params);
     out.counts.islands_under_held = chosen.islands_under_held;
+    out.counts.islands_slender     = chosen.islands_slender;
+    out.counts.underside_unmet_mm2 = chosen.underside_unmet_mm2;
     out.stage_ms.island_joins     = chosen.island_joins_ms;
     const std::vector<TipSite> &nodes = chosen.sites;
 

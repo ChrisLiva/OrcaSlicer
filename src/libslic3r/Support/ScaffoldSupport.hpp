@@ -30,7 +30,7 @@ struct LayerClip { ExPolygons model, band; };
 // and an exempted head's neck reaches its rings through the band.
 ExPolygons clip_base(const ExPolygons &base, const ExPolygons &exempt_heads, const LayerClip &clip);
 struct Counts { size_t tips_placed = 0, tips_routed = 0, tips_dropped = 0, islands_under_held = 0,
-                pillars_unbraced = 0; };
+                pillars_unbraced = 0, islands_slender = 0; double underside_unmet_mm2 = 0.; };
 struct StageMs { uint32_t island_joins = 0, build = 0, slice = 0; };   // for TreeSupport's profiler
 struct Output { std::vector<LayerAreas> layers;   // one entry per planned layer
                 size_t pad_layers = 0;            // the leading planned layers whose base is the pad
@@ -38,45 +38,36 @@ struct Output { std::vector<LayerAreas> layers;   // one entry per planned layer
                 std::vector<ScaffoldTipResult> results;   // what became of each tip, indexed like `Tips::sites`
                 std::vector<double>            grades;    // each tip's disc width in mm, indexed like `Tips::sites`
               };
-// The tips `draw` builds heads for, with what the hold floor counted and how long its island map took. From a baked
-// list, also the `source` of each point the wall skip took out, and where the hold floor would have seeded a tip, x and
-// y in mm and print z.
+// The tips `draw` builds heads for, with what the planner could not meet and how long it took. From a baked list, also
+// the `source` of each point the wall skip took out, and where the hold floor would have seeded a tip, x and y in mm and
+// print z.
 struct Tips { std::vector<TipSite> sites; size_t islands_under_held = 0; uint32_t island_joins_ms = 0;
-              std::vector<int> wall_skipped; std::vector<Vec3d> bare_islands; };
-// The distances a density sets from `support_contact_min_distance` d. A density runs from 0 at Light through 1 at
-// Medium to 2 at Heavy. `within_mm`, the contact selection's own thinning distance, is d up to Medium and falls to d/2
-// at Heavy; `across_mm`, the distance tips of different overhang components keep, is d at Light and falls to 0 at Medium.
-struct DensityDistances { double within_mm = 0., across_mm = 0.; };
-DensityDistances density_distances(double contact_min_distance_mm, double density);
+              std::vector<int> wall_skipped; std::vector<Vec3d> bare_islands;
+              size_t islands_slender = 0; double underside_unmet_mm2 = 0.; };
 // The density a `scaffold_density` tier stands for.
 double tier_density(ScaffoldDensity tier);
+// The key a tip's grade is kept under.
+std::array<int64_t, 3> grade_key(const TipSite &site);
 
-// A contact the front half placed, as the tip choice reads it. `site` stands where the selection put the contact, or
-// at its source where the selection dropped it; its `seed` indexes the problem's seeds, or is max for a contact the
-// seed pass gave no id, a painted vertical enforcer point, which every density keeps. `kept` is whether the selection
-// kept it, `rim` whether the interior rule of step 1 lets it stand as a tip, `wall` whether the wall skip takes it out.
-struct Candidate { TipSite site; bool kept = false, rim = false, wall = false; };
-// What an auto slice keeps so that `retune_points` can place its tips at another density without running the front
-// half again: the contact problem with its seeds at their source positions, every contact, the risk field the grades
-// read, the grades the slice gave its tips, and the parameters, `support_contact_min_distance` and density the slice ran
-// with.
+// What an auto slice keeps so that `retune_points` can place its tips at another density without slicing again: the
+// contacts an enforcer asked for, the planner's input, the risk field the grades read, the grade the slice gave each
+// tip it drew, and the parameters and density the slice ran with.
 struct Candidates {
-    MiniatureSupport::Problem problem;
-    std::vector<Candidate>    contacts;
-    ModelSupportRisk::Field   risk;
-    std::vector<double>       grades;   // one per problem seed: the disc width `draw` gave its tip, 0 where it drew none
-    Params                    params;   // without `base_cover`, which reads the generator that built it
-    double                    contact_min_distance_mm = 0.;
-    double                    density = 1.;
+    std::vector<TipSite>             enforced;
+    std::shared_ptr<const PlanInput> plan;
+    ModelSupportRisk::Field          risk;
+    TipGrades                        grades;
+    Params                           params;   // without `base_cover`, which reads the generator that built it
+    double                           density = 1.;
 };
-// contacts: TreeSupport's contact_nodes before plan_layer_heights re-distributes them, the nodes the contact selection
-// kept. dropped: the nodes the erase loop after select_contacts took out, the hold floor's candidates. The problem and
-// the risk field are TreeSupport's to move in once its measurement is done.
-Candidates collect_candidates(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts,
-                              const std::vector<SupportNode *> &dropped, const Params &params);
-// Steps 1 to 4 on `contacts`, with tips of different components kept `across_mm` apart. Reads no planned layer, so
-// TreeSupport plans a layer topped at every tip's z.
-Tips place_tips(const PrintObject &object, const std::vector<Candidate> &contacts, const Params &params, double across_mm);
+// contacts: TreeSupport's contact_nodes before plan_layer_heights re-distributes them, of which the planner keeps the
+// ones an enforcer asked for. threshold_rad and blockers: the overhang detector's threshold and the support blockers per
+// object layer. The risk field is TreeSupport's to move in once its measurement is done.
+Candidates collect_candidates(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts, const Params &params,
+                              double threshold_rad, const std::vector<Polygons> &blockers);
+// The planner at `density`, then the wall skip and the alias merge. Reads no planned layer, so TreeSupport plans a layer
+// topped at every tip's z.
+Tips place_tips(const PrintObject &object, const Candidates &candidates, double density);
 // A tip as a list point in ModelObject::raw_mesh()'s frame: a grade over three toolpath widths reads Heavy.
 ScaffoldPoint point_of(const PrintObject &object, const Params &params, const TipSite &site, double grade_mm);
 // A baked list in the builder's frame: each point mapped through trafo_centered(), z + params.z_offset_mm, snapped

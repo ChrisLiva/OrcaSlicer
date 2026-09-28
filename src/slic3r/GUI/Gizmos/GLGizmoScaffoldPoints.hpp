@@ -6,6 +6,7 @@
 #include "slic3r/GUI/I18N.hpp"
 #include "libslic3r/ObjectID.hpp"
 #include "libslic3r/ScaffoldPoints.hpp"
+#include "libslic3r/Support/ScaffoldRetune.hpp"
 
 #include <optional>
 
@@ -13,7 +14,6 @@ namespace Slic3r {
 
 class ModelInstance;
 class PrintObject;
-namespace ScaffoldSupport { struct Candidates; }
 
 namespace GUI {
 
@@ -135,7 +135,7 @@ private:
     // grades new tips; m_density_points is the slider's last result, unset once the cache reloads from the object.
     float                                              m_density = 1.f;
     std::shared_ptr<const ScaffoldSupport::Candidates> m_density_candidates;
-    std::vector<double>                                m_density_grades;
+    ScaffoldSupport::TipGrades                         m_density_grades;
     std::optional<ScaffoldPoints>                      m_density_points;
 
     ScaffoldHeadSize        m_new_point_size = ScaffoldHeadSize::Light;

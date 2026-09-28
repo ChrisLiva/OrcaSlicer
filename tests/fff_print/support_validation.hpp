@@ -126,6 +126,8 @@ struct Metrics
     size_t tips_dropped            = 0;
     size_t islands_under_held      = 0;
     size_t pillars_unbraced        = 0;
+    size_t islands_slender         = 0;
+    double underside_unmet_mm2     = 0.;
     size_t floating_pieces_removed = 0;
     bool   coverage_available      = false;
     bool   stability_available     = false;

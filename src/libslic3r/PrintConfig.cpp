@@ -6927,10 +6927,10 @@ void PrintConfigDef::init_fff_params()
     def = this->add("scaffold_density", coEnum);
     def->label    = L("Scaffold density");
     def->category = L("Support");
-    def->tooltip  = L("How many support tips Tree Scaffold places. Medium keeps the minimum contact distance between the tips of one "
-                      "overhang. Light also keeps that distance between the tips of neighbouring overhangs, so fewer tips "
-                      "stand on a detailed underside. Heavy halves the distance, so more tips stand under every overhang. "
-                      "Every floating part of the model keeps its minimum number of tips at any density.");
+    def->tooltip  = L("How many support tips Tree Scaffold places. Every part of the model that starts in mid-air takes a tip "
+                      "where it starts at any density. Light lets an underside hang farthest past its tips and lets a part "
+                      "stand tallest over them, so the fewest tips stand; Heavy the least, so the most stand. An underside "
+                      "steeper than the support threshold angle takes no tip.");
     def->enum_keys_map = &ConfigOptionEnum<ScaffoldDensity>::get_enum_values();
     def->enum_values.emplace_back("light");
     def->enum_values.emplace_back("medium");

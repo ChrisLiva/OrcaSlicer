@@ -167,6 +167,8 @@ Metrics metrics_of(const SupportAnalysis::Report &report)
     m.tips_dropped            = report.tips_dropped;
     m.islands_under_held      = report.islands_under_held;
     m.pillars_unbraced        = report.pillars_unbraced;
+    m.islands_slender         = report.islands_slender;
+    m.underside_unmet_mm2     = report.underside_unmet_mm2;
     m.floating_pieces_removed = report.floating_pieces_removed;
     return m;
 }
@@ -225,6 +227,8 @@ Metrics accumulate_metrics(const std::vector<const SupportAnalysis::Report *> &r
         m.tips_dropped             += one.tips_dropped;
         m.islands_under_held       += one.islands_under_held;
         m.pillars_unbraced         += one.pillars_unbraced;
+        m.islands_slender          += one.islands_slender;
+        m.underside_unmet_mm2      += one.underside_unmet_mm2;
         m.floating_pieces_removed  += one.floating_pieces_removed;
         m.unknown_contacts         += one.unknown_contacts;
         m.inaccessible_groups      += one.inaccessible_groups;
@@ -380,6 +384,8 @@ void write_result(const CaseResult &result, std::ostream &out)
     metrics["tips_dropped"]             = result.metrics.tips_dropped;
     metrics["islands_under_held"]       = result.metrics.islands_under_held;
     metrics["pillars_unbraced"]         = result.metrics.pillars_unbraced;
+    metrics["islands_slender"]          = result.metrics.islands_slender;
+    metrics["underside_unmet_mm2"]      = result.metrics.underside_unmet_mm2;
     metrics["floating_pieces_removed"]  = result.metrics.floating_pieces_removed;
     metrics["coverage_available"]       = result.metrics.coverage_available;
     metrics["stability_available"]      = result.metrics.stability_available;

@@ -972,7 +972,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, in
     toggle_line("support_contact_min_distance", is_auto(support_type) && (support_is_normal_tree || support_is_scaffold));
     // Scaffold overrides follow the blanket have_support_material loop above so they win over it.
     toggle_field("support_miniature_contacts", have_support_material && !support_is_scaffold);
-    toggle_field("support_contact_min_distance", have_support_material && (config->opt_bool("support_miniature_contacts") || support_is_scaffold));
+    // Scaffold places its tips by need and reads no contact distance.
+    toggle_field("support_contact_min_distance", have_support_material && config->opt_bool("support_miniature_contacts") && !support_is_scaffold);
     toggle_field("support_top_z_distance", have_support_material && !support_is_scaffold);
     toggle_field("support_on_build_plate_only", have_support_material && !support_is_scaffold);
 
