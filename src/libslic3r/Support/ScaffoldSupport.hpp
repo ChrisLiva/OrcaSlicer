@@ -4,6 +4,7 @@
 #include "ModelSupportRisk.hpp"
 #include "../ScaffoldPoints.hpp"
 #include "ScaffoldRetune.hpp"
+#include "ScaffoldPlan.hpp"
 namespace Slic3r::ScaffoldSupport {
 struct Params {   // filled by TreeSupport from its config and support params
     double toolpath_width_mm = 0., pillar_diameter_mm = 0., xy_distance_mm = 0., bridge_length_mm = 0.,
@@ -37,22 +38,6 @@ struct Output { std::vector<LayerAreas> layers;   // one entry per planned layer
                 std::vector<ScaffoldTipResult> results;   // what became of each tip, indexed like `Tips::sites`
                 std::vector<double>            grades;    // each tip's disc width in mm, indexed like `Tips::sites`
               };
-// Where a tip stands. `contact` is true for a tip standing for a contact the front half placed, which `draw` grades
-// against the risk field, and false for a tip the hold floor seeded under an island the front half left without one. `enforced` is a contact a support enforcer asked for, painted facets or an enforcer
-// volume (`SupportNode::is_pinned`), which the wall skip keeps and whose head `clip_base` clips by the model alone.
-// `grade_mm` is the disc width a baked point asks for, 0 to let `draw` grade the tip, and `source` the point's index in
-// a baked list, -1 for any other tip. Both come after `enforced`, since tips are built by position.
-struct TipSite
-{
-    Point              position;
-    double             print_z      = 0.;
-    int                obj_layer_nr = 0;
-    uint64_t           seed         = std::numeric_limits<uint64_t>::max();
-    bool               contact      = false;
-    bool               enforced     = false;
-    double             grade_mm     = 0.;
-    int                source       = -1;
-};
 // The tips `draw` builds heads for, with what the hold floor counted and how long its island map took. From a baked
 // list, also the `source` of each point the wall skip took out, and where the hold floor would have seeded a tip, x and
 // y in mm and print z.

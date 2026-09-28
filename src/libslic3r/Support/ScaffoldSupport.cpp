@@ -76,24 +76,6 @@ TipSite site_of(const SupportNode &node) { return { node.position, node.print_z,
 // a sum of layer heights, so a band edge carries an epsilon.
 size_t hold_floor(double height_mm) { return height_mm <= 1. + EPSILON ? 1 : height_mm <= 5. + EPSILON ? 2 : 3; }
 
-// The point of `piece` furthest inside it, to the binary search's 0.01 mm: the middle of its deepest inward offset.
-Point inscribed_point(const ExPolygon &piece)
-{
-    ExPolygons deepest { piece };
-    double     inside = 0., outside = 0.5 * double(get_extents(piece).size().minCoeff());
-    while (outside - inside > scale_(0.01)) {
-        const double depth = 0.5 * (inside + outside);
-        if (ExPolygons shrunk = offset_ex(piece, -float(depth)); shrunk.empty())
-            outside = depth;
-        else {
-            inside  = depth;
-            deepest = std::move(shrunk);
-        }
-    }
-    const Point middle = deepest.front().contour.centroid();
-    return deepest.front().contains(middle) ? middle : deepest.front().contour.points.front();
-}
-
 // How many tips a pillar diameter apart `piece` holds: the points of a hexagonal grid at that spacing inside the piece
 // shrunk by half of it. A tip stands anywhere in a piece whatever its width, so every piece holds at least one, even
 // where the shrunk piece is empty.
