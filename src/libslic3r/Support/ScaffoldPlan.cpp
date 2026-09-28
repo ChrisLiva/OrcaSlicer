@@ -167,6 +167,11 @@ public:
             for (int dx = -int(wall_r) - 1; dx <= int(wall_r) + 1; ++ dx)
                 if (double(dx * dx + dy * dy) <= wall_r * wall_r)
                     m_wall_disc.emplace_back(dx, dy);
+        const double head_r = in.toolpath_width_mm / in.cell_mm;
+        for (int dy = -int(head_r); dy <= int(head_r); ++ dy)
+            for (int dx = -int(head_r); dx <= int(head_r); ++ dx)
+                if (double(dx * dx + dy * dy) <= head_r * head_r)
+                    m_head_disc.emplace_back(dx, dy);
     }
 
     Plan run(const std::vector<TipSite> &enforced)
@@ -183,6 +188,7 @@ public:
             layer(l, enforced_on[l]);
             stability(l);
         }
+        prune_pending(std::numeric_limits<float>::max());
         std::stable_sort(m_plan.tips.begin(), m_plan.tips.end(), [](const PlannedTip &a, const PlannedTip &b) {
             return a.site.print_z != b.site.print_z ? a.site.print_z < b.site.print_z :
                    a.site.position.x() != b.site.position.x() ? a.site.position.x() < b.site.position.x() :
@@ -207,12 +213,16 @@ private:
     std::vector<std::vector<Vec3d>> m_anchors;
     std::vector<char>        m_rooted, m_slender;
     std::vector<std::pair<int, int>> m_wall_disc;
+    std::vector<std::pair<int, int>> m_head_disc;   // the cells under a small head, two support lines across
     Plan                     m_plan;
     // The layer being walked and the one under it: their window on the lattice and each cell's run.
     LayerGrid                m_prev_grid;
     std::vector<float>       m_prev_run;
     const LayerGrid         *m_grid = nullptr;
     std::vector<float>       m_dist, m_tip_dist;
+    // Underside cells that hang past the reach with no head answering them yet: lattice x and y, bottom z and run.
+    struct Pending { int x, y; float z, run; };
+    std::vector<Pending>     m_pending;
     std::vector<size_t>      m_heads;      // the cells under the heads placed on the layer being walked
 
     const std::vector<SupportAnalysis::Piece> &pieces() const { return m_in.components.pieces; }
@@ -317,33 +327,37 @@ private:
         return site;
     }
 
-    // Octile Dijkstra through the layer's material, from whatever the heap holds.
+    // Dijkstra through the layer's material, from whatever the heap holds, over the 16 moves of a king and a knight: a
+    // path overstates a straight distance by at most 3 %, where the king's 8 alone overstate it by 8 %. A knight's move
+    // needs material on the two cells it passes between.
     void spread(Heap &heap)
     {
-        const LayerGrid &g    = *m_grid;
-        const float      step = float(m_in.cell_mm), diag = float(m_in.cell_mm * M_SQRT2);
+        static constexpr int moves[16][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 }, { 1, 1 }, { 1, -1 }, { -1, 1 }, { -1, -1 },
+                                              { 2, 1 }, { 2, -1 }, { -2, 1 }, { -2, -1 }, { 1, 2 }, { 1, -2 }, { -1, 2 }, { -1, -2 } };
+        const LayerGrid &g = *m_grid;
+        const float      c = float(m_in.cell_mm);
+        const float      cost[3] = { c, c * float(M_SQRT2), c * std::sqrt(5.f) };
+        const auto       solid = [&g](int x, int y) { return x >= 0 && y >= 0 && x < g.w && y < g.h && g.cells[size_t(y) * size_t(g.w) + size_t(x)] != 0; };
         while (! heap.empty()) {
             const auto [d, i] = heap.top();
             heap.pop();
             if (d > m_dist[i])
                 continue;
             const int x = int(i % size_t(g.w)), y = int(i / size_t(g.w));
-            for (int dy = -1; dy <= 1; ++ dy)
-                for (int dx = -1; dx <= 1; ++ dx) {
-                    if ((dx | dy) == 0)
-                        continue;
-                    const int nx = x + dx, ny = y + dy;
-                    if (nx < 0 || ny < 0 || nx >= g.w || ny >= g.h)
-                        continue;
-                    const size_t j = size_t(ny) * size_t(g.w) + size_t(nx);
-                    if (g.cells[j] == 0)
-                        continue;
-                    const float nd = d + (dx != 0 && dy != 0 ? diag : step);
-                    if (nd < m_dist[j]) {
-                        m_dist[j] = nd;
-                        heap.emplace(nd, j);
-                    }
+            for (const auto &m : moves) {
+                const int nx = x + m[0], ny = y + m[1];
+                if (! solid(nx, ny))
+                    continue;
+                const bool knight = std::abs(m[0]) + std::abs(m[1]) == 3;
+                if (knight && ! (solid(x + m[0] / 2, y + m[1] / 2) && solid(x + (m[0] - m[0] / 2), y + (m[1] - m[1] / 2))))
+                    continue;
+                const float  nd = d + cost[knight ? 2 : (m[0] != 0 && m[1] != 0 ? 1 : 0)];
+                const size_t j  = size_t(ny) * size_t(g.w) + size_t(nx);
+                if (nd < m_dist[j]) {
+                    m_dist[j] = nd;
+                    heap.emplace(nd, j);
                 }
+            }
         }
     }
 
@@ -396,44 +410,87 @@ private:
             }
 
         m_heads.clear();
-        births(l, heap);
         for (const TipSite &tip : enforced)
             place(tip, TipNeed::Enforced, &heap);
+        births(l, enforced, heap);
         spread(heap);
         spread_tips();
 
-        // Tips where a run exceeds the reach, until none does or no eligible cell is left to answer it. The due cell
-        // whose run is nearest twice the reach goes first, so a head covers the band past the reach on both sides.
-        const float reach = float(m_need.reach_mm), aa = float(a);
-        const auto  run_of = [&](size_t i) { return std::max(0.f, m_dist[i] - aa); };
+        // Tips where a run exceeds the reach, on any cell the layer below does not stand under, the step it carries
+        // included: on a shallow slope that step is most of the surface that hangs. A head may stand on any such cell,
+        // due or not, so it can stand in from an edge and still cover what hangs there. A head covers the underside within the reach plus the self-support step
+        // plus its own radius, in 3-D, and has to answer at least a disc of half the reach of it: underside that hangs
+        // past the reach and no head answers stays pending while it lies within that cover under the layer walked, so a
+        // shallow frontier, which comes due a scattered cell at a time, calls for a head once enough of it hangs, and a
+        // sliver too small to be worth a scar prints as it hangs. Each head goes on the eligible due cell covering the
+        // most due and pending cells, candidates sampled a third of the cover apart, among equals the first listed,
+        // lowest in y, then x. A cell whose small head's disc lies wholly on the layer's material goes before one on an
+        // edge, where half the disc would hang and the scar would sit on the corner; a feature narrower than the disc
+        // takes its head on the edge. What hangs past one and a half reaches and no head covers counts as unmet.
+        const float  reach  = float(m_need.reach_mm + 0.5 * m_in.cell_mm), aa = float(a);
+        const auto   run_of = [&](size_t i) { return std::max(0.f, m_dist[i] - aa); };
+        const double cover  = m_need.reach_mm + a + m_in.toolpath_width_mm;
+        const double cover_cells = cover / m_in.cell_mm;
+        const int    stride      = std::max(1, int(std::lround(cover_cells / 3.)));
+        const size_t least       = std::max<size_t>(1, size_t(std::lround(M_PI * 0.25 * m_need.reach_mm * m_need.reach_mm / (m_in.cell_mm * m_in.cell_mm))));
+        const float  z           = float(m_in.slabs[l].bottom_z);
+        prune_pending(z - float(cover));
+        std::vector<char> hanging(cells, 0);
         for (;;) {
-            std::vector<std::pair<float, size_t>> due;
+            std::vector<size_t> due;
             for (size_t i = 0; i < cells; ++ i)
-                if (kind[i] == 3 && run_of(i) > reach)
-                    due.emplace_back(std::abs(run_of(i) - 2.f * reach), i);
+                if (kind[i] >= 2 && ! hanging[i] && run_of(i) > reach)
+                    due.push_back(i);
             if (due.empty())
                 break;
-            std::sort(due.begin(), due.end());
-            bool placed = false;
-            for (const auto &[key, i] : due) {
-                const Point p = centre(g.x0 + int(i % size_t(g.w)), g.y0 + int(i / size_t(g.w)));
-                if (eligible(l, p)) {
-                    place(site_at(l, p, 0.), TipNeed::Underside, &heap);
-                    spread(heap);
-                    spread_tips();
-                    placed = true;
-                    break;
+            // What a head at cell `c` of this layer covers: due cells on the layer and pending cells under it.
+            const auto covers = [&](size_t c) {
+                const int    cx = g.x0 + int(c % size_t(g.w)), cy = g.y0 + int(c / size_t(g.w));
+                const double r2 = cover_cells * cover_cells;
+                size_t       n  = 0;
+                for (size_t j : due) {
+                    const double dx = double(g.x0 + int(j % size_t(g.w)) - cx), dy = double(g.y0 + int(j / size_t(g.w)) - cy);
+                    n += dx * dx + dy * dy <= r2;
                 }
-            }
-            if (! placed) {
-                // Under a blocker or at a wall: the need goes unmet, counted once, and the cells print as they hang.
-                m_plan.underside_unmet_mm2 += double(due.size()) * m_in.cell_mm * m_in.cell_mm;
-                for (const auto &[key, i] : due) {
-                    m_dist[i] = 0.f;
-                    heap.emplace(0.f, i);
+                for (const Pending &q : m_pending) {
+                    const double dx = double(q.x - cx), dy = double(q.y - cy), dz = double(z - q.z) / m_in.cell_mm;
+                    n += dx * dx + dy * dy + dz * dz <= r2;
                 }
-                spread(heap);
+                return n;
+            };
+            std::vector<size_t> sites;
+            for (size_t i = 0; i < cells; ++ i)
+                if (kind[i] >= 2)
+                    sites.push_back(i);
+            size_t best = 0, best_n = 0;
+            for (int pass = 0; pass < 3 && best_n < least; ++ pass)
+                for (size_t i : sites) {
+                    const int x = g.x0 + int(i % size_t(g.w)), y = g.y0 + int(i / size_t(g.w));
+                    if (pass == 0 && (x % stride != 0 || y % stride != 0))
+                        continue;
+                    if (pass < 2 && std::any_of(m_head_disc.begin(), m_head_disc.end(), [&](const std::pair<int, int> &d) { return g.at(x + d.first, y + d.second) == 0; }))
+                        continue;
+                    const size_t n = covers(i);
+                    if (n > best_n && eligible(l, centre(x, y))) {
+                        best   = i;
+                        best_n = n;
+                    }
+                }
+            if (best_n < least) {
+                for (size_t i : due) {
+                    hanging[i] = 1;
+                    m_pending.push_back({ g.x0 + int(i % size_t(g.w)), g.y0 + int(i / size_t(g.w)), z, run_of(i) });
+                }
+                break;
             }
+            const int bx = g.x0 + int(best % size_t(g.w)), by = g.y0 + int(best / size_t(g.w));
+            place(site_at(l, centre(bx, by), 0.), TipNeed::Underside, &heap);
+            spread(heap);
+            spread_tips();
+            m_pending.erase(std::remove_if(m_pending.begin(), m_pending.end(), [&](const Pending &q) {
+                const double dx = double(q.x - bx), dy = double(q.y - by), dz = double(z - q.z) / m_in.cell_mm;
+                return dx * dx + dy * dy + dz * dz <= cover_cells * cover_cells;
+            }), m_pending.end());
         }
 
         // What the layer above hangs from. Material within the reach of a head on this layer spans to that head as a
@@ -443,6 +500,20 @@ private:
         for (size_t i = 0; i < cells; ++ i)
             if (kind[i] != 0 && m_tip_dist[i] > reach)
                 m_prev_run[i] = m_dist[i] == unreached ? 0.f : run_of(i);
+    }
+
+    // Drops the pending cells below `z_min`, which no head placed from here on covers, counting those that hang past one
+    // and a half reaches as unmet.
+    void prune_pending(float z_min)
+    {
+        const float far = 1.5f * float(m_need.reach_mm);
+        m_pending.erase(std::remove_if(m_pending.begin(), m_pending.end(), [&](const Pending &q) {
+            if (q.z >= z_min)
+                return false;
+            if (q.run > far)
+                m_plan.underside_unmet_mm2 += m_in.cell_mm * m_in.cell_mm;
+            return true;
+        }), m_pending.end());
     }
 
     // `m_tip_dist` from every head placed on the layer being walked, through its material.
@@ -461,10 +532,10 @@ private:
         std::swap(m_dist, m_tip_dist);
     }
 
-    // Each island starting on slab `l` takes one tip at its deepest point, unless it is debris, merges before it could
-    // droop, or hangs from a wall; an island no tip can reach is counted. An island left without a tip prints as it
-    // hangs, so its cells anchor what grows on them.
-    void births(size_t l, Heap &heap)
+    // Each island starting on slab `l` takes one tip at its deepest point, unless an enforced tip already stands on its
+    // birth piece, it is debris, it merges before it could droop, or it hangs from a wall; an island no tip can reach is
+    // counted. An island left without a tip prints as it hangs, so its cells anchor what grows on them.
+    void births(size_t l, const std::vector<TipSite> &enforced, Heap &heap)
     {
         const LayerGrid &g     = *m_grid;
         const size_t     first = m_in.components.slab_range[l].first, last = m_in.components.slab_range[l].second;
@@ -478,7 +549,8 @@ private:
         };
         for (size_t p = first; p < last; ++ p) {
             const SupportAnalysis::Piece &piece = pieces()[p];
-            if (! piece.below.empty() || m_rooted[p])
+            if (! piece.below.empty() || m_rooted[p] ||
+                std::any_of(enforced.begin(), enforced.end(), [&piece](const TipSite &tip) { return piece.polygon.contains(tip.position); }))
                 continue;
             const bool   merges = m_births.merge_slab[p] < m_in.slabs.size();
             const double free   = m_births.free_mm[p];

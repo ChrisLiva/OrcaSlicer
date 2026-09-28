@@ -131,12 +131,13 @@ TEST_CASE("Ledges narrower than the reach take no tip", "[ScaffoldPlan]")
     }
 }
 
-TEST_CASE("A ledge hanging past the reach takes tips only at the tiers whose reach it passes", "[ScaffoldPlan]")
+TEST_CASE("A ledge hanging past the reach takes tips only at the tiers whose reach it passes by a head's worth", "[ScaffoldPlan]")
 {
-    // A 1.5 mm ledge hangs 1.24 mm past what the layer below carries: past Medium's 1 mm and Heavy's 0.6 mm, inside
-    // Light's 1.5 mm.
-    Sliced s(merged({ box(0, 0, 0, 6, 6, 10), box(6, 1, 5, 1.5, 4, 0.5) }));
-    const BoundingBoxf3 ledge(Vec3d(6., 0.9, 4.9), Vec3d(7.6, 5.1, 5.6));
+    // A 2 mm ledge hangs 1.74 mm past what the layer below carries. A head has to answer a disc of half the reach, and
+    // the 4 mm strip past Medium's 1 mm or Heavy's 0.6 mm holds that much, while the 0.1 mm strip past Light's 1.5 mm
+    // is a sliver that prints as it hangs.
+    Sliced s(merged({ box(0, 0, 0, 6, 6, 10), box(6, 1, 5, 2, 4, 0.5) }));
+    const BoundingBoxf3 ledge(Vec3d(6., 0.9, 4.9), Vec3d(8.1, 5.1, 5.6));
     CHECK(count_in(s, s.plan(0.), ledge) == 0);
     CHECK(count_in(s, s.plan(1.), ledge) > 0);
     CHECK(count_in(s, s.plan(2.), ledge) >= count_in(s, s.plan(1.), ledge));
@@ -155,9 +156,9 @@ TEST_CASE("A floating plate takes tips within the reach of its whole underside a
         const size_t n     = count_in(s, plan, plate);
         CHECK(n > last);
         last = n;
-        // Every underside sample on a 0.5 mm grid lies within the reach of a tip's head: the reach runs from the rim of
-        // the head's disc, two support lines across, plus the 0.26 mm the self-support step grants, plus half a
-        // cell's diagonal for where the sample falls in its cell.
+        // Every underside sample on a 0.5 mm grid lies within one and a half reaches of a tip's head, the most a
+        // sliver too small for a head of its own may hang: measured from the rim of the head's disc, two support lines
+        // across, plus the 0.26 mm the self-support step grants, plus half a cell's diagonal for where the sample falls.
         double worst = 0.;
         for (double x = 0.1; x < 12.; x += 0.5)
             for (double y = 0.1; y < 12.; y += 0.5) {
@@ -167,7 +168,8 @@ TEST_CASE("A floating plate takes tips within the reach of its whole underside a
                         near = std::min(near, (s.at(tip) - Vec2d(x, y)).norm());
                 worst = std::max(worst, near);
             }
-        CHECK(worst <= reach + width_mm + 0.26 + 0.15);
+        CHECK(worst <= 1.5 * reach + width_mm + 0.26 + 0.15);
+        CHECK(plan.underside_unmet_mm2 < 0.01 * 144.);
     }
 }
 
