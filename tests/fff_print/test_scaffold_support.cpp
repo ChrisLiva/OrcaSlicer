@@ -7,6 +7,7 @@
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Support/ScaffoldSupport.hpp"
 #include "libslic3r/Support/SupportAnalysis.hpp"
 #include "libslic3r/Support/SupportComponents.hpp"
 #include "libslic3r/Support/SupportParameters.hpp"
@@ -375,6 +376,48 @@ TriangleMesh blocked_lip_fixture()
     block.merge(post);
     block.merge(lip);
     return block;
+}
+
+// A 20 x 20 x 12 mm box open at the top, at x 0..20, y 0..20: a 1 mm floor and four 1 mm walls. A head inside it faces
+// the floor, and a pillar or a bridge only walks down, never over a wall, so nothing inside routes to the pad.
+TriangleMesh open_box_fixture()
+{
+    TriangleMesh box   = make_cube(20., 20., 1.);
+    TriangleMesh south = make_cube(20., 1., 12.);
+    TriangleMesh north = make_cube(20., 1., 12.);
+    north.translate(0.f, 19.f, 0.f);
+    TriangleMesh west = make_cube(1., 20., 12.);
+    TriangleMesh east = make_cube(1., 20., 12.);
+    east.translate(19.f, 0.f, 0.f);
+    for (const TriangleMesh *wall : { &south, &north, &west, &east })
+        box.merge(*wall);
+    return box;
+}
+
+// The open box with a 20 x 2 x 1 mm bar across its top at y 9..11, z 12..13, lying on the walls at x 0..1 and 19..20,
+// and a 1 x 1 mm rod hanging from the bar's middle at x 9.5..10.5, y 9.5..10.5 down to z 6: the rod starts in mid-air
+// 5 mm over the floor and meets the rooted box through the bar 6 mm up.
+TriangleMesh boxed_rod_fixture()
+{
+    TriangleMesh box = open_box_fixture();
+    TriangleMesh bar = make_cube(20., 2., 1.);
+    bar.translate(0.f, 9.f, 12.f);
+    TriangleMesh rod = make_cube(1., 1., 6.);
+    rod.translate(9.5f, 9.5f, 6.f);
+    box.merge(bar);
+    box.merge(rod);
+    return box;
+}
+
+// The open box with a 3 x 8 x 1 mm ledge off its west wall's inner face at x 1..4, y 6..14, z 6..7: the ledge hangs
+// 3 mm from the wall, past the reach, over the floor.
+TriangleMesh boxed_ledge_fixture()
+{
+    TriangleMesh box   = open_box_fixture();
+    TriangleMesh ledge = make_cube(3., 8., 1.);
+    ledge.translate(1.f, 6.f, 6.f);
+    box.merge(ledge);
+    return box;
 }
 
 // A 40 x 12 x 1 mm slab at x 0..40, y 0..12, z 3..4 that touches nothing, and a 2 x 2 x 4 mm post at x 42..44,
@@ -907,6 +950,112 @@ TEST_CASE("A tip with no path to the pad is dropped and counted", "[ScaffoldSupp
     CHECK(report.tips_dropped >= 1);
     CHECK(report.tips_placed == report.tips_routed + report.tips_dropped);
     CHECK(report.floating_pieces_removed == 0);
+}
+
+TEST_CASE("Island holders that fail to route count their islands", "[ScaffoldSupport]")
+{
+    using namespace ScaffoldSupport;
+    using Result = ScaffoldTipResult;
+    const TipSite held { Point::new_scale(5., 5.), 3., 29 };
+    const auto    moved = [&held](double dx) {
+        TipSite site = held;
+        site.position += Point::new_scale(dx, 0.);
+        return site;
+    };
+    const auto unheld = [](const Plan &plan, const std::vector<TipSite> &sites, const std::vector<Result> &results) {
+        return unheld_after_routing(plan, sites, results).islands.size();
+    };
+
+    // One birth tip holds its own island and a nub that waited for its merge and met the tip's part. An island no tip
+    // can stand under is the plan's own count, and one the bed holds through the part it met needs no tip.
+    Plan birth;
+    birth.tips.push_back({ held, TipNeed::Birth });
+    birth.islands.push_back({ Vec3d(5., 5., 3.), { 0 }, false, IslandReason::Tip });
+    birth.islands.push_back({ Vec3d(5.6, 5., 3.4), { 0 }, false, IslandReason::Hung });
+    birth.islands.push_back({ Vec3d(9., 9., 4.), {}, false, IslandReason::NoNeck });
+    birth.islands.push_back({ Vec3d(1., 1., 2.), {}, true, IslandReason::Hung });
+    CHECK(unheld(birth, { held }, { Result::Unrouted }) == 2);
+    CHECK(unheld(birth, { held }, { Result::Routed }) == 0);
+    // The wall skip took the tip out, so no drawn site stands for it.
+    CHECK(unheld(birth, {}, {}) == 2);
+    // The alias merge folded it into a tip 0.05 mm off, within sla::D_SP, and that one routed; one 0.2 mm off is another.
+    CHECK(unheld(birth, { moved(0.05) }, { Result::Routed }) == 0);
+    CHECK(unheld(birth, { moved(0.2) }, { Result::Routed }) == 2);
+    // The match is 3-D: a routed site over the tip's xy but 0.2 mm higher stands for another tip.
+    TipSite above = held;
+    above.print_z += 0.2;
+    CHECK(unheld(birth, { above }, { Result::Routed }) == 2);
+    // Two drawn sites within sla::D_SP of the tip: it reads routed when either one routed, whichever comes first.
+    CHECK(unheld(birth, { held, moved(0.05) }, { Result::Unrouted, Result::Routed }) == 0);
+    CHECK(unheld(birth, { held, moved(0.05) }, { Result::Routed, Result::Unrouted }) == 0);
+    const PlanOutcome failed = unheld_after_routing(birth, { held }, { Result::Unrouted });
+    REQUIRE(failed.tips.size() == 1);
+    CHECK(failed.tips.front() == Result::Unrouted);
+    CHECK(unheld_after_routing(birth, {}, {}).tips.front() == Result::Wall);
+
+    // A nub whose own slab took an underside head hangs from that head the same way, and the head that fails hands the
+    // underside it answered back.
+    Plan underside;
+    underside.tips.push_back({ held, TipNeed::Underside, 0.25 });
+    underside.islands.push_back({ Vec3d(5., 5., 3.), { 0 }, false, IslandReason::Hung });
+    const PlanOutcome dropped = unheld_after_routing(underside, { held }, { Result::Unrouted });
+    CHECK(dropped.islands.size() == 1);
+    CHECK_THAT(dropped.underside_mm2, WithinAbs(0.25, 1e-12));
+    const PlanOutcome routed = unheld_after_routing(underside, { held }, { Result::Routed });
+    CHECK(routed.islands.empty());
+    CHECK_THAT(routed.underside_mm2, WithinAbs(0., 1e-12));
+}
+
+TEST_CASE("A birth tip the builder cannot route lists its island as bare and warns", "[ScaffoldSupport]")
+{
+    // At 0.2 mm layers the rod's birth slab is z 6.0..6.2. Its tip stands at the rod's middle over the box floor, where
+    // no route leaves the box, so the rod prints from mid-air and the slice says where.
+    Print print;
+    init_and_process_print({ boxed_rod_fixture() }, print, scaffold_config());
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    REQUIRE(object.support_analysis() != nullptr);
+    const std::shared_ptr<const ScaffoldRecord> record = object.scaffold_record();
+    REQUIRE(record != nullptr);
+    CHECK_FALSE(record->baked);
+    const Vec3f rod_birth(10.f, 10.f, 6.f);
+    const auto  at_rod = [&rod_birth](const Vec3f &p) {
+        return (p.head<2>() - rod_birth.head<2>()).norm() <= 0.3f && std::abs(p.z() - rod_birth.z()) <= 0.25f;
+    };
+    const auto tip = std::find_if(record->tips.begin(), record->tips.end(), [&](const ScaffoldRecord::Tip &t) { return at_rod(t.pos); });
+    REQUIRE(tip != record->tips.end());
+    CHECK(tip->result == ScaffoldTipResult::Unrouted);
+
+    const SupportAnalysis::Report &report = *object.support_analysis();
+    INFO("tips placed " << report.tips_placed << " routed " << report.tips_routed << " dropped " << report.tips_dropped
+                        << ", islands under-held " << report.islands_under_held << ", bare islands " << record->bare_islands.size());
+    CHECK(report.islands_under_held >= 1);
+    CHECK(record->bare_islands.size() == report.islands_under_held);
+    CHECK(std::any_of(record->bare_islands.begin(), record->bare_islands.end(), at_rod));
+    CHECK(warns(object, "islands print with no tip holding them."));
+}
+
+TEST_CASE("An unrouted Underside head adds its cells back to unmet", "[ScaffoldSupport]")
+{
+    // The ledge hangs 3 mm off the wall, past one and a half reaches, so its heads answer underside the plan would
+    // otherwise count unmet; the box leaves them no route.
+    Print print;
+    init_and_process_print({ boxed_ledge_fixture() }, print, scaffold_config());
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    REQUIRE(object.support_analysis() != nullptr);
+    const std::shared_ptr<const ScaffoldRecord> record = object.scaffold_record();
+    REQUIRE(record != nullptr);
+    const SupportAnalysis::Report &report = *object.support_analysis();
+    INFO("tips placed " << report.tips_placed << " routed " << report.tips_routed << " dropped " << report.tips_dropped
+                        << ", underside unmet " << report.underside_unmet_mm2 << " mm2");
+    const auto under_ledge = [](const ScaffoldRecord::Tip &t) {
+        return t.pos.x() > 1.f && t.pos.x() < 4.f && t.pos.y() > 6.f && t.pos.y() < 14.f && std::abs(t.pos.z() - 6.f) <= 0.25f;
+    };
+    REQUIRE(std::any_of(record->tips.begin(), record->tips.end(), under_ledge));
+    CHECK(std::none_of(record->tips.begin(), record->tips.end(),
+                       [&](const ScaffoldRecord::Tip &t) { return under_ledge(t) && t.result == ScaffoldTipResult::Routed; }));
+    CHECK(report.underside_unmet_mm2 > 0.);
 }
 
 TEST_CASE("A head whose neck bottoms in the xy band is dropped while one whose neck clears it keeps its head and no ring floats",
@@ -1595,7 +1744,7 @@ TEST_CASE("A baked scaffold list builds the tips it holds and reports each point
     CHECK(heavier.report.support_volume_mm3 > lighter.report.support_volume_mm3);
 
     // Bare islands: an empty list seeds no tip under an island the hold floor would hold, and the record names where
-    // it would have. The auto slice seeds them and names none.
+    // it would have. The auto slice tips them and names only the islands it counts unheld, the tall sliver among them.
     Print                    islands_print;
     Model                    islands_model;
     const DynamicPrintConfig islands_config = scaffold_config({ { "support_remove_small_overhang", "1" } });
@@ -1603,7 +1752,9 @@ TEST_CASE("A baked scaffold list builds the tips it holds and reports each point
     islands_print.process();
     REQUIRE(islands_print.objects().size() == 1);
     REQUIRE(islands_print.objects().front()->scaffold_record() != nullptr);
-    CHECK(islands_print.objects().front()->scaffold_record()->bare_islands.empty());
+    REQUIRE(islands_print.objects().front()->support_analysis() != nullptr);
+    CHECK(islands_print.objects().front()->scaffold_record()->bare_islands.size() ==
+          islands_print.objects().front()->support_analysis()->islands_under_held);
     ModelObject &islands = *islands_model.objects.front();
     islands.scaffold_points_status   = ScaffoldPointsStatus::AutoGenerated;
     islands.scaffold_points_pose     = islands_print.objects().front()->scaffold_record()->pose;
@@ -1825,9 +1976,11 @@ TEST_CASE("Scaffold support over corpus plate 3 in two poses", "[ScaffoldSupport
             INFO("support " << scaffold.metrics.support_volume_mm3 << " mm3 against tree slim " << slim.metrics.support_volume_mm3 << " mm3");
             REQUIRE(scaffold.metrics.support_volume_mm3 <= 2.5 * slim.metrics.support_volume_mm3);
         }
+        // Upright the plan holds every island, and the builder leaves the birth tips of two islands born at z 15.4
+        // unrouted, so those two print with no tip holding them.
         if (pose == "upright") {
             INFO("islands under-held " << scaffold.metrics.islands_under_held);
-            REQUIRE(scaffold.metrics.islands_under_held == 0);
+            REQUIRE(scaffold.metrics.islands_under_held <= 2);
         }
     }
 }
@@ -1870,7 +2023,10 @@ TEST_CASE("Need-driven tips hold corpus plate 1's hand and sword with few contac
     const SupportAnalysis::Report &report = *po.support_analysis();
     CHECK(report.floating_pieces_removed == 0);
 
-    CHECK(report.islands_under_held == 0);
+    // The plan holds every island, and the builder leaves the birth tips of two islands born at z 35.2 unrouted, so
+    // those two print with no tip holding them and the record names each.
+    CHECK(report.islands_under_held <= 2);
+    CHECK(record->bare_islands.size() == report.islands_under_held);
 
     // The sword hangs point-down from the raised hand: its blade stands free from z 1.04 and widens from its point to
     // about 7 mm by z 6.5, then rises nearly vertical to the guard at z 15.8, too steep there for a straight neck.

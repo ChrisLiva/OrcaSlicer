@@ -2117,9 +2117,10 @@ void TreeSupport::generate()
         scaffold_counts = out.counts;
         m_pad_layers    = out.pad_layers;
 
-        // What the pass did with each tip, in the frame of ModelObject::raw_mesh(), the frame a baked list is kept in:
-        // draw builds on the raw mesh through trafo_centered(), with print z less the object's lift. A baked record
-        // holds one tip per list point, in list order: a point with no drawn site was skipped at a wall or merged.
+        // What the pass did with each tip and where an island prints with no tip holding it, in the frame of
+        // ModelObject::raw_mesh(), the frame a baked list is kept in: draw builds on the raw mesh through
+        // trafo_centered(), with print z less the object's lift. A baked record holds one tip per list point, in list
+        // order: a point with no drawn site was skipped at a wall or merged.
         auto record = std::make_shared<ScaffoldRecord>();
         const Transform3d to_raw = m_object->trafo_centered().inverse();
         const auto        raw_of = [&to_raw, &params](double x, double y, double print_z) -> Vec3f {
@@ -2136,13 +2137,13 @@ void TreeSupport::generate()
                 results[size_t(scaffold_tips.sites[i].source)] = out.results[i];
             for (size_t i = 0; i < points.size(); ++ i)
                 record->tips.push_back({ points[i].pos, points[i].size, points[i].enforced, results[i] });
-            for (const Vec3d &island : scaffold_tips.bare_islands)
-                record->bare_islands.push_back(raw_of(island.x(), island.y(), island.z()));
         } else
             for (size_t i = 0; i < scaffold_tips.sites.size(); ++ i) {
                 const ScaffoldPoint point = ScaffoldSupport::point_of(*m_object, params, scaffold_tips.sites[i], out.grades[i]);
                 record->tips.push_back({ point.pos, point.size, point.enforced, out.results[i] });
             }
+        for (const Vec3d &island : out.bare_islands)
+            record->bare_islands.push_back(raw_of(island.x(), island.y(), island.z()));
         record->pose              = m_object->instances().front().model_instance->get_matrix().linear();
         record->toolpath_width_mm = params.toolpath_width_mm;
         m_object->set_scaffold_record(std::move(record));

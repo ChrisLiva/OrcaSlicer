@@ -279,7 +279,33 @@ TEST_CASE("Small island starts go without a tip only when they meet a held part"
     Sliced s(merged({ box(0, 0, 0, 4, 4, 10), box(0, 0, 8, 12, 10, 2), box(7, 2, 7.9, 0.6, 0.6, 0.1), box(7, 6, 5, 0.6, 0.6, 0.1),
                       box(7.9, 6, 5, 0.6, 0.6, 0.1), box(7, 6, 5.1, 1.5, 0.6, 2.9) }));
     const Plan plan = s.plan();
+    const BoundingBoxf3 pair(Vec3d(6.8, 5.8, 4.9), Vec3d(8.7, 6.8, 7.95));
     CHECK(count_in(s, plan, BoundingBoxf3(Vec3d(6.8, 1.8, 7.7), Vec3d(7.8, 2.8, 7.95))) == 0);
-    CHECK(count_in(s, plan, BoundingBoxf3(Vec3d(6.8, 5.8, 4.9), Vec3d(8.7, 6.8, 7.95)), { TipNeed::Birth }) == 1);
+    CHECK(count_in(s, plan, pair, { TipNeed::Birth }) == 1);
     CHECK(plan.islands_unheld == 0);
+
+    // The plan lists every island with how it is held: the lone nub hangs from the slab the column roots, and of the
+    // pair one takes the birth tip and the other hangs from it.
+    const auto island_in = [&](double x0, double y0, double x1, double y1) {
+        std::vector<const Island *> found;
+        for (const Island &island : plan.islands)
+            if (const Vec2d xy = Vec2d(island.birth.x(), island.birth.y()) - s.shift;
+                xy.x() >= x0 && xy.x() <= x1 && xy.y() >= y0 && xy.y() <= y1)
+                found.push_back(&island);
+        return found;
+    };
+    const std::vector<const Island *> lone = island_in(6.8, 1.8, 7.8, 2.8), paired = island_in(6.8, 5.8, 8.7, 6.8);
+    REQUIRE(lone.size() == 1);
+    CHECK(lone.front()->reason == IslandReason::Hung);
+    CHECK(lone.front()->rooted);
+    REQUIRE(paired.size() == 2);
+    const auto tipped = std::find_if(paired.begin(), paired.end(), [](const Island *i) { return i->reason == IslandReason::Tip; });
+    const auto hung   = std::find_if(paired.begin(), paired.end(), [](const Island *i) { return i->reason == IslandReason::Hung; });
+    REQUIRE(tipped != paired.end());
+    REQUIRE(hung != paired.end());
+    REQUIRE((*tipped)->holders.size() == 1);
+    CHECK(plan.tips[(*tipped)->holders.front()].need == TipNeed::Birth);
+    CHECK(inside(s, plan.tips[(*tipped)->holders.front()], pair));
+    CHECK((*hung)->holders == (*tipped)->holders);
+    CHECK_FALSE((*hung)->rooted);
 }

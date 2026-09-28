@@ -215,20 +215,27 @@ reads a shared owner's layers copies the owner's record. The record holds
 `baked`, `stale`, the instance pose and toolpath width the slice used, the bare
 islands and a list of tips, all in the raw-mesh frame: `generate()` takes the z
 offset off each site and maps it back through the inverse of
-`trafo_centered()`. The tips differ by pass:
+`trafo_centered()`. The bare islands are `draw`'s `Output::bare_islands`, the
+places where an island prints with no tip holding it. The tips and the bare
+islands differ by pass:
 
 - A baked record holds one tip per list point, in list order, with the point's
   size and flag. Its result is `draw`'s outcome (`Routed`, `Filtered`,
   `Unrouted` or `Neck`) for a point with a drawn site, `Wall` for a point the
-  wall skip took out and `Merged` for any other point without a site.
+  wall skip took out and `Merged` for any other point without a site. Its bare
+  islands are where the hold floor would have seeded a tip.
 - An auto record holds one tip per site handed to `draw`, with `draw`'s
   outcome and a size read back from the tip's grade: `Heavy` above three
-  support lines, `Light` otherwise.
+  support lines, `Light` otherwise. Its bare islands are the birth points of
+  the islands the plan could not hold and of those whose holders all failed to
+  route, one per island `islands_under_held` counts.
 
 `scaffold_points_from` turns a record into a list by keeping its `Routed`
 tips. A baked record with any point not `Routed` or any bare island adds the
 warning "Scaffold points for <object>: <d> dropped, <b> islands left without a
-tip." to the support step.
+tip." to the support step, and an auto record with any bare island adds
+"Scaffold support for <object>: <b> islands print with no tip holding them."
+The Scaffold Points tool draws either record's bare islands.
 
 ### The Scaffold Points tool
 
@@ -362,7 +369,14 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
      so two strand ends meeting each other in mid-air still take one, and one
      no tip can reach counts as under-held, as does an island with no
      eligible cell that stands taller. An island left without a tip anchors
-     what grows on it.
+     what grows on it. The plan lists every island in `Plan::islands` with its
+     birth point, the deepest point of its birth piece at the piece's bottom,
+     and how it is held: `Tip`, by its own birth tip or the enforced tip on
+     its birth piece; `Hung`, from the parts it met, with every tip on those
+     parts, whatever need placed it, as its holders and `rooted` set when the
+     bed held one of them; `NoNeck`, the under-held ones; or `Debris`. A nub
+     that took an underside head on its own slab before its merge therefore
+     hangs from that head.
    - Underside. Each cell carries a run, how far it hangs past what anchors
      it: 0 under a head, and otherwise the least, through the layer's
      material, of a neighbour's run plus the step between them, where a cell
@@ -383,7 +397,11 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
      covers the most due and pending cells, sampled a third of the cover
      apart, a cell whose small disc lies wholly on the layer's material before
      an edge cell. Pending cells that fall out of the cover unanswered and hang
-     past one and a half reaches count in `underside_unmet_mm2`.
+     past one and a half reaches count in `underside_unmet_mm2`. Each head
+     keeps, as `PlannedTip::answered_mm2`, what past one and a half reaches it
+     answered: the due cells it brought within the reach on its layer and the
+     pending cells its cover took, which hang again if the head does not
+     route.
    - Stability. A part's lever on a layer is how far the farthest corner of
      its section's convex hull stands from the part's nearest tip in 3-D, or
      above its highest anchor while no tip holds it, so a blade hanging from
@@ -594,9 +612,30 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    take become the layer's interface areas and leave its base, and
    the exempt heads' slices go out apart for `clip_base`.
 
+Once the last run has settled each tip's outcome, `unheld_after_routing` reads
+what routing left of the plan. It gives each planned tip the result of the
+drawn site within `sla::D_SP` of it in 3-D, the alias merge's metric, so a
+merged tip reads its keeper's result and a tip the wall skip took out, with no
+drawn site, reads `Wall`. An island with holders that is not `rooted` and
+whose holders all failed to route prints with no tip holding it, and a failed
+Underside head's `answered_mm2` goes back into `underside_unmet_mm2`.
+`islands_under_held` is the placement's count, the plan's `NoNeck` islands or
+the hold floor's on a baked list, plus those islands, and `Output::bare_islands`
+adds each one's birth point to the placement's list. Each unheld island logs
+`scaffold island at (x, y, z) unheld: <cause>` at debug level, with z its print
+z and the cause `no neck`, a tipped island's own tip result (`unrouted`,
+`filtered`, `neck` or `wall`) or, for a hung island, `holders unrouted`, so an
+island whose own tip failed reads apart from one that hung from a failed
+part. A planned slice with islands logs
+`scaffold islands: <t> tipped, <h> hung, <u> unheld (<n> no neck, <m> not
+routed)` at info level, debris left out. The planner does not re-plan:
+corpus plate 1 reads no island unheld at plan time and two whose birth tips
+the builder cannot route.
+
 The returned `Output` carries one `LayerAreas` per planned layer (base,
 interface and exempt heads), the number of
-leading layers that are pad, the five tip and pillar counts, and the
+leading layers that are pad, the five tip and pillar counts, the bare
+islands, and the
 milliseconds spent in the island map, in every build with the pad, and in the
 slicing with the neck checks, which
 `TreeSupport` writes into its profiler as `STAGE_ISLAND_JOINS`,
@@ -710,19 +749,21 @@ footprints.
 `islands_slender` and `underside_unmet_mm2`, which the scaffold fills from
 `ScaffoldSupport::Counts`, and `floating_pieces_removed`, which the floating
 pass fills under every style that runs it. They read zero under every other
-style except the last. `islands_slender` counts the parts the planner left
-standing slender for want of a down-facing point, and `underside_unmet_mm2`
-the underside it left hanging past one and a half reaches; both read what the
-placement could not answer, and a head the build later drops counts in
-`tips_dropped` instead.
+style except the last. `islands_under_held` counts the islands that print
+with no tip holding them once the build has routed, and `underside_unmet_mm2`
+the underside left hanging past one and a half reaches, with what dropped
+Underside heads answered; both read the plan and the build together.
+`islands_slender` counts the parts the planner left standing slender for want
+of a down-facing point, which reads the placement alone: a Stability head the
+build drops counts only in `tips_dropped`.
 
 `PrintObject::_generate_support_material` logs one info line per object when
 miniature contacts are on or the style is Tree Scaffold: `Support contact
 layout for <object>`, followed by the critical regions without material, the
 stability counts, the support volume, the seed counts and the eight counters.
 The profiler line `tree support time` names the three scaffold stages. Both
-lines reach only the file the CLI's `--logfile` names; the per-tip drop lines
-need `--debug 4`.
+lines, and the `scaffold islands` line, reach only the file the CLI's
+`--logfile` names; the per-tip drop and per-island lines need `--debug 4`.
 
 The test harness carries the counters into its rows:
 `SupportValidation::Metrics` holds all eight, `read_print_analyses` sums them
@@ -739,7 +780,15 @@ cases. They cover the style and its keys in the config, a project carrying
 result row, the pad's densities and the wall-only base on a shelf fixture with
 nothing floating and no tip beside the column's wall, cancellation during the
 build, rings printing as base without interface layers, a tip with no route
-being dropped and counted, a plank off a column's face whose underside slopes
+being dropped and counted, `unheld_after_routing` on hand-built plans, where
+an island counts once its holders all fail to route, wall-skipped or merged
+into a site that routed or did not, a site above the tip by more than
+`sla::D_SP` matching nothing and a routed site among two in reach holding it,
+and a dropped underside head hands its
+answered underside back, a rod hanging into an open box whose birth tip has no
+route listed as a bare island with the auto record's warning, a ledge in that
+box whose dropped heads raise the underside unmet, a plank off a column's
+face whose underside slopes
 down away from it, where the automatic tips on a plank 2 mm long at 0.2 mm
 layers and on one 4 mm long at 0.06 mm layers all keep their heads, and a
 baked list on the 4 mm plank drops one or both of its points 0.6 and 1.3 mm
@@ -768,7 +817,9 @@ within one and a half reaches, a 10 degree flare
 taking more tips than a 15 degree one and a 30 degree one none, a flare's
 runs restarting at a solid column however the column is held, a blade whose
 edges rise steeper than the threshold taking heavy tips at three heights or
-more, and a squat floating block taking no stability tip.
+more, a squat floating block taking no stability tip, and small nubs under a
+slab, where a lone nub hangs rooted from the slab and of two nubs meeting in
+mid-air one takes the birth tip and the other lists it as its holder.
 
 Two `[ScaffoldSupport]` cases cover the baked list on the shelf fixture. The
 first bakes an auto slice's routed tips and slices from them with no contact
@@ -777,7 +828,9 @@ seed and at least 98 % of the points routed. It adds points by hand that read
 the column's band, and checks the dropped-points warning. It also checks that
 paint places no tip on a baked slice, that another style records nothing,
 that an empty list builds no tip, that a revert places what the first auto
-slice placed and that a copy sharing the source's meshes prints its own list.
+slice placed, that a copy sharing the source's meshes prints its own list, and
+that on the seeded-islands fixture the auto slice names as many bare islands as
+it counts under-held while an empty list names where the hold floor would seed.
 The second slices two instances of one object as two PrintObjects and checks
 that a quarter turn about Z keeps the list while a 30 degree tilt leaves it
 stale with the warning, and that an instance scale and a part moved inside the
@@ -795,11 +848,16 @@ and tree scaffold, first in the stored pose and then upright, times each
 requires of each scaffold slice: dropped tips at most a fifth of those placed,
 no floating piece removed, a process time at most 1.5 times the tree-slim
 slice's, `island_joins` within 2 s and a support volume at most 2.5 times the
-tree-slim slice's; the upright pose also requires no under-held island.
+tree-slim slice's; the upright pose also requires at most two under-held
+islands, the two born at z 15.4 whose birth tips the builder leaves unrouted,
+while the plan holds every island.
 
 The hidden case "Need-driven tips hold corpus plate 1's hand and sword with
 few contacts" slices plate 1 and requires of the tips its record holds at most
 10 on the hand over the raised knee, a heavy one at the sword's point, two
 under z 7.5 on the blade, no stretch of blade under z 15 longer than 7 mm
-without one, and at most 200 in all. Plate 1's record holds 56 tips, 6 on the
-hand, 3 under z 7.5 and a largest gap of 6.84 mm.
+without one, and at most 200 in all, and of its islands at most two
+under-held, each named among the record's bare islands. Plate 1's record
+holds 56 tips, 6 on the hand, 3 under z 7.5 and a largest gap of 6.84 mm,
+and two bare islands born at z 35.2 whose birth tips the builder leaves
+unrouted.

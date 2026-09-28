@@ -243,6 +243,13 @@ size_t restore_hold_floor(const PrintObject &object, std::vector<TipSite> &tips,
     return under_held;
 }
 
+// A tip's point as the alias merge measures it: xy from its position, z its print z.
+Vec3d alias_point(const TipSite &tip)
+{
+    const Vec2d xy = unscale(tip.position);
+    return { xy.x(), xy.y(), tip.print_z };
+}
+
 // The kept tips of `merge_aliases` by cell of its grid, each with its 3-D point and its index in `tips`.
 using AliasCell = std::array<int64_t, 3>;
 using AliasGrid = std::unordered_map<AliasCell, std::vector<std::pair<Vec3d, size_t>>, boost::hash<AliasCell>>;
@@ -286,8 +293,7 @@ void merge_aliases(std::vector<TipSite> &tips)
     });
     std::vector<bool> keep(tips.size(), false);
     for (const size_t i : order) {
-        const Vec2d     xy = unscale(tips[i].position);
-        const Vec3d     p(xy.x(), xy.y(), tips[i].print_z);
+        const Vec3d     p = alias_point(tips[i]);
         const AliasCell c{int64_t(std::floor(p.x() / sla::D_SP)), int64_t(std::floor(p.y() / sla::D_SP)),
                           int64_t(std::floor(p.z() / sla::D_SP))};
         if (const size_t into = alias_of(kept, p, c); into != size_t(-1)) {
@@ -525,6 +531,47 @@ void settle_tips(const sla::SupportTreeBuilder &builder, const sla::SupportPoint
             rings[h].slices.clear();
             rings[h].neck.clear();
         }
+}
+
+// Why a tip went, as the drop and island lines name it.
+const char *drop_reason(ScaffoldTipResult tip)
+{
+    switch (tip) {
+    case ScaffoldTipResult::Filtered: return "filtered";
+    case ScaffoldTipResult::Unrouted: return "unrouted";
+    case ScaffoldTipResult::Neck: return "neck";
+    case ScaffoldTipResult::Wall: return "wall";
+    default: return "other";
+    }
+}
+
+// Each island the slice leaves unheld with its cause at debug level, a tipped island naming its one tip's result and a
+// hung one its holders, and at info level the plan's islands by how they are held once routed: its own tip, hanging
+// from the parts it met, or unheld. Debris needs no hold and is left out.
+void log_islands(const Plan &plan, const PlanOutcome &after)
+{
+    if (plan.islands.empty())
+        return;
+    std::vector<char> unrouted(plan.islands.size(), 0);
+    for (const size_t k : after.islands)
+        unrouted[k] = 1;
+    size_t tipped = 0, hung = 0, no_neck = 0;
+    for (size_t k = 0; k < plan.islands.size(); ++ k) {
+        const Island &island = plan.islands[k];
+        const char   *cause  = nullptr;
+        if (island.reason == IslandReason::NoNeck) {
+            ++ no_neck;
+            cause = "no neck";
+        } else if (unrouted[k])
+            cause = island.reason == IslandReason::Tip ? drop_reason(after.tips[island.holders.front()]) : "holders unrouted";
+        else if (island.reason != IslandReason::Debris)
+            ++ (island.reason == IslandReason::Tip ? tipped : hung);
+        if (cause != nullptr)
+            BOOST_LOG_TRIVIAL(debug) << "scaffold island at (" << island.birth.x() << ", " << island.birth.y() << ", " << island.birth.z()
+                                     << ") unheld: " << cause;
+    }
+    BOOST_LOG_TRIVIAL(info) << "scaffold islands: " << tipped << " tipped, " << hung << " hung, " << no_neck + after.islands.size()
+                            << " unheld (" << no_neck << " no neck, " << after.islands.size() << " not routed)";
 }
 
 // The floating pieces on each planned layer above the pad, with their extents.
@@ -960,12 +1007,13 @@ Tips place_tips(const PrintObject &object, const std::vector<std::vector<Support
                                          threshold_rad, blockers);
     Tips       tips;
     const auto start = std::chrono::steady_clock::now();
-    const Plan plan  = plan_tips(input, enforced);
-    tips.island_joins_ms     = ms_since(start);
-    tips.islands_under_held  = plan.islands_unheld;
-    tips.islands_slender     = plan.islands_slender;
-    tips.underside_unmet_mm2 = plan.underside_unmet_mm2;
-    for (const PlannedTip &tip : plan.tips)
+    tips.plan               = plan_tips(input, enforced);
+    tips.island_joins_ms    = ms_since(start);
+    tips.islands_under_held = tips.plan.islands_unheld;
+    for (const Island &island : tips.plan.islands)
+        if (island.reason == IslandReason::NoNeck)
+            tips.bare_islands.push_back(island.birth);
+    for (const PlannedTip &tip : tips.plan.tips)
         tips.sites.push_back(tip.site);
     // The planner keeps its tips out of the band on its lattice; the wall skip reads the band exactly.
     const std::function<bool(const TipSite &)> at_wall = wall_skip(object, tips.sites, {}, params);
@@ -1026,6 +1074,27 @@ Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const P
     return tips;
 }
 
+PlanOutcome unheld_after_routing(const Plan &plan, const std::vector<TipSite> &sites, const std::vector<ScaffoldTipResult> &results)
+{
+    PlanOutcome out;
+    out.tips.assign(plan.tips.size(), ScaffoldTipResult::Wall);
+    for (size_t i = 0; i < plan.tips.size(); ++ i) {
+        const Vec3d p = alias_point(plan.tips[i].site);
+        for (size_t j = 0; j < sites.size() && out.tips[i] != ScaffoldTipResult::Routed; ++ j)
+            if ((alias_point(sites[j]) - p).norm() <= sla::D_SP)
+                out.tips[i] = results[j];
+        if (plan.tips[i].need == TipNeed::Underside && out.tips[i] != ScaffoldTipResult::Routed)
+            out.underside_mm2 += plan.tips[i].answered_mm2;
+    }
+    for (size_t k = 0; k < plan.islands.size(); ++ k) {
+        const Island &island = plan.islands[k];
+        if (! island.rooted && ! island.holders.empty() &&
+            std::none_of(island.holders.begin(), island.holders.end(), [&out](size_t tip) { return out.tips[tip] == ScaffoldTipResult::Routed; }))
+            out.islands.push_back(k);
+    }
+    return out;
+}
+
 bool baked_pose_valid(const Matrix3d &pose, const Matrix3d &linear)
 {
     const Matrix3d M            = linear * pose.inverse();
@@ -1041,9 +1110,7 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
     Output out;
     out.layers.resize(layer_heights.size());
     out.pad_layers                = pad_layer_count(layer_heights, params);
-    out.counts.islands_under_held = chosen.islands_under_held;
-    out.counts.islands_slender     = chosen.islands_slender;
-    out.counts.underside_unmet_mm2 = chosen.underside_unmet_mm2;
+    out.counts.islands_slender    = chosen.plan.islands_slender;
     out.stage_ms.island_joins     = chosen.island_joins_ms;
     const std::vector<TipSite> &nodes = chosen.sites;
 
@@ -1137,14 +1204,6 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
     }
     settle_tips(*builder, left, index_of, posted, cut, rings, tips);
     out.counts.pillars_unbraced = builder->unbraced_pillars;
-    const auto reason = [](ScaffoldTipResult tip) {
-        switch (tip) {
-        case ScaffoldTipResult::Filtered: return "filtered";
-        case ScaffoldTipResult::Unrouted: return "unrouted";
-        case ScaffoldTipResult::Neck: return "neck";
-        default: return "other";
-        }
-    };
     for (size_t i = 0; i < tips.size(); ++ i) {
         if (tips[i] == ScaffoldTipResult::Routed) {
             ++ out.counts.tips_routed;
@@ -1153,8 +1212,17 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
         ++ out.counts.tips_dropped;
         const Vec3f &p = points[i].pos;
         BOOST_LOG_TRIVIAL(debug) << "scaffold tip dropped at (" << p.x() << ", " << p.y() << ", " << p.z()
-                                 << "): " << reason(tips[i]);
+                                 << "): " << drop_reason(tips[i]);
     }
+    // What routing left of the plan: an island whose holders all dropped prints with no tip holding it, and the
+    // underside a dropped head answered hangs.
+    const PlanOutcome after        = unheld_after_routing(chosen.plan, nodes, tips);
+    out.counts.islands_under_held  = chosen.islands_under_held + after.islands.size();
+    out.counts.underside_unmet_mm2 = chosen.plan.underside_unmet_mm2 + after.underside_mm2;
+    out.bare_islands               = chosen.bare_islands;
+    for (const size_t k : after.islands)
+        out.bare_islands.push_back(chosen.plan.islands[k].birth);
+    log_islands(chosen.plan, after);
 
     ctx.write_output(*builder, cage, rings, build_ms, out);
     out.results = std::move(tips);

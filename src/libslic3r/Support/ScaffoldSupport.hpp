@@ -36,13 +36,21 @@ struct Output { std::vector<LayerAreas> layers;   // one entry per planned layer
                 Counts counts; StageMs stage_ms;
                 std::vector<ScaffoldTipResult> results;   // what became of each tip, indexed like `Tips::sites`
                 std::vector<double>            grades;    // each tip's disc width in mm, indexed like `Tips::sites`
+                std::vector<Vec3d>             bare_islands;   // where an island prints with no tip holding it
               };
-// The tips `draw` builds heads for, with what the planner could not meet and how long it took. From a baked list, also
-// the `source` of each point the wall skip took out, and where the hold floor would have seeded a tip, x and y in mm and
-// print z.
-struct Tips { std::vector<TipSite> sites; size_t islands_under_held = 0; uint32_t island_joins_ms = 0;
-              std::vector<int> wall_skipped; std::vector<Vec3d> bare_islands;
-              size_t islands_slender = 0; double underside_unmet_mm2 = 0.; };
+// The tips `draw` builds heads for, the plan they came from and how long it took, with the islands the placement leaves
+// unheld: their count, and where each prints with no tip holding it, x and y in mm and print z. A baked list has no
+// plan: its unheld islands are the ones the hold floor would have seeded a tip under, and it also names the `source`
+// of each point the wall skip took out.
+struct Tips { std::vector<TipSite> sites; Plan plan; size_t islands_under_held = 0; uint32_t island_joins_ms = 0;
+              std::vector<int> wall_skipped; std::vector<Vec3d> bare_islands; };
+// What routing left of a plan. `tips` is each planned tip's result, read off a drawn site within `sla::D_SP` of it in
+// 3-D, the alias merge's metric, and `Wall` where none stands, the wall skip having taken it out. `islands` indexes the
+// islands the plan held whose holders all failed, and `underside_mm2` is what the failed Underside heads answered.
+struct PlanOutcome { std::vector<ScaffoldTipResult> tips; std::vector<size_t> islands; double underside_mm2 = 0.; };
+// `sites` and `results` are the tips `draw` built and what became of each. An island counts when it has holders, is
+// not rooted, and no holder reads `Routed`; one without holders is the plan's own count.
+PlanOutcome unheld_after_routing(const Plan &plan, const std::vector<TipSite> &sites, const std::vector<ScaffoldTipResult> &results);
 // The need planner, then the wall skip and the alias merge. contacts: TreeSupport's contact_nodes before
 // plan_layer_heights re-distributes them, of which the planner keeps the ones an enforcer asked for. threshold_rad and
 // blockers: the overhang detector's threshold and the support blockers per object layer. Reads no planned layer, so

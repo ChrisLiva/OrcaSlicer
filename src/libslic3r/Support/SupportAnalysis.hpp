@@ -214,9 +214,10 @@ struct Report
     size_t                      seeds_restored  = 0;
     size_t                      seeds_retained  = 0;
     // What the Tree Scaffold pass did, counted where it did it: tips placed on the model, tips routed to
-    // a pillar, tips dropped for want of a route, islands whose start no tip could hold, pillars no
-    // neighbour braced, parts left standing slender over their anchors, underside the placement left hanging
-    // past one and a half reaches; and the printed pieces the floating pass removed, under every style that runs it.
+    // a pillar, tips dropped for want of a route, islands that print with no tip holding them because no tip
+    // could stand under them or every tip holding them dropped, pillars no neighbour braced, parts left standing
+    // slender over their anchors, underside the plan left hanging past one and a half reaches plus what dropped
+    // Underside heads answered; and the printed pieces the floating pass removed, under every style that runs it.
     size_t                      tips_placed             = 0;
     size_t                      tips_routed             = 0;
     size_t                      tips_dropped            = 0;

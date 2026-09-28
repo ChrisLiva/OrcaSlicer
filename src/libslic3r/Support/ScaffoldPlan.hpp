@@ -70,12 +70,31 @@ struct PlanInput
 PlanInput prepare_plan(const PrintObject &object, double toolpath_width_mm, double xy_distance_mm, double neck_depth_mm,
                        double threshold_rad, const std::vector<Polygons> &blockers);
 
-struct PlannedTip { TipSite site; TipNeed need; };
-// The tips the needs call for, lowest first, and what they could not meet: islands whose birth took no tip, parts
-// left slender and underside area left hanging past the reach.
+// `answered_mm2` is, for an Underside tip, the underside past one and a half reaches its head answered on its layer,
+// which hangs again when the head does not route.
+struct PlannedTip { TipSite site; TipNeed need; double answered_mm2 = 0.; };
+
+// How the plan holds an island: a tip stands under its birth piece, its own or an enforced one; it waited for its
+// merge and hangs from the parts it met, which a tip or the bed held; no tip can stand under it; or it is debris, which
+// prints as it hangs and needs no hold.
+enum class IslandReason : uint8_t { Tip, Hung, NoNeck, Debris };
+// A birth piece off the bed with nothing under it. `birth` is its deepest point at its bottom, x and y in mm and print
+// z. `holders` index `Plan::tips`: an island's own tip, or for one that hangs, every tip on the parts it met that held
+// them, whatever need placed it. `rooted` is true where the bed held one of those parts.
+struct Island
+{
+    Vec3d               birth = Vec3d::Zero();
+    std::vector<size_t> holders;
+    bool                rooted = false;
+    IslandReason        reason = IslandReason::NoNeck;
+};
+
+// The tips the needs call for, lowest first, every island with how it is held, and what the needs could not meet:
+// islands no tip can stand under, parts left slender and underside area left hanging past the reach.
 struct Plan
 {
     std::vector<PlannedTip> tips;
+    std::vector<Island>     islands;
     size_t                  islands_unheld = 0, islands_slender = 0;
     double                  underside_unmet_mm2 = 0.;
 };
