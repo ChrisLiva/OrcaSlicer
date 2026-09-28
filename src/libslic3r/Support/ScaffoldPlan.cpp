@@ -740,17 +740,6 @@ Point inscribed_point(const ExPolygon &piece)
     return deepest.front().contains(middle) ? middle : deepest.front().contour.points.front();
 }
 
-NeedParams need_params(double density)
-{
-    static constexpr NeedParams tiers[3] = { { 1.5, 4., 0.3 }, { 1., 3., 0.12 }, { 0.6, 2., 0. } };
-    const double d = std::clamp(density, 0., 2.);
-    const size_t i = d >= 1. ? 1 : 0;
-    const double t = d - double(i);
-    const auto   mix = [t](double a, double b) { return a + (b - a) * t; };
-    return { mix(tiers[i].reach_mm, tiers[i + 1].reach_mm), mix(tiers[i].slender_ratio, tiers[i + 1].slender_ratio),
-             mix(tiers[i].micro_merge_mm, tiers[i + 1].micro_merge_mm) };
-}
-
 PlanInput prepare_plan(const PrintObject &object, double toolpath_width_mm, double xy_distance_mm, double neck_depth_mm,
                        double threshold_rad, const std::vector<Polygons> &blockers)
 {

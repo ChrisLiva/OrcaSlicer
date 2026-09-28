@@ -25,7 +25,7 @@ listed last in the style menu. Like the other tree styles it needs a tree
 `support_type`: `SupportParameters` resolves the style to grid under a normal
 support type.
 
-Four settings belong to the style and show only under it:
+Three settings belong to the style and show only under it:
 
 - `scaffold_bridge_length`, 3 to 30 mm with a 12 mm default, bounds every
   bridge from a tip to its pillar and every brace between pillars.
@@ -34,11 +34,10 @@ Four settings belong to the style and show only under it:
   to its neighbours.
 - `scaffold_brace_diameter`, 10 % to 100 % with a 60 % default, is a brace's
   diameter as a share of the pillar diameter, never under two support lines.
-- `scaffold_density`, Light, Medium or Heavy with Medium the default, sets how
-  far an underside may hang past its anchors and how tall a part may stand
-  over them before the need planner, step 1 of The ScaffoldSupport module,
-  calls for a tip. A baked list keeps its own points at any density. Plate 1 of the
-  corpus places 35, 49 and 72 tips at Light, Medium and Heavy.
+
+No setting sets how many tips the style places: the need planner, step 1 of
+The ScaffoldSupport module, places one where the print needs it, and paint,
+blockers and the Scaffold Points tool's hand edits override it.
 
 Under Scaffold the slice reads no `support_contact_min_distance`, and the
 settings panel greys the field under the style.
@@ -61,8 +60,9 @@ to evaluate an object that uses it, with the message "Auto-tilt cannot verify
 this object: Tree Scaffold support is not evaluated."
 
 A project that names `tree_scaffold` in a build without the style loads with
-the default style substituted, and the two scaffold keys are dropped as
-unknown keys, so the style needs no migration code.
+the default style substituted, and the scaffold keys are dropped as unknown
+keys, so the style needs no migration code. A preset or project that carries a
+`scaffold_density` key loads the same way, with that key dropped.
 
 ## The seam in TreeSupport::generate()
 
@@ -78,14 +78,13 @@ enforcers' requests to the planner. A slice from a valid baked list runs
 
 Before `plan_layer_heights`, under Scaffold, the generator fills a
 `ScaffoldSupport::Params` from the object config (toolpath width, pillar
-diameter, `m_ts_data->m_xy_distance`, the two scaffold keys,
+diameter, `m_ts_data->m_xy_distance`, the three scaffold keys,
 `max_bridge_length`, the interface layer count and the object's print z
 offset). It gathers the support blockers as `detect_overhangs` does,
-`slice_support_blockers` plus painted blocker facets, builds candidates with
-`ScaffoldSupport::collect_candidates` from the contacts, the parameters, the
-detector's threshold angle and the blockers, and calls
-`ScaffoldSupport::place_tips` at the density `scaffold_density` names, or
-`ScaffoldSupport::baked_tips` on a valid baked list.
+`slice_support_blockers` plus painted blocker facets, and calls
+`ScaffoldSupport::place_tips` with the contacts, the parameters, the detector's
+threshold angle and the blockers, or `ScaffoldSupport::baked_tips` on a valid
+baked list.
 `plan_layer_heights` then takes every chosen tip's z as a layer top
 besides the contacts' own, so a tip the planner placed where no contact stands
 prints its top ring on the layer right under it, not under an air gap. Under
@@ -192,7 +191,7 @@ above the point or the top layer when none does, and files it on the layer
 under that one, where a contact under an overhang is filed. It then runs
 steps 2 to 4 of the auto path on those sites:
 
-- The wall skip calls the same `wall_skip` function `collect_candidates` calls. A
+- The wall skip calls the same `wall_skip` function `place_tips` calls. A
   point placed with the tool is enforced and never skipped; a point Generate
   copied carries the flag its tip had.
 - The hold floor counts the islands the list leaves under-held but seeds and
@@ -231,35 +230,6 @@ tips. A baked record with any point not `Routed` or any bare island adds the
 warning "Scaffold points for <object>: <d> dropped, <b> islands left without a
 tip." to the support step.
 
-### The candidates
-
-An auto scaffold slice also installs a `ScaffoldSupport::Candidates` on its
-PrintObject, read through `PrintObject::scaffold_candidates()`, so that the
-tool's density slider can place tips at another density without slicing
-again. It holds the contacts an enforcer asked for, the planner's
-density-independent input (`PlanInput`, shared), the risk field, the grade
-`draw` gave each tip it drew keyed by object layer and position
-(`TipGrades`), and the parameters and density the slice ran with. The slice
-chooses its own tips from the same candidates through
-`ScaffoldSupport::place_tips`.
-
-`ScaffoldSupport::retune_points` runs `place_tips` at a density between 0 and
-2, then the grading, and returns the tips as list points. At the slice's own
-density it returns the tips the slice drew, in order and with their sizes. A
-grade reads the risk field at the tip's position, about 4 ms of wall time per
-tip on plate 1, and a tip stands where the planner puts it at every density,
-so the caller keeps the grades by position, starting from the slice's, and
-only tips no earlier call graded sample the field. On plate 1 a recompute
-takes 0.27 to 0.36 s and places 35 points at Light, 49 at Medium and 72 at
-Heavy.
-
-A pass built from a baked list leaves the candidates in place, and so does an
-edit of the list: `PrintApply` carries them across the support step's
-invalidation when only the list changed. Any other invalidation of the slice
-or the support step drops them, since a changed setting, paint or mesh changes
-the contacts themselves. A PrintObject that reads a shared owner's layers
-copies the owner's candidates.
-
 ### The Scaffold Points tool
 
 `GLGizmoScaffoldPoints` edits the list. It opens from the toolbar alone, with
@@ -271,10 +241,9 @@ within 30 degrees of straight up, the complement of the builder's 150 degree
 `normal_cutoff_angle`, where the builder would filter the head. The tool writes
 the model three ways:
 
-- Apply writes the cache with the selected instance's pose and a fresh mesh
-  box stamp, makes the instance's plate current and reslices. The list is
-  `AutoGenerated` when the cache holds the density slider's last result and
-  `UserModified` otherwise.
+- Apply writes the cache as a `UserModified` list with the selected instance's
+  pose and a fresh mesh box stamp, makes the instance's plate current and
+  reslices.
 - Generate replaces the list with the routed tips of an auto slice as an
   `AutoGenerated` list, with the record's pose and a fresh mesh box stamp. It
   asks first when the list is user-modified and not empty. When the plate's
@@ -288,14 +257,6 @@ the model three ways:
   finish or the tool closed first, it restores the stash and writes nothing.
 - Revert to auto clears the list to `NoPoints` and invalidates the support
   step without reslicing.
-
-The density slider runs from Light at 0 through Medium at 1 to Heavy at 2 and
-starts at the density the object's last auto slice ran at. Each move replaces
-the cache with `retune_points` at the new density, and one undo snapshot holds
-the cache from before a drag. It needs the candidates and a finished slice of
-the object, and is disabled while a slice runs, while the cache holds hand
-edits, and while the list is user-modified, so that it never overwrites points
-placed by hand; Discard or Revert to auto opens it again.
 
 After a slice from the list, the tool colours each point by its result when
 the record matches the cache point for point, shows a point added since as
@@ -375,15 +336,10 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    (`diff_ex` of its slices and the layer below's), each layer's
    self-support step `a`, the height of the layer below over the tangent of
    the detector's threshold angle (the threshold plus 1 degree, or 30 degrees
-   when it reads 0), and the blockers rastered per layer. A `NeedParams` sets
-   the reach `R`, the slender ratio and the micro-merge height, interpolated
-   linearly by `need_params` between the tiers:
-
-   | Tier | Reach | Slender ratio | Micro-merge |
-   |---|---|---|---|
-   | Light (0) | 1.5 mm | 4 | 0.3 mm |
-   | Medium (1) | 1.0 mm | 3 | 0.12 mm |
-   | Heavy (2) | 0.6 mm | 2 | 0 |
+   when it reads 0), and the blockers rastered per layer. Every slice plans
+   with one set of `NeedParams`, its defaults: the reach `R` 1 mm, the slender
+   ratio 3 and the micro-merge height 0.12 mm. The `PlanInput` lives only
+   through `place_tips`.
 
    The planner walks the layers bottom up and tracks parts itself: a part is
    a connected set of pieces, and a part merges when a piece overlaps two
@@ -778,7 +734,8 @@ scaffold's corpus rows carry `harness = "scaffold_support"` and go to the file
 ## Implementation and verification
 
 `tests/fff_print/test_scaffold_support.cpp` holds the `[ScaffoldSupport]`
-cases. They cover the style and its keys in the config, the island map, the
+cases. They cover the style and its keys in the config, a project carrying
+`scaffold_density` loading without it, the island map, the
 result row, the pad's densities and the wall-only base on a shelf fixture with
 nothing floating and no tip beside the column's wall, cancellation during the
 build, rings printing as base without interface layers, a tip with no route
@@ -789,7 +746,7 @@ baked list on the 4 mm plank drops one or both of its points 0.6 and 1.3 mm
 off the column face, whose necks bottom in the band, with no ring left
 floating, no bare planned layer left and base in the band only under a ring,
 a head under a sheet thinner than its pin leaving nothing floating over the
-sheet, fewer tips toward Light on a staircase, a tip placed under an unseeded
+sheet, a tip placed under an unseeded
 feature start with its ring on the layer its z tops and none under debris or
 under a sliver the wall beside it holds, a sliver joining too high for its
 wall counted under-held, braces on slender pillars, pillars widening toward
@@ -805,9 +762,9 @@ enforced heads enters the band. The SLA builder changes are covered in
 `tests/fff_print/test_scaffold_plan.cpp` holds the `[ScaffoldPlan]` cases,
 which call `prepare_plan` and `plan_tips` on fixtures sliced without support:
 the lattice's area, a rod hanging under a slab taking one heavy birth tip at
-its lowest point at every tier, ledges within the reach taking none, a 2 mm
-ledge taking tips at Medium and Heavy only, a floating plate covered within
-one and a half reaches and taking more tips toward Heavy, a 10 degree flare
+its lowest point, ledges within the reach taking none, a 2 mm ledge that
+hangs a head's worth past the reach taking tips, a floating plate covered
+within one and a half reaches, a 10 degree flare
 taking more tips than a 15 degree one and a 30 degree one none, a flare's
 runs restarting at a solid column however the column is held, a blade whose
 edges rise steeper than the threshold taking heavy tips at three heights or
@@ -841,8 +798,8 @@ slice's, `island_joins` within 2 s and a support volume at most 2.5 times the
 tree-slim slice's; the upright pose also requires no under-held island.
 
 The hidden case "Need-driven tips hold corpus plate 1's hand and sword with
-few contacts" slices plate 1 and, at Light and at Medium through the density
-slider, requires at most 10 tips on the hand over the raised knee, tips at
-three heights or more on the sword with a heavy one at its point, and at most
-200 tips in all; plate 1 reads 35 and 49. "The density slider recomputes
-corpus plate 1 within 2 s" sweeps the slider's range.
+few contacts" slices plate 1 and requires of the tips its record holds at most
+10 on the hand over the raised knee, a heavy one at the sword's point, two
+under z 7.5 on the blade, no stretch of blade under z 15 longer than 7 mm
+without one, and at most 200 in all. Plate 1's record holds 56 tips, 6 on the
+hand, 3 under z 7.5 and a largest gap of 6.84 mm.

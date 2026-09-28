@@ -3,7 +3,6 @@
 #include "TreeSupport.hpp"          // SupportNode, LayerHeightData
 #include "ModelSupportRisk.hpp"
 #include "../ScaffoldPoints.hpp"
-#include "ScaffoldRetune.hpp"
 #include "ScaffoldPlan.hpp"
 namespace Slic3r::ScaffoldSupport {
 struct Params {   // filled by TreeSupport from its config and support params
@@ -44,30 +43,12 @@ struct Output { std::vector<LayerAreas> layers;   // one entry per planned layer
 struct Tips { std::vector<TipSite> sites; size_t islands_under_held = 0; uint32_t island_joins_ms = 0;
               std::vector<int> wall_skipped; std::vector<Vec3d> bare_islands;
               size_t islands_slender = 0; double underside_unmet_mm2 = 0.; };
-// The density a `scaffold_density` tier stands for.
-double tier_density(ScaffoldDensity tier);
-// The key a tip's grade is kept under.
-std::array<int64_t, 3> grade_key(const TipSite &site);
-
-// What an auto slice keeps so that `retune_points` can place its tips at another density without slicing again: the
-// contacts an enforcer asked for, the planner's input, the risk field the grades read, the grade the slice gave each
-// tip it drew, and the parameters and density the slice ran with.
-struct Candidates {
-    std::vector<TipSite>             enforced;
-    std::shared_ptr<const PlanInput> plan;
-    ModelSupportRisk::Field          risk;
-    TipGrades                        grades;
-    Params                           params;   // without `base_cover`, which reads the generator that built it
-    double                           density = 1.;
-};
-// contacts: TreeSupport's contact_nodes before plan_layer_heights re-distributes them, of which the planner keeps the
-// ones an enforcer asked for. threshold_rad and blockers: the overhang detector's threshold and the support blockers per
-// object layer. The risk field is TreeSupport's to move in once its measurement is done.
-Candidates collect_candidates(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts, const Params &params,
-                              double threshold_rad, const std::vector<Polygons> &blockers);
-// The planner at `density`, then the wall skip and the alias merge. Reads no planned layer, so TreeSupport plans a layer
-// topped at every tip's z.
-Tips place_tips(const PrintObject &object, const Candidates &candidates, double density);
+// The need planner, then the wall skip and the alias merge. contacts: TreeSupport's contact_nodes before
+// plan_layer_heights re-distributes them, of which the planner keeps the ones an enforcer asked for. threshold_rad and
+// blockers: the overhang detector's threshold and the support blockers per object layer. Reads no planned layer, so
+// TreeSupport plans a layer topped at every tip's z.
+Tips place_tips(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts, const Params &params,
+                double threshold_rad, const std::vector<Polygons> &blockers);
 // A tip as a list point in ModelObject::raw_mesh()'s frame: a grade over three toolpath widths reads Heavy.
 ScaffoldPoint point_of(const PrintObject &object, const Params &params, const TipSite &site, double grade_mm);
 // A baked list in the builder's frame: each point mapped through trafo_centered(), z + params.z_offset_mm, snapped

@@ -948,34 +948,19 @@ ExPolygons clip_base(const ExPolygons &base, const ExPolygons &exempt_heads, con
     return out;
 }
 
-double tier_density(ScaffoldDensity tier) { return tier == sdLight ? 0. : tier == sdHeavy ? 2. : 1.; }
-
-std::array<int64_t, 3> grade_key(const TipSite &site) { return { site.obj_layer_nr, site.position.x(), site.position.y() }; }
-
-double density_of(const Candidates &candidates) { return candidates.density; }
-
-TipGrades grades_of(const Candidates &candidates) { return candidates.grades; }
-
-Candidates collect_candidates(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts, const Params &params,
-                              double threshold_rad, const std::vector<Polygons> &blockers)
+Tips place_tips(const PrintObject &object, const std::vector<std::vector<SupportNode *>> &contacts, const Params &params,
+                double threshold_rad, const std::vector<Polygons> &blockers)
 {
-    Candidates candidates;
+    std::vector<TipSite> enforced;
     for (const std::vector<SupportNode *> &layer : contacts)
         for (const SupportNode *node : layer)
             if (node->is_pinned)
-                candidates.enforced.push_back(site_of(*node));
-    candidates.plan = std::make_shared<const PlanInput>(prepare_plan(object, params.toolpath_width_mm, params.xy_distance_mm,
-                                                                     head_width_mm + params.toolpath_width_mm, threshold_rad, blockers));
-    candidates.params            = params;
-    candidates.params.base_cover = nullptr;
-    return candidates;
-}
-
-Tips place_tips(const PrintObject &object, const Candidates &candidates, double density)
-{
+                enforced.push_back(site_of(*node));
+    const PlanInput input = prepare_plan(object, params.toolpath_width_mm, params.xy_distance_mm, head_width_mm + params.toolpath_width_mm,
+                                         threshold_rad, blockers);
     Tips       tips;
     const auto start = std::chrono::steady_clock::now();
-    const Plan plan  = candidates.plan ? plan_tips(*candidates.plan, candidates.enforced, need_params(density)) : Plan();
+    const Plan plan  = plan_tips(input, enforced);
     tips.island_joins_ms     = ms_since(start);
     tips.islands_under_held  = plan.islands_unheld;
     tips.islands_slender     = plan.islands_slender;
@@ -983,27 +968,10 @@ Tips place_tips(const PrintObject &object, const Candidates &candidates, double 
     for (const PlannedTip &tip : plan.tips)
         tips.sites.push_back(tip.site);
     // The planner keeps its tips out of the band on its lattice; the wall skip reads the band exactly.
-    const std::function<bool(const TipSite &)> at_wall = wall_skip(object, tips.sites, {}, candidates.params);
+    const std::function<bool(const TipSite &)> at_wall = wall_skip(object, tips.sites, {}, params);
     tips.sites.erase(std::remove_if(tips.sites.begin(), tips.sites.end(), at_wall), tips.sites.end());
     merge_aliases(tips.sites);
     return tips;
-}
-
-ScaffoldPoints retune_points(const PrintObject &object, const Candidates &candidates, double density, TipGrades &grades)
-{
-    // A tip's grade reads the risk field at its own position: a tip graded once keeps its grade, and only the tips no
-    // earlier call graded sample the field.
-    Tips tips = place_tips(object, candidates, density);
-    for (TipSite &site : tips.sites)
-        if (const auto it = grades.find(grade_key(site)); it != grades.end() && site.grade_mm <= 0.)
-            site.grade_mm = it->second;
-    const std::vector<double> graded = tip_grades(tips.sites, candidates.risk, candidates.params);
-    ScaffoldPoints            points;
-    for (size_t i = 0; i < tips.sites.size(); ++ i) {
-        grades[grade_key(tips.sites[i])] = graded[i];
-        points.push_back(point_of(object, candidates.params, tips.sites[i], graded[i]));
-    }
-    return points;
 }
 
 ScaffoldPoint point_of(const PrintObject &object, const Params &params, const TipSite &site, double grade_mm)

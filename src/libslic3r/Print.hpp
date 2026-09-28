@@ -46,7 +46,6 @@ namespace SupportAnalysis {
 struct EmittedSupport;
 struct Report;
 } // namespace SupportAnalysis
-namespace ScaffoldSupport { struct Candidates; }
 namespace MultiNozzleUtils { class NozzleGroupResultBase; class LayeredNozzleGroupResult; }
 
 #define MAX_OUTER_NOZZLE_DIAMETER   4
@@ -454,14 +453,6 @@ public:
     // another's layers after that object's support step already reads as done.
     std::shared_ptr<const ScaffoldRecord> scaffold_record() const { return std::atomic_load(&m_scaffold_record); }
     void set_scaffold_record(std::shared_ptr<const ScaffoldRecord> record) { std::atomic_store(&m_scaffold_record, std::move(record)); }
-    // The contacts the last auto scaffold pass selected from, which the Scaffold Points tool's density slider selects
-    // from again, or null. Unlike the record it outlives a pass built from a baked list: an edit of the list keeps it,
-    // and any other invalidation of the slice or the support step drops it. Read and written atomically, as the record.
-    std::shared_ptr<const ScaffoldSupport::Candidates> scaffold_candidates() const { return std::atomic_load(&m_scaffold_candidates); }
-    void set_scaffold_candidates(std::shared_ptr<const ScaffoldSupport::Candidates> candidates)
-    {
-        std::atomic_store(&m_scaffold_candidates, std::move(candidates));
-    }
 
     size_t          support_layer_count() const { return m_support_layers.size(); }
     // Drops the support pass this object is holding, layers, annotations, generator cache, raft count,
@@ -634,7 +625,6 @@ private:
     std::shared_ptr<const SupportAnalysis::Report>         m_support_analysis;
     std::shared_ptr<const SupportAnalysis::EmittedSupport> m_emitted_support;
     std::shared_ptr<const ScaffoldRecord>                  m_scaffold_record;
-    std::shared_ptr<const ScaffoldSupport::Candidates>     m_scaffold_candidates;
     // Set by Print::request_legacy_support_analysis(), consumed by _generate_support_material().
     bool                                    m_legacy_support_analysis_requested = false;
 

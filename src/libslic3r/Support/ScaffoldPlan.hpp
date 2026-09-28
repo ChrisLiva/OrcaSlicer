@@ -33,12 +33,10 @@ Point inscribed_point(const ExPolygon &piece);
 // its anchors there, or a part standing free has grown too tall over its anchors.
 enum class TipNeed : uint8_t { Enforced, Birth, Underside, Stability };
 
-// What a density asks of the planner. `reach_mm` is how far an underside may hang past its anchors, `slender_ratio`
+// What the planner asks of the model. `reach_mm` is how far an underside may hang past its anchors, `slender_ratio`
 // how many section widths a part may stand over its highest anchor, and `micro_merge_mm` how soon an island no wider
 // than two support lines has to merge to print without a tip.
 struct NeedParams { double reach_mm = 1., slender_ratio = 3., micro_merge_mm = 0.12; };
-// Linear between Light at 0, Medium at 1 and Heavy at 2.
-NeedParams need_params(double density);
 
 // One object layer on the plan's lattice, within the layer's own bounding box: per cell 0 where there is no material,
 // else 1 + the index of the piece holding it among its slab's pieces.
@@ -52,7 +50,7 @@ struct LayerGrid
     }
 };
 
-// What the planner reads of a slice, whatever the density: built once per slice and kept for the density slider.
+// What the planner reads of a slice, built once per slice.
 struct PlanInput
 {
     Point                              origin;             // the lattice's cell (0, 0) corner, scaled
@@ -82,6 +80,6 @@ struct Plan
     double                  underside_unmet_mm2 = 0.;
 };
 // `enforced` are the contacts an enforcer asked for; each becomes a tip and an anchor.
-Plan plan_tips(const PlanInput &input, const std::vector<TipSite> &enforced, const NeedParams &need);
+Plan plan_tips(const PlanInput &input, const std::vector<TipSite> &enforced, const NeedParams &need = NeedParams());
 } // namespace ScaffoldSupport
 } // namespace Slic3r

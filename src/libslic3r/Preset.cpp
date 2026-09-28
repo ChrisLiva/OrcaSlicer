@@ -1146,7 +1146,6 @@ static std::vector<std::string> s_Preset_print_options{
     "scaffold_bridge_length",
     "scaffold_brace_slenderness",
     "scaffold_brace_diameter",
-    "scaffold_density",
     "bridge_no_support",
     "thick_bridges",
     "thick_internal_bridges",

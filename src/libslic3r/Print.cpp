@@ -2625,7 +2625,6 @@ void  PrintObject::copy_layers_from_shared_object()
         m_support_analysis           = m_shared_object->m_support_analysis;
         m_emitted_support            = m_shared_object->m_emitted_support;
         this->set_scaffold_record(m_shared_object->scaffold_record());
-        this->set_scaffold_candidates(m_shared_object->scaffold_candidates());
 
         firstLayerObjSliceByVolume = m_shared_object->firstLayerObjSlice();
         firstLayerObjSliceByGroups = m_shared_object->firstLayerObjGroups();

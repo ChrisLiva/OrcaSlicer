@@ -68,7 +68,7 @@ struct Sliced
         input = prepare_plan(object, width_mm, xy_mm, neck_mm, Geometry::deg2rad(21.), {});
     }
 
-    Plan plan(double density) const { return plan_tips(input, {}, need_params(density)); }
+    Plan plan() const { return plan_tips(input, {}); }
     // A tip's xy in the fixture frame.
     Vec2d at(const PlannedTip &tip) const { return unscale(tip.site.position) - shift; }
 };
@@ -105,72 +105,57 @@ TEST_CASE("A rod hanging under a slab takes one tip at its lowest point", "[Scaf
     // y 4.5..5.5 down to z 3: the rod starts in mid-air and stands 5 mm before it meets the slab.
     Sliced s(merged({ box(0, 0, 0, 4, 4, 10), box(0, 0, 8, 10, 10, 2), box(7, 4.5, 3, 1, 1, 5) }));
     const BoundingBoxf3 rod(Vec3d(6.8, 4.3, 0.), Vec3d(8.2, 5.7, 7.9));
-    for (double density : { 0., 1., 2. }) {
-        INFO("density " << density);
-        const Plan plan = s.plan(density);
-        REQUIRE(count_in(s, plan, rod) == 1);
-        const PlannedTip &tip = *std::find_if(plan.tips.begin(), plan.tips.end(), [&](const PlannedTip &t) { return inside(s, t, rod); });
-        CHECK(tip.need == TipNeed::Birth);
-        CHECK_THAT(tip.site.print_z, Catch::Matchers::WithinAbs(3., 0.1 + 1e-6));
-        // It carries 5 mm of rod: the heavy disc.
-        CHECK_THAT(tip.site.grade_mm, Catch::Matchers::WithinAbs(4. * width_mm, 1e-9));
-    }
+    const Plan          plan = s.plan();
+    REQUIRE(count_in(s, plan, rod) == 1);
+    const PlannedTip &tip = *std::find_if(plan.tips.begin(), plan.tips.end(), [&](const PlannedTip &t) { return inside(s, t, rod); });
+    CHECK(tip.need == TipNeed::Birth);
+    CHECK_THAT(tip.site.print_z, Catch::Matchers::WithinAbs(3., 0.1 + 1e-6));
+    // It carries 5 mm of rod: the heavy disc.
+    CHECK_THAT(tip.site.grade_mm, Catch::Matchers::WithinAbs(4. * width_mm, 1e-9));
 }
 
 TEST_CASE("Ledges narrower than the reach take no tip", "[ScaffoldPlan]")
 {
     // A 6 x 6 x 10 column standing on the bed with flat ledges sticking out of its faces 0.3, 0.5 and 0.8 mm at
     // z 3, 5 and 7. At 0.1 mm layers and the 21 degree threshold the layer below carries 0.26 mm of each, so the
-    // widest hangs 0.54 mm past it, inside every tier's reach.
+    // widest hangs 0.54 mm past it, inside the 1 mm reach.
     Sliced s(merged({ box(0, 0, 0, 6, 6, 10), box(6, 1, 3, 0.3, 4, 0.5), box(1, 6, 5, 4, 0.5, 0.5), box(-0.8, 1, 7, 0.8, 4, 0.5) }));
-    for (double density : { 0., 1., 2. }) {
-        INFO("density " << density);
-        const Plan plan = s.plan(density);
-        CHECK(plan.tips.empty());
-        CHECK(plan.underside_unmet_mm2 == 0.);
-    }
+    const Plan plan = s.plan();
+    CHECK(plan.tips.empty());
+    CHECK(plan.underside_unmet_mm2 == 0.);
 }
 
-TEST_CASE("A ledge hanging past the reach takes tips only at the tiers whose reach it passes by a head's worth", "[ScaffoldPlan]")
+TEST_CASE("A ledge hanging a head's worth past the reach takes tips", "[ScaffoldPlan]")
 {
     // A 2 mm ledge hangs 1.74 mm past what the layer below carries. A head has to answer a disc of half the reach, and
-    // the 4 mm strip past Medium's 1 mm or Heavy's 0.6 mm holds that much, while the 0.1 mm strip past Light's 1.5 mm
-    // is a sliver that prints as it hangs.
+    // the 4 mm strip past the 1 mm reach holds that much.
     Sliced s(merged({ box(0, 0, 0, 6, 6, 10), box(6, 1, 5, 2, 4, 0.5) }));
     const BoundingBoxf3 ledge(Vec3d(6., 0.9, 4.9), Vec3d(8.1, 5.1, 5.6));
-    CHECK(count_in(s, s.plan(0.), ledge) == 0);
-    CHECK(count_in(s, s.plan(1.), ledge) > 0);
-    CHECK(count_in(s, s.plan(2.), ledge) >= count_in(s, s.plan(1.), ledge));
+    CHECK(count_in(s, s.plan(), ledge) > 0);
 }
 
-TEST_CASE("A floating plate takes tips within the reach of its whole underside and more toward Heavy", "[ScaffoldPlan]")
+TEST_CASE("A floating plate takes tips within the reach of its whole underside", "[ScaffoldPlan]")
 {
     // A 12 x 12 x 2 plate at z 5..7 beside a column that roots the object: the plate is one island, too tall for debris.
     Sliced s(merged({ box(-6, 0, 0, 3, 3, 8), box(0, 0, 5, 12, 12, 2) }));
     const BoundingBoxf3 plate(Vec3d(-0.1, -0.1, 4.9), Vec3d(12.1, 12.1, 5.1));
-    size_t last = 0;
-    for (double density : { 0., 1., 2. }) {
-        INFO("density " << density);
-        const Plan   plan  = s.plan(density);
-        const double reach = need_params(density).reach_mm;
-        const size_t n     = count_in(s, plan, plate);
-        CHECK(n > last);
-        last = n;
-        // Every underside sample on a 0.5 mm grid lies within one and a half reaches of a tip's head, the most a
-        // sliver too small for a head of its own may hang: measured from the rim of the head's disc, two support lines
-        // across, plus the 0.26 mm the self-support step grants, plus half a cell's diagonal for where the sample falls.
-        double worst = 0.;
-        for (double x = 0.1; x < 12.; x += 0.5)
-            for (double y = 0.1; y < 12.; y += 0.5) {
-                double near = std::numeric_limits<double>::max();
-                for (const PlannedTip &tip : plan.tips)
-                    if (tip.site.print_z < 5.1)
-                        near = std::min(near, (s.at(tip) - Vec2d(x, y)).norm());
-                worst = std::max(worst, near);
-            }
-        CHECK(worst <= 1.5 * reach + width_mm + 0.26 + 0.15);
-        CHECK(plan.underside_unmet_mm2 < 0.01 * 144.);
-    }
+    const Plan          plan  = s.plan();
+    const double        reach = NeedParams().reach_mm;
+    CHECK(count_in(s, plan, plate) > 0);
+    // Every underside sample on a 0.5 mm grid lies within one and a half reaches of a tip's head, the most a sliver too
+    // small for a head of its own may hang: measured from the rim of the head's disc, two support lines across, plus
+    // the 0.26 mm the self-support step grants, plus half a cell's diagonal for where the sample falls.
+    double worst = 0.;
+    for (double x = 0.1; x < 12.; x += 0.5)
+        for (double y = 0.1; y < 12.; y += 0.5) {
+            double near = std::numeric_limits<double>::max();
+            for (const PlannedTip &tip : plan.tips)
+                if (tip.site.print_z < 5.1)
+                    near = std::min(near, (s.at(tip) - Vec2d(x, y)).norm());
+            worst = std::max(worst, near);
+        }
+    CHECK(worst <= 1.5 * reach + width_mm + 0.26 + 0.15);
+    CHECK(plan.underside_unmet_mm2 < 0.01 * 144.);
 }
 
 TEST_CASE("A shallower underside takes more tips and one steeper than the threshold takes none", "[ScaffoldPlan]")
@@ -184,7 +169,7 @@ TEST_CASE("A shallower underside takes more tips and one steeper than the thresh
             for (const Vec3d &p : { Vec3d(4., y, 4.), Vec3d(10., y, 4. + rise), Vec3d(4., y, 5. + rise), Vec3d(10., y, 5. + rise) })
                 flare.push_back(p);
         Sliced s(merged({ box(0, 0, 0, 4, 4, 14), hull(flare) }));
-        const Plan plan = s.plan(1.);
+        const Plan plan = s.plan();
         CHECK(plan.islands_unheld == 0);
         return count_in(s, plan, BoundingBoxf3(Vec3d(4., -0.1, 3.9), Vec3d(10.1, 4.1, 14.)), { TipNeed::Underside });
     };
@@ -207,7 +192,7 @@ TEST_CASE("A flare's runs restart at a solid column however its column is held",
                                     Vec3d(10., y, base + 6. + rise) })
                 flare.push_back(p);
         Sliced s(merged({ box(0, 0, base, 4, 4, 12), hull(flare), box(-8, 0, 0, 2, 2, 1) }));
-        return count_in(s, s.plan(1.), BoundingBoxf3(Vec3d(4., -0.1, base + 4.9), Vec3d(10.1, 4.1, base + 12.)));
+        return count_in(s, s.plan(), BoundingBoxf3(Vec3d(4., -0.1, base + 4.9), Vec3d(10.1, 4.1, base + 12.)));
     };
     CHECK(flare_tips(0.) == flare_tips(2.));
 }
@@ -223,7 +208,7 @@ TEST_CASE("A blade standing free takes heavy tips up its height", "[ScaffoldPlan
         for (const Vec3d &p : { Vec3d(0., y, 2.), Vec3d(run, y, 18.), Vec3d(0., y, 5.), Vec3d(run, y, 21.) })
             blade.push_back(p);
     Sliced s(merged({ hull(blade), box(7, -1, 18, 5, 3.5, 3), box(12, -1, 0, 3, 3.5, 21) }));
-    const Plan plan = s.plan(1.);
+    const Plan plan = s.plan();
     std::set<long> heights;
     double         low = 1e9, high = -1e9;
     bool           heavy_point = false;
@@ -248,7 +233,7 @@ TEST_CASE("A blade standing free takes heavy tips up its height", "[ScaffoldPlan
 TEST_CASE("A squat floating block takes no stability tip", "[ScaffoldPlan]")
 {
     Sliced s(merged({ box(0, 0, 3, 8, 8, 4), box(-5, 0, 0, 2, 2, 8) }));
-    const Plan plan = s.plan(1.);
+    const Plan plan = s.plan();
     CHECK(std::none_of(plan.tips.begin(), plan.tips.end(), [](const PlannedTip &t) { return t.need == TipNeed::Stability; }));
     CHECK(plan.islands_slender == 0);
 }
@@ -264,38 +249,36 @@ TEST_CASE("A blade widening from its point takes stability tips along its spine"
         for (const Vec3d &p : { Vec3d(0., y, 1.), Vec3d(-10., y, 8.), Vec3d(-10., y, 11.), Vec3d(0., y, 11.) })
             blade.push_back(p);
     Sliced s(merged({ hull(blade), box(-11, -1, 11, 13, 3.5, 2), box(2, -1, 0, 3, 3.5, 13) }));
-    for (double density : { 0., 1., 2. }) {
-        const double       window = std::max(3., need_params(density).slender_ratio * 1.5);
-        const Plan         plan   = s.plan(density);
-        std::vector<Vec3d> tips;
-        for (const PlannedTip &tip : plan.tips)
-            if (const Vec2d xy = s.at(tip); xy.x() < 0.5 && tip.site.print_z < 8.5)
-                tips.emplace_back(xy.x(), xy.y(), tip.site.print_z);
-        std::sort(tips.begin(), tips.end(), [](const Vec3d &a, const Vec3d &b) { return a.z() < b.z(); });
-        double apart = 0., end = std::numeric_limits<double>::max();
-        for (size_t i = 0; i < tips.size(); ++ i) {
-            if (i > 0)
-                apart = std::max(apart, (tips[i] - tips[i - 1]).norm());
-            end = std::min(end, (tips[i] - Vec3d(-10., 0.75, 8.)).norm());
-        }
-        INFO("density " << density << ": " << tips.size() << " tips on the blade, at most " << apart << " mm apart, the spine's end "
-                        << end << " mm from one, window " << window);
-        REQUIRE(tips.size() >= 2);
-        CHECK(tips.front().z() < 1.2);
-        // A layer and a corner's offset along the face over the window.
-        CHECK(apart <= window + 0.5);
-        CHECK(end <= window + 0.5);
+    const double       window = std::max(3., NeedParams().slender_ratio * 1.5);
+    const Plan         plan   = s.plan();
+    std::vector<Vec3d> tips;
+    for (const PlannedTip &tip : plan.tips)
+        if (const Vec2d xy = s.at(tip); xy.x() < 0.5 && tip.site.print_z < 8.5)
+            tips.emplace_back(xy.x(), xy.y(), tip.site.print_z);
+    std::sort(tips.begin(), tips.end(), [](const Vec3d &a, const Vec3d &b) { return a.z() < b.z(); });
+    double apart = 0., end = std::numeric_limits<double>::max();
+    for (size_t i = 0; i < tips.size(); ++ i) {
+        if (i > 0)
+            apart = std::max(apart, (tips[i] - tips[i - 1]).norm());
+        end = std::min(end, (tips[i] - Vec3d(-10., 0.75, 8.)).norm());
     }
+    INFO(tips.size() << " tips on the blade, at most " << apart << " mm apart, the spine's end " << end << " mm from one, window "
+                     << window);
+    REQUIRE(tips.size() >= 2);
+    CHECK(tips.front().z() < 1.2);
+    // A layer and a corner's offset along the face over the window.
+    CHECK(apart <= window + 0.5);
+    CHECK(end <= window + 0.5);
 }
 
 TEST_CASE("Small island starts go without a tip only when they meet a held part", "[ScaffoldPlan]")
 {
-    // A 12 x 10 slab at z 8..10 on a column standing on the bed. Under it hangs a 0.6 mm nub, z 7.8..8, that meets the
-    // slab two layers up: at Light it prints as it hangs. Beside it two 0.6 mm nubs at z 5..5.2 meet each other two
-    // layers up and grow on as a strand into the slab: neither part is held where they meet, so one of them takes a tip.
-    Sliced s(merged({ box(0, 0, 0, 4, 4, 10), box(0, 0, 8, 12, 10, 2), box(7, 2, 7.8, 0.6, 0.6, 0.2), box(7, 6, 5, 0.6, 0.6, 0.2),
-                      box(7.9, 6, 5, 0.6, 0.6, 0.2), box(7, 6, 5.2, 1.5, 0.6, 2.8) }));
-    const Plan plan = s.plan(0.);
+    // A 12 x 10 slab at z 8..10 on a column standing on the bed. Under it hangs a 0.6 mm nub, z 7.9..8, that meets the
+    // slab one layer up: it prints as it hangs. Beside it two 0.6 mm nubs at z 5..5.1 meet each other one layer up and
+    // grow on as a strand into the slab: neither part is held where they meet, so one of them takes a tip.
+    Sliced s(merged({ box(0, 0, 0, 4, 4, 10), box(0, 0, 8, 12, 10, 2), box(7, 2, 7.9, 0.6, 0.6, 0.1), box(7, 6, 5, 0.6, 0.6, 0.1),
+                      box(7.9, 6, 5, 0.6, 0.6, 0.1), box(7, 6, 5.1, 1.5, 0.6, 2.9) }));
+    const Plan plan = s.plan();
     CHECK(count_in(s, plan, BoundingBoxf3(Vec3d(6.8, 1.8, 7.7), Vec3d(7.8, 2.8, 7.95))) == 0);
     CHECK(count_in(s, plan, BoundingBoxf3(Vec3d(6.8, 5.8, 4.9), Vec3d(8.7, 6.8, 7.95)), { TipNeed::Birth }) == 1);
     CHECK(plan.islands_unheld == 0);

@@ -13,7 +13,6 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/SLA/SupportTree.hpp"
-#include "libslic3r/Support/ScaffoldRetune.hpp"
 #include "GLGizmoUtils.hpp"
 
 namespace Slic3r { namespace GUI {
@@ -101,13 +100,6 @@ bool GLGizmoScaffoldPoints::on_init()
     m_desc["apply"]            = _L("Apply");
     m_desc["discard"]          = _L("Discard");
     m_desc["refused"]          = _L("That face points up. Place points on undersides and walls.");
-    m_desc["density"]          = _L("Density");
-    m_desc["density_tooltip"]  = _L("Slide to place fewer or more contact points, then Apply to slice with them.");
-    m_desc["density_light"]    = _L("Light");
-    m_desc["density_medium"]   = _L("Medium");
-    m_desc["density_heavy"]    = _L("Heavy");
-    m_desc["density_unsliced"] = _L("Slice the plate with automatic points to use the density slider.");
-    m_desc["density_edited"]   = _L("The points were edited by hand. Discard the edits or revert to auto to use the density slider.");
 
     m_shortcuts = {
         {_L("Left mouse button"),  _L("Add or Select")},
@@ -136,21 +128,17 @@ void GLGizmoScaffoldPoints::data_changed(bool is_serializing)
             if (cache_differs_from_model(model_object_by_id(m_old_mo_id))) {
                 ScaffoldPoints points;
                 for (const CacheEntry &entry : m_editing_cache) points.push_back(entry.point);
-                wxGetApp().CallAfter([this, object_id = m_old_mo_id, instance_id = m_old_instance_id, points = std::move(points),
-                                      status = cache_status()]() {
+                wxGetApp().CallAfter([this, object_id = m_old_mo_id, instance_id = m_old_instance_id, points = std::move(points)]() {
                     MessageDialog dlg(wxGetApp().mainframe, _L("Apply your scaffold point edits?"), _L("Scaffold Points"),
                                       wxICON_QUESTION | wxYES | wxNO);
                     if (dlg.ShowModal() != wxID_YES) return;
                     ModelObject         *edited   = model_object_by_id(object_id);
                     const ModelInstance *instance = instance_by_id(edited, instance_id);
-                    if (instance != nullptr) write_points(*edited, *instance, points, status);
+                    if (instance != nullptr) write_points(*edited, *instance, points);
                 });
             }
             reload_cache();
             m_generate_failure.clear();
-            // The slider starts at the density the object's last auto slice ran at.
-            const std::shared_ptr<const ScaffoldSupport::Candidates> candidates = density_candidates();
-            m_density = candidates ? float(ScaffoldSupport::density_of(*candidates)) : 1.f;
         }
         m_old_mo_id = mo->id();
     }
@@ -500,14 +488,14 @@ void GLGizmoScaffoldPoints::apply_changes()
     ScaffoldPoints points;
     for (const CacheEntry &entry : m_editing_cache) points.push_back(entry.point);
     m_generate_failure.clear();
-    write_points(*mo, *mo->instances[active], std::move(points), cache_status());
+    write_points(*mo, *mo->instances[active], std::move(points));
 }
 
-void GLGizmoScaffoldPoints::write_points(ModelObject &mo, const ModelInstance &instance, ScaffoldPoints points, ScaffoldPointsStatus status)
+void GLGizmoScaffoldPoints::write_points(ModelObject &mo, const ModelInstance &instance, ScaffoldPoints points)
 {
     Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Apply scaffold points");
     mo.scaffold_points          = std::move(points);
-    mo.scaffold_points_status   = status;
+    mo.scaffold_points_status   = ScaffoldPointsStatus::UserModified;
     mo.scaffold_points_pose     = instance.get_matrix().linear();
     mo.scaffold_points_mesh_box = mo.raw_mesh_bounding_box();
     wxGetApp().plater()->set_plater_dirty(true);
@@ -678,48 +666,6 @@ void GLGizmoScaffoldPoints::select_point(int i)
     }
 }
 
-std::shared_ptr<const ScaffoldSupport::Candidates> GLGizmoScaffoldPoints::density_candidates() const
-{
-    const PrintObject *po = selected_print_object();
-    return po != nullptr && po->is_step_done(posSlice) ? po->scaffold_candidates() : nullptr;
-}
-
-void GLGizmoScaffoldPoints::retune()
-{
-    const PrintObject                                       *po         = selected_print_object();
-    const std::shared_ptr<const ScaffoldSupport::Candidates> candidates = density_candidates();
-    if (po == nullptr || candidates == nullptr) return;
-
-    if (candidates != m_density_candidates) {
-        m_density_candidates = candidates;
-        m_density_grades     = ScaffoldSupport::grades_of(*candidates);
-    }
-    ScaffoldPoints points = ScaffoldSupport::retune_points(*po, *candidates, m_density, m_density_grades);
-    m_editing_cache.clear();
-    for (const ScaffoldPoint &point : points) {
-        CacheEntry &entry = m_editing_cache.emplace_back(point);
-        entry.normal      = normal_at(point.pos);
-    }
-    m_density_points  = std::move(points);
-    m_selection_empty = true;
-    m_click_refused   = false;
-    update_raycasters();
-    m_parent.set_as_dirty();
-}
-
-ScaffoldPointsStatus GLGizmoScaffoldPoints::cache_status() const
-{
-    if (!m_density_points || m_density_points->size() != m_editing_cache.size()) return ScaffoldPointsStatus::UserModified;
-    for (size_t i = 0; i < m_editing_cache.size(); ++i)
-        if (m_editing_cache[i].point != (*m_density_points)[i]) return ScaffoldPointsStatus::UserModified;
-    return ScaffoldPointsStatus::AutoGenerated;
-}
-
-bool GLGizmoScaffoldPoints::has_hand_edits(const ModelObject *mo) const
-{
-    return cache_differs_from_model(mo) && cache_status() == ScaffoldPointsStatus::UserModified;
-}
-
 bool GLGizmoScaffoldPoints::cache_differs_from_model(const ModelObject *mo) const
 {
     if (mo == nullptr) return false;
@@ -738,7 +684,6 @@ void GLGizmoScaffoldPoints::reload_cache()
             CacheEntry &entry = m_editing_cache.emplace_back(point);
             entry.normal      = normal_at(point.pos);
         }
-    m_density_points.reset();
     m_selection_empty = true;
     update_raycasters();
 }
@@ -838,7 +783,7 @@ void GLGizmoScaffoldPoints::on_render_input_window(float x, float y, float botto
                     ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
 
     const float           space_size   = m_imgui->get_style_scaling() * 8;
-    std::vector<wxString> captions     = {m_desc["head_size"], m_desc["create"], m_desc["density"], m_desc["remove"]};
+    std::vector<wxString> captions     = {m_desc["head_size"], m_desc["create"], m_desc["remove"]};
     const float           caption_size = m_imgui->find_widest_text(captions) + space_size + ImGui::GetStyle().WindowPadding.x;
 
     // adjust window position to avoid overlap the view toolbar
@@ -872,44 +817,6 @@ void GLGizmoScaffoldPoints::on_render_input_window(float x, float y, float botto
                             (mo->scaffold_points_status == ScaffoldPointsStatus::NoPoints && mo->scaffold_points.empty() && m_editing_cache.empty()));
     if (m_imgui->button(m_desc["revert"], m_desc["revert_tooltip"])) revert_to_auto();
     m_imgui->disabled_end();
-
-    // The slider selects again from the contacts the last auto slice placed; hand edits and a user list stay unless the
-    // user discards or reverts them.
-    const bool density_ready = density_candidates() != nullptr;
-    // A slice running reads the layers the slider reads, and replaces the candidates when it places points itself.
-    const bool density_open  = density_ready && !m_generate_pending && !wxGetApp().plater()->is_background_process_slicing() &&
-                               !has_hand_edits(mo) &&
-                               !(mo->scaffold_points_status == ScaffoldPointsStatus::UserModified && !cache_differs_from_model(mo));
-    ImGui::AlignTextToFramePadding();
-    m_imgui->text(m_desc["density"]);
-    ImGui::SameLine(caption_size);
-    m_imgui->disabled_begin(!density_open);
-    const float slider_width = m_imgui->calc_text_size(m_desc["density_light"] + m_desc["density_medium"] + m_desc["density_heavy"]).x +
-                               4.f * space_size;
-    ImGui::PushItemWidth(slider_width);
-    // The value before this frame's move, which the drag's snapshot holds with the points from before the drag.
-    const float density_before = m_density;
-    const bool  density_moved  = m_imgui->slider_float("##scaffold_density", &m_density, 0.f, 2.f, "", 1.f, true, m_desc["density_tooltip"], false);
-    if (ImGui::IsItemActivated()) {
-        const float density_after = m_density;
-        m_density                 = density_before;
-        Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Scaffold density");
-        m_density = density_after;
-    }
-    ImGui::PopItemWidth();
-    const ImVec2 slider_min = ImGui::GetItemRectMin(), slider_max = ImGui::GetItemRectMax();
-    m_imgui->disabled_end();
-    if (density_moved && density_open) retune();
-    // The tier names under the slider, at its ends and its middle.
-    ImGui::SetCursorPosX(caption_size);
-    const float cursor_y = ImGui::GetCursorPosY();
-    m_imgui->text(m_desc["density_light"]);
-    ImGui::SameLine();
-    ImGui::SetCursorPos({caption_size + 0.5f * (slider_max.x - slider_min.x - m_imgui->calc_text_size(m_desc["density_medium"]).x), cursor_y});
-    m_imgui->text(m_desc["density_medium"]);
-    ImGui::SameLine();
-    ImGui::SetCursorPos({caption_size + slider_max.x - slider_min.x - m_imgui->calc_text_size(m_desc["density_heavy"]).x, cursor_y});
-    m_imgui->text(m_desc["density_heavy"]);
 
     ImGui::AlignTextToFramePadding();
     m_imgui->text(m_desc["remove"]);
@@ -964,10 +871,6 @@ void GLGizmoScaffoldPoints::on_render_input_window(float x, float y, float botto
         warnings.push_back(_L("Paint and blockers are ignored while the list is in use."));
     if (cache_differs_from_model(mo)) warnings.push_back(_L("Unapplied edits"));
     if (m_click_refused) warnings.push_back(m_desc["refused"]);
-    if (!density_ready)
-        warnings.push_back(m_desc["density_unsliced"]);
-    else if (has_hand_edits(mo) || (mo->scaffold_points_status == ScaffoldPointsStatus::UserModified && !cache_differs_from_model(mo)))
-        warnings.push_back(m_desc["density_edited"]);
     if (!m_generate_failure.empty()) warnings.push_back(m_generate_failure);
     if (!warnings.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImGuiWrapper::COL_WARNING);
@@ -1070,21 +973,14 @@ void GLGizmoScaffoldPoints::on_set_state()
 
 void GLGizmoScaffoldPoints::on_load(cereal::BinaryInputArchive &ar)
 {
-    bool           has_density_points = false;
-    ScaffoldPoints density_points;
-    ar(m_new_point_size, m_editing_cache, m_selection_empty, m_density, has_density_points, density_points);
-    m_density_points = has_density_points ? std::optional<ScaffoldPoints>(std::move(density_points)) : std::nullopt;
+    ar(m_new_point_size, m_editing_cache, m_selection_empty);
     // Undo and redo change the number of points, and each point needs its grabber to be picked.
     update_raycasters();
     // The snapshot holds no results, so they are matched against the last slice again.
     update_results();
 }
 
-void GLGizmoScaffoldPoints::on_save(cereal::BinaryOutputArchive &ar) const
-{
-    ar(m_new_point_size, m_editing_cache, m_selection_empty, m_density, m_density_points.has_value(),
-       m_density_points ? *m_density_points : ScaffoldPoints());
-}
+void GLGizmoScaffoldPoints::on_save(cereal::BinaryOutputArchive &ar) const { ar(m_new_point_size, m_editing_cache, m_selection_empty); }
 
 void GLGizmoScaffoldPoints::on_register_raycasters_for_picking() { update_raycasters(); }
 

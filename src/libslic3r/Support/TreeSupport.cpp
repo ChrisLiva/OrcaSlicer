@@ -1948,7 +1948,6 @@ void TreeSupport::generate()
     // cell over: nothing at all unless the miniature contact mode asked for it. A scaffold thins nothing: its need
     // planner places its tips from the object's layers.
     const double contact_min_distance = m_object_config->support_contact_min_distance.value;
-    const double density              = ScaffoldSupport::tier_density(m_object_config->scaffold_density);
     m_problem.contact_min_distance_mm = ! miniature_contacts || m_scaffold ? 0. : contact_min_distance;
     // The model's own weakness under a contact, taken off the object's sliced layers once: the
     // measurement and, where the mode thins them, the contact placement both read it.
@@ -2030,8 +2029,6 @@ void TreeSupport::generate()
     // standing where no contact does prints its top ring right under it as a contact's tip does.
     ScaffoldSupport::Params params;
     ScaffoldSupport::Tips   scaffold_tips;
-    // What an auto slice keeps for the Scaffold Points tool's density slider, published once the measurement is done.
-    std::shared_ptr<ScaffoldSupport::Candidates> candidates;
     std::vector<coordf_t>   tip_tops;
     if (m_scaffold) {
         params.toolpath_width_mm    = toolpath_support_width(m_support_params, *m_print_config, *m_object_config);
@@ -2068,9 +2065,7 @@ void TreeSupport::generate()
             // The planner keeps its tips off what a support blocker covers, as detect_overhangs gathers it.
             std::vector<Polygons> blockers = m_object->slice_support_blockers();
             m_object->project_and_append_custom_facets(false, EnforcerBlockerType::BLOCKER, blockers);
-            candidates    = std::make_shared<ScaffoldSupport::Candidates>(
-                ScaffoldSupport::collect_candidates(*m_object, contact_nodes, params, m_threshold_rad, blockers));
-            scaffold_tips = ScaffoldSupport::place_tips(*m_object, *candidates, density);
+            scaffold_tips = ScaffoldSupport::place_tips(*m_object, contact_nodes, params, m_threshold_rad, blockers);
         }
         for (const ScaffoldSupport::TipSite &tip : scaffold_tips.sites)
             tip_tops.push_back(tip.print_z);
@@ -2148,9 +2143,6 @@ void TreeSupport::generate()
                 const ScaffoldPoint point = ScaffoldSupport::point_of(*m_object, params, scaffold_tips.sites[i], out.grades[i]);
                 record->tips.push_back({ point.pos, point.size, point.enforced, out.results[i] });
             }
-        if (candidates)
-            for (size_t i = 0; i < scaffold_tips.sites.size(); ++ i)
-                candidates->grades[ScaffoldSupport::grade_key(scaffold_tips.sites[i])] = out.grades[i];
         record->pose              = m_object->instances().front().model_instance->get_matrix().linear();
         record->toolpath_width_mm = params.toolpath_width_mm;
         m_object->set_scaffold_record(std::move(record));
@@ -2274,12 +2266,6 @@ void TreeSupport::generate()
         m_object->set_support_analysis(std::make_shared<const SupportAnalysis::Report>(std::move(report)));
     }
     profiler.stage_finish(STAGE_MEASURE);
-
-    if (candidates) {
-        candidates->risk    = std::move(m_risk);
-        candidates->density = density;
-        m_object->set_scaffold_candidates(std::move(candidates));
-    }
 
     profiler.stage_finish(STAGE_total);
     BOOST_LOG_TRIVIAL(info) << "tree support time " << profiler.report();

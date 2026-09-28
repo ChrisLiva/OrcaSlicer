@@ -7,7 +7,6 @@
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
-#include "libslic3r/Support/ScaffoldSupport.hpp"
 #include "libslic3r/Support/SupportAnalysis.hpp"
 #include "libslic3r/Support/SupportComponents.hpp"
 #include "libslic3r/Support/SupportParameters.hpp"
@@ -391,21 +390,6 @@ TriangleMesh floating_slab_fixture()
     return post;
 }
 
-// A 6 x 6 x 14 mm column at x 0..6, y 0..6 carrying off its +x face six steps across y 0..6 up to z 12, step i reaching
-// x 6..7 + i from z 8 + 0.6 i. Each step's underside is a 1 mm strip three 0.2 mm layers over the one before, past the
-// two-layer window that links regions into one overhang component, so every strip is its own component while
-// contacts on neighbouring strips stand about 1.2 mm apart in 3-D.
-TriangleMesh staircase_fixture()
-{
-    TriangleMesh column = make_cube(6., 6., 14.);
-    for (int i = 0; i < 6; ++ i) {
-        TriangleMesh step = make_cube(1. + i, 6., 4. - 0.6 * i);
-        step.translate(6.f, 0.f, float(8. + 0.6 * i));
-        column.merge(step);
-    }
-    return column;
-}
-
 // A 6 x 6 x 14 mm column at x 0..6, y 0..6 carrying off its +x face a plank 2 mm thick whose underside falls at
 // 45 degrees from z 10 at the face, `length_mm` along x, across y 0..6. A head on the underside aims along the
 // underside's normal, down and back toward the column, so a tip under a millimetre from the face tilts its neck into
@@ -528,17 +512,11 @@ TEST_CASE("A tree scaffold style round-trips through the config and lists last",
     CHECK_THAT(brace_diameter_def->min, WithinAbs(10., 1e-9));
     CHECK_THAT(brace_diameter_def->max, WithinAbs(100., 1e-9));
     CHECK(brace_diameter_def->mode == comAdvanced);
-    CHECK(defaults.opt_enum<ScaffoldDensity>("scaffold_density") == sdMedium);
-    const ConfigOptionDef *density_def = print_config_def.get("scaffold_density");
-    REQUIRE(density_def != nullptr);
-    CHECK(density_def->enum_values == std::vector<std::string>{ "light", "medium", "heavy" });
-    CHECK(density_def->mode == comAdvanced);
 
     const std::vector<std::string> &options = Preset::print_options();
     CHECK(std::find(options.begin(), options.end(), "scaffold_bridge_length") != options.end());
     CHECK(std::find(options.begin(), options.end(), "scaffold_brace_slenderness") != options.end());
     CHECK(std::find(options.begin(), options.end(), "scaffold_brace_diameter") != options.end());
-    CHECK(std::find(options.begin(), options.end(), "scaffold_density") != options.end());
 
     // Print::apply needs the Model the print was built from, so the print is built through init_print.
     const DynamicPrintConfig config = fixture_config({ { "support_style", "tree_slim" } });
@@ -552,6 +530,19 @@ TEST_CASE("A tree scaffold style round-trips through the config and lists last",
     changed.set_deserialize_strict({ { "scaffold_bridge_length", "20" } });
     CHECK(print.apply(model, changed) != PrintBase::APPLY_STATUS_UNCHANGED);
     CHECK_FALSE(print.objects().front()->is_step_done(posSupportMaterial));
+}
+
+TEST_CASE("A project saved with scaffold_density loads without it", "[ScaffoldSupport]")
+{
+    // Presets and 3MF project and object configs written by a build that had the key still carry it: it loads as an
+    // unknown key, with no substitution, and the rest of the file loads.
+    DynamicPrintConfig        config = DynamicPrintConfig::full_print_config();
+    ConfigSubstitutionContext context(ForwardCompatibilitySubstitutionRule::Enable);
+    config.set_deserialize("scaffold_density", "heavy", context);
+    CHECK_FALSE(config.has("scaffold_density"));
+    CHECK(context.unrecogized_keys == std::vector<std::string>{ "scaffold_density" });
+    CHECK(context.substitutions.empty());
+    CHECK(print_config_def.get("scaffold_density") == nullptr);
 }
 
 TEST_CASE("A normal support type resets the scaffold style to grid", "[ScaffoldSupport]")
@@ -1142,108 +1133,6 @@ TEST_CASE("A painted enforcer beside a wall fuses its tip where the paint asks",
         INFO("support layer at print_z " << sl->print_z);
         CHECK(diff_ex(in_band, reach_at(reaches, sl->print_z, reach_z)).empty());
     }
-}
-
-TEST_CASE("Scaffold density places fewer tips at Light and more at Heavy", "[ScaffoldSupport]")
-{
-    // Each tier's reach bounds how far the steps' undersides may hang past their anchors, so a longer reach calls for
-    // fewer heads.
-    const auto tips = [](const char *density) {
-        Print print;
-        init_and_process_print({ staircase_fixture() }, print, scaffold_config({ { "scaffold_density", density } }));
-        REQUIRE(print.objects().size() == 1);
-        const PrintObject &object = *print.objects().front();
-        REQUIRE(object.support_analysis() != nullptr);
-        const SupportAnalysis::Report &report = *object.support_analysis();
-        INFO(density << ": tips placed " << report.tips_placed << " routed " << report.tips_routed << " dropped "
-                     << report.tips_dropped << " floating removed " << report.floating_pieces_removed);
-        CHECK(report.floating_pieces_removed == 0);
-        return report.tips_placed;
-    };
-    const size_t light = tips("light"), medium = tips("medium"), heavy = tips("heavy");
-    INFO("light " << light << " medium " << medium << " heavy " << heavy);
-    CHECK(light > 0);
-    CHECK(light < medium);
-    CHECK(medium < heavy);
-}
-
-TEST_CASE("The density slider's candidates give back the slice's own tips at the slice's own density", "[ScaffoldSupport]")
-{
-    // The slider selects again from what the slice kept without placing contacts against the risk field, so at the
-    // density the slice ran at it must hand back the tips the slice drew, in order, with the same head sizes.
-    for (const char *tier : { "light", "medium", "heavy" }) {
-        INFO("tier " << tier);
-        Print print;
-        init_and_process_print({ staircase_fixture() }, print,
-                               scaffold_config({ { "support_contact_min_distance", "2" }, { "scaffold_density", tier } }));
-        REQUIRE(print.objects().size() == 1);
-        const PrintObject &object = *print.objects().front();
-        const std::shared_ptr<const ScaffoldRecord>                     record     = object.scaffold_record();
-        const std::shared_ptr<const ScaffoldSupport::Candidates> candidates = object.scaffold_candidates();
-        REQUIRE(record != nullptr);
-        REQUIRE(candidates != nullptr);
-        // Once from the slice's grades and once grading every tip afresh.
-        ScaffoldSupport::TipGrades grades = candidates->grades, fresh;
-        const ScaffoldPoints points =
-            ScaffoldSupport::retune_points(object, *candidates, ScaffoldSupport::tier_density(object.config().scaffold_density), grades);
-        CHECK(ScaffoldSupport::retune_points(object, *candidates, ScaffoldSupport::tier_density(object.config().scaffold_density), fresh) ==
-              points);
-        REQUIRE(points.size() == record->tips.size());
-        for (size_t i = 0; i < points.size(); ++ i) {
-            INFO("point " << i << " at (" << points[i].pos.x() << ", " << points[i].pos.y() << ", " << points[i].pos.z() << ")");
-            CHECK((points[i].pos - record->tips[i].pos).norm() < 1e-4f);
-            CHECK(points[i].size == record->tips[i].size);
-            CHECK(points[i].enforced == record->tips[i].enforced);
-        }
-    }
-}
-
-TEST_CASE("The density slider places fewer points toward Light and more toward Heavy", "[ScaffoldSupport]")
-{
-    Print print;
-    init_and_process_print({ staircase_fixture() }, print, scaffold_config({ { "support_contact_min_distance", "2" } }));
-    REQUIRE(print.objects().size() == 1);
-    const PrintObject &object = *print.objects().front();
-    const std::shared_ptr<const ScaffoldSupport::Candidates> candidates = object.scaffold_candidates();
-    REQUIRE(candidates != nullptr);
-    ScaffoldSupport::TipGrades grades = candidates->grades;
-    const size_t light  = ScaffoldSupport::retune_points(object, *candidates, 0., grades).size();
-    const size_t medium = ScaffoldSupport::retune_points(object, *candidates, 1., grades).size();
-    const size_t heavy  = ScaffoldSupport::retune_points(object, *candidates, 2., grades).size();
-    INFO("light " << light << " medium " << medium << " heavy " << heavy);
-    CHECK(light > 0);
-    CHECK(light < medium);
-    CHECK(medium < heavy);
-}
-
-TEST_CASE("The density slider's candidates outlive a list edit and go with a support setting", "[ScaffoldSupport]")
-{
-    Print print;
-    Model model;
-    DynamicPrintConfig config = scaffold_config({ { "support_contact_min_distance", "2" } });
-    init_print({ staircase_fixture() }, print, model, config);
-    print.process();
-    REQUIRE(print.objects().size() == 1);
-    const std::shared_ptr<const ScaffoldSupport::Candidates> candidates = print.objects().front()->scaffold_candidates();
-    REQUIRE(candidates != nullptr);
-
-    // A list the slider wrote: the pass builds from it, and the candidates stay for the slider to select from again.
-    ModelObject &mo            = *model.objects.front();
-    mo.scaffold_points          = scaffold_points_from(*print.objects().front()->scaffold_record());
-    mo.scaffold_points_status   = ScaffoldPointsStatus::AutoGenerated;
-    mo.scaffold_points_pose     = mo.instances.front()->get_matrix().linear();
-    mo.scaffold_points_mesh_box = mo.raw_mesh_bounding_box();
-    REQUIRE(reapply(print, model, config) != Print::APPLY_STATUS_UNCHANGED);
-    CHECK(print.objects().front()->scaffold_candidates() == candidates);
-    print.process();
-    REQUIRE(print.objects().front()->scaffold_record() != nullptr);
-    CHECK(print.objects().front()->scaffold_record()->baked);
-    CHECK(print.objects().front()->scaffold_candidates() == candidates);
-
-    // A support setting changes the contacts themselves.
-    config.set_deserialize_strict({ { "support_threshold_angle", "50" } });
-    REQUIRE(reapply(print, model, config) != Print::APPLY_STATUS_UNCHANGED);
-    CHECK(print.objects().front()->scaffold_candidates() == nullptr);
 }
 
 TEST_CASE("Unseeded feature starts get a scaffold tip while floating debris and wall-held slivers get none", "[ScaffoldSupport]")
@@ -1943,60 +1832,6 @@ TEST_CASE("Scaffold support over corpus plate 3 in two poses", "[ScaffoldSupport
     }
 }
 
-// Hidden ([.]): one full Print::process() of plate 1 of the corpus, about a minute, then the density slider's full
-// range. The Scaffold Points tool recomputes on every slider move, so each recompute stays within 2 s.
-TEST_CASE("The density slider recomputes corpus plate 1 within 2 s", "[ScaffoldSupport][.]")
-{
-    SupportValidation::use_os_temporary_dir();
-
-    const char *env = std::getenv("ORCA_MINIATURE_CORPUS");
-    if (env == nullptr || *env == '\0') {
-        std::cout << "corpus dir not set" << std::endl;
-        return;
-    }
-
-    SupportValidation::Manifest m;
-    m.version    = 1;
-    m.model_root = env;
-    SupportValidation::ManifestCase c;
-    c.id            = "plate1";
-    c.model         = "elf_test.3mf";
-    c.sha256        = "201c541805e94a2914c3cf0a0aebaee68ee3f6199cc096ae36993069fc781ba6";
-    c.selectors     = { "name:10_Dark Elves 1.stl" };
-    c.styles        = { "tree_scaffold" };
-    c.feature_modes = { "on" };
-    c.repeats       = 1;
-
-    SupportValidation::CorpusObject object = SupportValidation::case_object(m, c, fixture_config({ { "support_top_z_distance", "0.2" } }),
-                                                                            "tree_scaffold", "on");
-    REQUIRE_THAT(object.config.opt_float("layer_height"), WithinAbs(0.06, 1e-9));
-    Print print;
-    print.set_status_silent();
-    print.apply(object.model, object.config);
-    print.process();
-    REQUIRE(print.objects().size() == 1);
-    const PrintObject &po = *print.objects().front();
-    const std::shared_ptr<const ScaffoldSupport::Candidates> candidates = po.scaffold_candidates();
-    REQUIRE(candidates != nullptr);
-    REQUIRE(po.scaffold_record() != nullptr);
-
-    // A sweep from Medium to either end and back, as a drag runs, grading each tip once.
-    ScaffoldSupport::TipGrades grades    = candidates->grades;
-    double                     slowest_s = 0.;
-    for (int step : { 10, 12, 14, 16, 18, 20, 15, 10, 8, 6, 4, 2, 0, 5, 10 }) {
-        const double density = 0.1 * step;
-        const auto   start   = std::chrono::steady_clock::now();
-        const size_t points  = ScaffoldSupport::retune_points(po, *candidates, density, grades).size();
-        const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-        slowest_s = std::max(slowest_s, elapsed);
-        std::cout << "density " << density << ": " << points << " points in " << elapsed << " s" << std::endl;
-        if (step == 10)
-            CHECK(points == po.scaffold_record()->tips.size());
-    }
-    INFO("slowest recompute " << slowest_s << " s");
-    CHECK(slowest_s <= 2.);
-}
-
 // Hidden ([.]): one full Print::process() of plate 1 of the corpus, about a minute. The planner places tips only where
 // the print needs them: the hand draped over the raised knee takes a tip on each fingertip that starts in mid-air rather
 // than one on every knuckle, and the sword, which stands free from its point at z 1.1 to z 17.1 before it meets the
@@ -2030,8 +1865,8 @@ TEST_CASE("Need-driven tips hold corpus plate 1's hand and sword with few contac
     REQUIRE(print.objects().size() == 1);
     const PrintObject &po = *print.objects().front();
     REQUIRE(po.support_analysis() != nullptr);
-    const std::shared_ptr<const ScaffoldSupport::Candidates> candidates = po.scaffold_candidates();
-    REQUIRE(candidates != nullptr);
+    const std::shared_ptr<const ScaffoldRecord> record = po.scaffold_record();
+    REQUIRE(record != nullptr);
     const SupportAnalysis::Report &report = *po.support_analysis();
     CHECK(report.floating_pieces_removed == 0);
 
@@ -2039,35 +1874,29 @@ TEST_CASE("Need-driven tips hold corpus plate 1's hand and sword with few contac
 
     // The sword hangs point-down from the raised hand: its blade stands free from z 1.04 and widens from its point to
     // about 7 mm by z 6.5, then rises nearly vertical to the guard at z 15.8, too steep there for a straight neck.
-    ScaffoldSupport::TipGrades grades = candidates->grades;
-    for (const double density : { 0., 1., 2. }) {
-        const ScaffoldPoints points = ScaffoldSupport::retune_points(po, *candidates, density, grades);
-        size_t               hand = 0, low_blade = 0;
-        std::vector<double>  sword;
-        bool                 heavy_point = false;
-        for (const ScaffoldPoint &pt : points) {
-            const Vec3d p = po.trafo_centered() * pt.pos.cast<double>();
-            if (p.x() > 8. && p.x() < 15.5 && p.z() > 20. && p.z() < 29.)
-                ++ hand;
-            if (p.x() > -10. && p.x() < -0.2 && p.y() > 2.5 && p.z() < 15.) {
-                sword.push_back(p.z());
-                low_blade += p.z() < 7.5;
-                heavy_point = heavy_point || (p.z() < 1.5 && pt.size == ScaffoldHeadSize::Heavy);
-            }
+    size_t              hand = 0, low_blade = 0;
+    std::vector<double> sword;
+    bool                heavy_point = false;
+    for (const ScaffoldRecord::Tip &tip : record->tips) {
+        const Vec3d p = po.trafo_centered() * tip.pos.cast<double>();
+        if (p.x() > 8. && p.x() < 15.5 && p.z() > 20. && p.z() < 29.)
+            ++ hand;
+        if (p.x() > -10. && p.x() < -0.2 && p.y() > 2.5 && p.z() < 15.) {
+            sword.push_back(p.z());
+            low_blade += p.z() < 7.5;
+            heavy_point = heavy_point || (p.z() < 1.5 && tip.size == ScaffoldHeadSize::Heavy);
         }
-        std::sort(sword.begin(), sword.end());
-        double gap = 15. - (sword.empty() ? 0. : sword.back());
-        for (size_t i = 1; i < sword.size(); ++ i)
-            gap = std::max(gap, sword[i] - sword[i - 1]);
-        INFO("density " << density << ": " << points.size() << " points, " << hand << " on the hand, " << sword.size()
-                        << " on the blade under z 15, " << low_blade << " under z 7.5, largest gap " << gap << " mm");
-        if (density < 2.)
-            CHECK(hand <= 10);
-        CHECK(heavy_point);
-        // No stretch of blade under the guard longer than 7 mm goes without a tip, and the widening lower blade takes
-        // one more tip per tier past Light.
-        CHECK(gap <= 7.);
-        CHECK(low_blade >= size_t(1. + density));
-        CHECK(points.size() <= 200);
     }
+    std::sort(sword.begin(), sword.end());
+    double gap = 15. - (sword.empty() ? 0. : sword.back());
+    for (size_t i = 1; i < sword.size(); ++ i)
+        gap = std::max(gap, sword[i] - sword[i - 1]);
+    INFO(record->tips.size() << " points, " << hand << " on the hand, " << sword.size() << " on the blade under z 15, " << low_blade
+                             << " under z 7.5, largest gap " << gap << " mm");
+    CHECK(hand <= 10);
+    CHECK(heavy_point);
+    // No stretch of blade under the guard longer than 7 mm goes without a tip, and the widening lower blade takes two.
+    CHECK(gap <= 7.);
+    CHECK(low_blade >= 2);
+    CHECK(record->tips.size() <= 200);
 }
