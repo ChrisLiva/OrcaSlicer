@@ -1,6 +1,7 @@
 #include "ScaffoldPlan.hpp"
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <queue>
 #include "ClipperUtils.hpp"
 #include "Geometry/ConvexHull.hpp"
@@ -16,12 +17,14 @@ namespace Slic3r::ScaffoldSupport {
 namespace {
 
 constexpr float  unreached        = std::numeric_limits<float>::infinity();
-// A part standing at most this high over its highest anchor stands however thin: its anchors hold its whole height.
+// A part reaching no farther than this from its anchors stands however thin: they hold all of it.
 constexpr double stability_min_mm = 3.;
+// How much higher a part whose stability search ended short is searched again: a face a little higher may take a tip.
+constexpr double stability_retry_mm = 1.;
 // A birth tip under an island standing taller than this before it merges carries the island's weight: heavy disc.
 constexpr double heavy_birth_mm   = 2.;
 // An island that never merges and stands no taller than this is mesh debris, and one whose birth stands at a wall
-// and merges within it hangs from that wall.
+// and merges within it hangs from that wall when the part it meets is held.
 constexpr double debris_mm        = 1.;
 
 using Heap = std::priority_queue<std::pair<float, size_t>, std::vector<std::pair<float, size_t>>, std::greater<>>;
@@ -130,10 +133,9 @@ Births walk_births(const PlanInput &in)
     return births;
 }
 
-// The narrowest width of `points`' convex hull: the least, over the hull's edges, of the farthest point from the edge.
-double min_width_mm(const Points &points)
+// The narrowest width of a convex hull: the least, over its edges, of the farthest point from the edge.
+double min_width_mm(const Polygon &hull)
 {
-    const Polygon hull = Geometry::convex_hull(points);
     if (hull.size() < 3)
         return 0.;
     double best = std::numeric_limits<double>::max();
@@ -157,7 +159,8 @@ class Sweep
 public:
     Sweep(const PlanInput &in, const NeedParams &need) : m_in(in), m_need(need), m_sets(in.components.pieces.size()),
         m_anchor_z(in.components.pieces.size(), -std::numeric_limits<double>::max()),
-        m_anchors(in.components.pieces.size()), m_rooted(in.components.pieces.size(), 0),
+        m_rearm_z(in.components.pieces.size(), -std::numeric_limits<double>::max()),
+        m_anchors(in.components.pieces.size()), m_waiting(in.components.pieces.size()), m_rooted(in.components.pieces.size(), 0),
         m_slender(in.components.pieces.size(), 0)
     {
         m_births = walk_births(in);
@@ -209,8 +212,12 @@ private:
     const NeedParams        &m_need;
     Births                   m_births;
     DisjointSets             m_sets;       // pieces joined as the walk climbs, for stability
-    std::vector<double>      m_anchor_z;   // per root: its highest anchor
-    std::vector<std::vector<Vec3d>> m_anchors;
+    std::vector<double>      m_anchor_z;   // per root: its highest anchor, a tip or a birth
+    std::vector<double>      m_rearm_z;    // per root: where its last stability search ended short
+    std::vector<std::vector<Vec3d>> m_anchors;   // per root: its tips
+    // Per root: the births that took no tip on the understanding that the part they merge into holds them, as the slab
+    // and piece of each. The merge settles them.
+    std::vector<std::vector<std::pair<size_t, size_t>>> m_waiting;
     std::vector<char>        m_rooted, m_slender;
     std::vector<std::pair<int, int>> m_wall_disc;
     std::vector<std::pair<int, int>> m_head_disc;   // the cells under a small head, two support lines across
@@ -244,16 +251,48 @@ private:
                 m_anchor_z[p] = piece.bottom_z;
                 continue;
             }
-            size_t root = m_sets.find(piece.below.front());
+            std::vector<size_t> roots;
             for (size_t q : piece.below)
-                if (const size_t r = m_sets.find(q); r != root) {
-                    m_anchor_z[root] = std::max(m_anchor_z[root], m_anchor_z[r]);
-                    append(m_anchors[root], std::move(m_anchors[r]));
-                    m_rooted[root]  = m_rooted[root] || m_rooted[r];
-                    m_slender[root] = m_slender[root] || m_slender[r];
-                    m_sets.join(root, r);
-                }
+                if (const size_t r = m_sets.find(q); std::find(roots.begin(), roots.end(), r) == roots.end())
+                    roots.push_back(r);
+            if (roots.size() > 1)
+                settle(roots);
+            const size_t root = roots.front();
+            for (size_t i = 1; i < roots.size(); ++ i) {
+                const size_t r = roots[i];
+                m_anchor_z[root] = std::max(m_anchor_z[root], m_anchor_z[r]);
+                m_rearm_z[root]  = std::max(m_rearm_z[root], m_rearm_z[r]);
+                append(m_anchors[root], std::move(m_anchors[r]));
+                m_rooted[root]  = m_rooted[root] || m_rooted[r];
+                m_slender[root] = m_slender[root] || m_slender[r];
+                m_sets.join(root, r);
+            }
             m_sets.join(root, p);
+        }
+    }
+
+    // Parts meeting: a birth that waited for this merge is held when a tip or the bed already holds one of the parts.
+    // When none is, the first waiting birth a tip can stand under takes its tip after all, which holds the rest; one
+    // that no tip can reach is counted.
+    void settle(const std::vector<size_t> &roots)
+    {
+        const bool held = std::any_of(roots.begin(), roots.end(), [this](size_t r) { return m_rooted[r] || ! m_anchors[r].empty(); });
+        bool       placed = held;
+        for (size_t r : roots) {
+            for (const auto &[l, p] : m_waiting[r]) {
+                if (placed)
+                    break;
+                if (const std::optional<Point> spot = birth_spot(l, p)) {
+                    BOOST_LOG_TRIVIAL(debug) << "scaffold island at " << pieces()[p].bottom_z << " joins nothing held: tip";
+                    place(site_at(l, *spot, m_births.free_mm[p] > heavy_birth_mm ? 4. * m_in.toolpath_width_mm : 0.), TipNeed::Birth, nullptr);
+                    placed = true;
+                }
+            }
+        }
+        for (size_t r : roots) {
+            if (! placed)
+                m_plan.islands_unheld += m_waiting[r].size();
+            m_waiting[r].clear();
         }
     }
 
@@ -273,7 +312,12 @@ private:
         if (it == m_in.slabs.end())
             return true;
         const LayerGrid &wall = m_in.material[size_t(it - m_in.slabs.begin())];
-        return std::none_of(m_wall_disc.begin(), m_wall_disc.end(), [&](const std::pair<int, int> &d) { return wall.at(x + d.first, y + d.second) != 0; });
+        if (std::any_of(m_wall_disc.begin(), m_wall_disc.end(), [&](const std::pair<int, int> &d) { return wall.at(x + d.first, y + d.second) != 0; }))
+            return false;
+        // The lattice places `p` and the wall only to within a cell each, and a tip on the model's edge, as every
+        // stability tip is, stands where that decides: the wall skip reads the band itself, so the planner does too.
+        const ExPolygons &band = m_in.wall_band[size_t(it - m_in.slabs.begin())];
+        return std::none_of(band.begin(), band.end(), [&p](const ExPolygon &expoly) { return expoly.contains(p); });
     }
 
     // The root of the piece of slab `l` holding `p`, or npos.
@@ -532,9 +576,33 @@ private:
         std::swap(m_dist, m_tip_dist);
     }
 
+    // Where a tip stands under birth piece `p` of slab `l`: its deepest point, or where that stands at a wall, the
+    // eligible cell of the piece nearest it. None where every cell stands at a wall.
+    std::optional<Point> birth_spot(size_t l, size_t p) const
+    {
+        const Point spot = inscribed_point(pieces()[p].polygon);
+        if (eligible(l, spot))
+            return spot;
+        const LayerGrid &g     = m_in.material[l];
+        const uint16_t   label = uint16_t(p - m_in.components.slab_range[l].first + 1);
+        double           best  = std::numeric_limits<double>::max();
+        std::optional<Point> found;
+        for (size_t i = 0; i < g.cells.size(); ++ i)
+            if (g.cells[i] == label) {
+                const Point c = centre(g.x0 + int(i % size_t(g.w)), g.y0 + int(i / size_t(g.w)));
+                if (const double d = (c - spot).cast<double>().norm(); d < best && eligible(l, c)) {
+                    best  = d;
+                    found = c;
+                }
+            }
+        return found;
+    }
+
     // Each island starting on slab `l` takes one tip at its deepest point, unless an enforced tip already stands on its
-    // birth piece, it is debris, it merges before it could droop, or it hangs from a wall; an island no tip can reach is
-    // counted. An island left without a tip prints as it hangs, so its cells anchor what grows on them.
+    // birth piece or it is debris. An island that merges before it could droop, or one no tip can reach that merges
+    // within the debris height, waits for its merge, which `settle` reads: it goes without a tip only when the part it
+    // meets is held. Any other island no tip can reach is counted. An island left without a tip prints as it hangs, so
+    // its cells anchor what grows on them.
     void births(size_t l, const std::vector<TipSite> &enforced, Heap &heap)
     {
         const LayerGrid &g     = *m_grid;
@@ -561,42 +629,51 @@ private:
             }
             const BoundingBox box = get_extents(piece.polygon);
             if (merges && free <= m_need.micro_merge_mm + EPSILON && unscale<double>(box.size().maxCoeff()) <= 2. * m_in.toolpath_width_mm + EPSILON) {
-                BOOST_LOG_TRIVIAL(debug) << "scaffold island skipped at " << piece.bottom_z << ": micro";
+                BOOST_LOG_TRIVIAL(debug) << "scaffold island at " << piece.bottom_z << " waits for its merge: micro";
+                m_waiting[p].emplace_back(l, p);
                 accept(p);
                 continue;
             }
-            // The deepest point, or where it stands at a wall, the eligible cell of the piece nearest it.
-            Point spot = inscribed_point(piece.polygon);
-            if (! eligible(l, spot)) {
-                const uint16_t label = uint16_t(p - first + 1);
-                double         best  = std::numeric_limits<double>::max();
-                Point          found = spot;
-                for (size_t i = 0; i < g.cells.size(); ++ i)
-                    if (g.cells[i] == label) {
-                        const Point c = centre(g.x0 + int(i % size_t(g.w)), g.y0 + int(i / size_t(g.w)));
-                        if (const double d = (c - spot).cast<double>().norm(); d < best && eligible(l, c)) {
-                            best  = d;
-                            found = c;
-                        }
-                    }
-                if (best == std::numeric_limits<double>::max()) {
-                    if (merges && free <= debris_mm + EPSILON)
-                        BOOST_LOG_TRIVIAL(debug) << "scaffold island held at " << piece.bottom_z << ": wall";
-                    else
-                        ++ m_plan.islands_unheld;
-                    accept(p);
-                    continue;
-                }
-                spot = found;
+            const std::optional<Point> spot = birth_spot(l, p);
+            if (! spot) {
+                if (merges && free <= debris_mm + EPSILON) {
+                    BOOST_LOG_TRIVIAL(debug) << "scaffold island at " << piece.bottom_z << " waits for its merge: wall";
+                    m_waiting[p].emplace_back(l, p);
+                } else
+                    ++ m_plan.islands_unheld;
+                accept(p);
+                continue;
             }
-            place(site_at(l, spot, free > heavy_birth_mm ? 4. * m_in.toolpath_width_mm : 0.), TipNeed::Birth, &heap);
+            place(site_at(l, *spot, free > heavy_birth_mm ? 4. * m_in.toolpath_width_mm : 0.), TipNeed::Birth, &heap);
         }
     }
 
-    // A part turns slender when it stands over its highest anchor by more than the stability minimum and by more than
-    // `slender_ratio` of its section's narrowest width: it takes a heavy tip on its down-facing surface above that
-    // anchor, the point farthest from its anchors, which favours the highest. A part with no such point is counted
-    // once and measured again from here, since a face further up may still take a tip.
+    // How far `q` stands from part `r`'s nearest tip in 3-D, or above its highest anchor while no tip holds it.
+    double from_anchors(size_t r, const Vec3d &q) const
+    {
+        if (m_anchors[r].empty())
+            return q.z() - m_anchor_z[r];
+        double near = std::numeric_limits<double>::max();
+        for (const Vec3d &anchor : m_anchors[r])
+            near = std::min(near, (anchor - q).norm());
+        return near;
+    }
+    // The lever the nozzle works a part by on layer top `z`: the farthest corner of its section's hull from its
+    // anchors, whether the section stands above them or reaches out sideways.
+    double lever(size_t r, const Polygon &hull, double z) const
+    {
+        double far = 0.;
+        for (const Point &p : hull)
+            far = std::max(far, from_anchors(r, Vec3d(unscale<double>(p.x()), unscale<double>(p.y()), z)));
+        return far;
+    }
+
+    // A part turns slender when its section reaches farther from its anchors than the stability minimum and than
+    // `slender_ratio` of the section's narrowest width, the window: a blade hanging from its point turns slender as it
+    // widens, not only as it climbs. It takes a heavy tip on its down-facing surface within the window's height under
+    // this layer, at the corner of a face farthest from its anchors that a tip can stand under, at least half the window
+    // from them, since a tip beside an anchor shortens no lever. A part with no such corner is counted once; it, and a
+    // part still slender with its new tip, is measured again `stability_retry_mm` higher.
     void stability(size_t l)
     {
         const auto [first, last] = m_in.components.slab_range[l];
@@ -606,42 +683,40 @@ private:
                 roots.push_back(r);
         const double top = m_in.slabs[l].print_z;
         for (size_t r : roots) {
-            if (m_rooted[r] || top - m_anchor_z[r] <= stability_min_mm + EPSILON)
+            if (m_rooted[r] || top - m_rearm_z[r] <= stability_retry_mm + EPSILON)
                 continue;
-            Points hull_points;
+            Points section;
             for (size_t p = first; p < last; ++ p)
                 if (m_sets.find(p) == r)
-                    append(hull_points, pieces()[p].polygon.contour.points);
-            const double window = m_need.slender_ratio * min_width_mm(hull_points);
-            if (top - m_anchor_z[r] <= window + EPSILON)
+                    append(section, pieces()[p].polygon.contour.points);
+            const Polygon hull   = Geometry::convex_hull(section);
+            const double  window = std::max(stability_min_mm, m_need.slender_ratio * min_width_mm(hull));
+            if (lever(r, hull, top) <= window + EPSILON)
                 continue;
-            double best = -1.;
-            Point  spot;
-            size_t spot_layer = 0;
-            for (size_t k = l + 1; k-- > 0 && m_in.slabs[k].bottom_z > m_anchor_z[r] + EPSILON;)
-                for (const ExPolygon &face : m_in.down_facing[k]) {
-                    const Point p = face.contour.points[face.contour.size() / 2];
-                    if (root_at(k, p) != r || ! eligible(k, p))
-                        continue;
-                    const Vec3d q(unscale<double>(p.x()), unscale<double>(p.y()), m_in.slabs[k].bottom_z);
-                    double      near = std::numeric_limits<double>::max();
-                    for (const Vec3d &anchor : m_anchors[r])
-                        near = std::min(near, (anchor - q).norm());
-                    if (near > best) {
-                        best       = near;
-                        spot       = p;
-                        spot_layer = k;
-                    }
+            struct Corner { double score; Point p; size_t layer; };
+            std::vector<Corner> corners;
+            for (size_t k = l + 1; k-- > 0 && m_in.slabs[k].bottom_z > top - window - EPSILON;)
+                for (const ExPolygon &face : m_in.down_facing[k])
+                    if (root_at(k, face.contour.points.front()) == r)
+                        for (const Point &p : face.contour.points)
+                            corners.push_back({ from_anchors(r, Vec3d(unscale<double>(p.x()), unscale<double>(p.y()), m_in.slabs[k].bottom_z)), p, k });
+            std::stable_sort(corners.begin(), corners.end(), [](const Corner &a, const Corner &b) { return a.score > b.score; });
+            auto spot = corners.end();
+            for (auto it = corners.begin(); it != corners.end() && it->score >= 0.5 * window; ++ it)
+                if (eligible(it->layer, it->p)) {
+                    spot = it;
+                    break;
                 }
-            if (best < 0.) {
+            if (spot != corners.end())
+                place(site_at(spot->layer, spot->p, 4. * m_in.toolpath_width_mm), TipNeed::Stability, nullptr);
+            else {
                 if (! m_slender[r])
                     ++ m_plan.islands_slender;
-                m_slender[r]   = 1;
-                m_anchor_z[r]  = top;
+                m_slender[r] = 1;
                 BOOST_LOG_TRIVIAL(debug) << "scaffold part slender at " << top << ": no down-facing point";
-                continue;
             }
-            place(site_at(spot_layer, spot, 4. * m_in.toolpath_width_mm), TipNeed::Stability, nullptr);
+            if (spot == corners.end() || lever(r, hull, top) > window + EPSILON)
+                m_rearm_z[r] = top;
         }
     }
 };
@@ -698,6 +773,7 @@ PlanInput prepare_plan(const PrintObject &object, double toolpath_width_mm, doub
     in.material.resize(n);
     in.blocked.resize(n);
     in.down_facing.resize(n);
+    in.wall_band.resize(n);
     in.self_support_mm.assign(n, 0.);
     const double tan_threshold = std::tan(threshold_rad);
     tbb::parallel_for(tbb::blocked_range<size_t>(0, n), [&](const tbb::blocked_range<size_t> &range) {
@@ -706,6 +782,7 @@ PlanInput prepare_plan(const PrintObject &object, double toolpath_width_mm, doub
             if (l < blockers.size() && ! blockers[l].empty())
                 in.blocked[l] = rasterize(union_ex(blockers[l]), in.origin, in.cell);
             in.down_facing[l] = l == 0 ? in.slabs[l].polygons : diff_ex(in.slabs[l].polygons, in.slabs[l - 1].polygons);
+            in.wall_band[l]   = offset_ex(in.slabs[l].polygons, float(scale_(xy_distance_mm)));
             if (l > 0 && tan_threshold > 0.)
                 in.self_support_mm[l] = (in.slabs[l - 1].print_z - in.slabs[l - 1].bottom_z) / tan_threshold;
         }

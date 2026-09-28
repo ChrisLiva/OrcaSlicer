@@ -252,3 +252,51 @@ TEST_CASE("A squat floating block takes no stability tip", "[ScaffoldPlan]")
     CHECK(std::none_of(plan.tips.begin(), plan.tips.end(), [](const PlannedTip &t) { return t.need == TipNeed::Stability; }));
     CHECK(plan.islands_slender == 0);
 }
+
+TEST_CASE("A blade widening from its point takes stability tips along its spine", "[ScaffoldPlan]")
+{
+    // A 1.5 mm thick blade hangs from its point at z 1: its front edge stands at x 0 and its spine runs out to x -10 at
+    // z 8, rising 35 degrees, steeper than the threshold, so the spine has no underside. It stands 10 mm free before a
+    // crossbar at z 11..13 on a rooted column takes it in. The blade reaches out from its point faster than it climbs,
+    // so its tips follow the spine, each within the stability window of the last.
+    std::vector<Vec3d> blade;
+    for (double y : { 0., 1.5 })
+        for (const Vec3d &p : { Vec3d(0., y, 1.), Vec3d(-10., y, 8.), Vec3d(-10., y, 11.), Vec3d(0., y, 11.) })
+            blade.push_back(p);
+    Sliced s(merged({ hull(blade), box(-11, -1, 11, 13, 3.5, 2), box(2, -1, 0, 3, 3.5, 13) }));
+    for (double density : { 0., 1., 2. }) {
+        const double       window = std::max(3., need_params(density).slender_ratio * 1.5);
+        const Plan         plan   = s.plan(density);
+        std::vector<Vec3d> tips;
+        for (const PlannedTip &tip : plan.tips)
+            if (const Vec2d xy = s.at(tip); xy.x() < 0.5 && tip.site.print_z < 8.5)
+                tips.emplace_back(xy.x(), xy.y(), tip.site.print_z);
+        std::sort(tips.begin(), tips.end(), [](const Vec3d &a, const Vec3d &b) { return a.z() < b.z(); });
+        double apart = 0., end = std::numeric_limits<double>::max();
+        for (size_t i = 0; i < tips.size(); ++ i) {
+            if (i > 0)
+                apart = std::max(apart, (tips[i] - tips[i - 1]).norm());
+            end = std::min(end, (tips[i] - Vec3d(-10., 0.75, 8.)).norm());
+        }
+        INFO("density " << density << ": " << tips.size() << " tips on the blade, at most " << apart << " mm apart, the spine's end "
+                        << end << " mm from one, window " << window);
+        REQUIRE(tips.size() >= 2);
+        CHECK(tips.front().z() < 1.2);
+        // A layer and a corner's offset along the face over the window.
+        CHECK(apart <= window + 0.5);
+        CHECK(end <= window + 0.5);
+    }
+}
+
+TEST_CASE("Small island starts go without a tip only when they meet a held part", "[ScaffoldPlan]")
+{
+    // A 12 x 10 slab at z 8..10 on a column standing on the bed. Under it hangs a 0.6 mm nub, z 7.8..8, that meets the
+    // slab two layers up: at Light it prints as it hangs. Beside it two 0.6 mm nubs at z 5..5.2 meet each other two
+    // layers up and grow on as a strand into the slab: neither part is held where they meet, so one of them takes a tip.
+    Sliced s(merged({ box(0, 0, 0, 4, 4, 10), box(0, 0, 8, 12, 10, 2), box(7, 2, 7.8, 0.6, 0.6, 0.2), box(7, 6, 5, 0.6, 0.6, 0.2),
+                      box(7.9, 6, 5, 0.6, 0.6, 0.2), box(7, 6, 5.2, 1.5, 0.6, 2.8) }));
+    const Plan plan = s.plan(0.);
+    CHECK(count_in(s, plan, BoundingBoxf3(Vec3d(6.8, 1.8, 7.7), Vec3d(7.8, 2.8, 7.95))) == 0);
+    CHECK(count_in(s, plan, BoundingBoxf3(Vec3d(6.8, 5.8, 4.9), Vec3d(8.7, 6.8, 7.95)), { TipNeed::Birth }) == 1);
+    CHECK(plan.islands_unheld == 0);
+}

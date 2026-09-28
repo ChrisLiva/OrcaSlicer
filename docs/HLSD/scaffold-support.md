@@ -394,15 +394,19 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    - Birth. Each island takes a heavy tip at the deepest point of its birth
      piece (`inscribed_point`) when it stands more than 2 mm free before it
      merges, a small one otherwise, or at the eligible cell of the piece
-     nearest that point when the point stands at a wall. Four cases take no
-     tip: an enforced tip already stands on the birth piece; the island is
-     debris, a part that never merges and stands at most 1 mm; it is a
-     micro-island, merging within the micro-merge height with a birth piece
-     no wider than two support lines, which prints as a blemish no larger
-     than a scar; or no cell of it is eligible and it merges within 1 mm, so
-     the wall beside it holds it. An island with no eligible cell that stands
-     taller counts as under-held. An island left without a tip anchors what
-     grows on it.
+     nearest that point when the point stands at a wall. An enforced tip on
+     the birth piece stands in for it, and debris, a part that never merges
+     and stands at most 1 mm, takes none. Two kinds of island wait for their
+     merge instead: a micro-island, merging within the micro-merge height with
+     a birth piece no wider than two support lines, and an island with no
+     eligible cell that merges within 1 mm. At the merge, a tip or the bed
+     already holding one of the meeting parts holds the waiting island too,
+     which prints as a blemish no larger than a scar. When none is held, the
+     first waiting island a tip can stand under takes its birth tip after all,
+     so two strand ends meeting each other in mid-air still take one, and one
+     no tip can reach counts as under-held, as does an island with no
+     eligible cell that stands taller. An island left without a tip anchors
+     what grows on it.
    - Underside. Each cell carries a run, how far it hangs past what anchors
      it: 0 under a head, and otherwise the least, through the layer's
      material, of a neighbour's run plus the step between them, where a cell
@@ -424,20 +428,36 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
      apart, a cell whose small disc lies wholly on the layer's material before
      an edge cell. Pending cells that fall out of the cover unanswered and hang
      past one and a half reaches count in `underside_unmet_mm2`.
-   - Stability. A part turns slender when it stands over its highest anchor
-     by more than 3 mm and by more than the slender ratio times the narrowest
-     width of its section's convex hull. It then takes a heavy tip on its
-     down-facing surface above that anchor, at the point farthest from its
-     anchors. Down-facing surface is exact, so a rising edge steeper than the
-     threshold, such as the corpus sword's lower edge, still offers points,
-     which the builder heads side-on. A part with no such point counts once in
-     `islands_slender` and is measured again from that height.
+   - Stability. A part's lever on a layer is how far the farthest corner of
+     its section's convex hull stands from the part's nearest tip in 3-D, or
+     above its highest anchor while no tip holds it, so a blade hanging from
+     its point reads the reach it widens by as well as the height it climbs.
+     The part turns slender when its lever passes the window, the larger of
+     3 mm and the slender ratio times the hull's narrowest width. It then
+     takes a heavy tip on its down-facing surface within the window's height
+     under the layer, at the corner of a face farthest from its tips that is
+     eligible and stands at least half the window from them. Every corner of
+     every face is a candidate, and down-facing surface is exact, so a rising
+     edge steeper than the threshold, such as the corpus sword's lower edge,
+     still offers corners. A part with no such corner counts once in
+     `islands_slender`, and it, or a part still slender with its new tip, is
+     measured again 1 mm higher. On plate 1 the sword blade widens from its
+     point to about 7 mm by z 6.5 and takes a tip per window up that edge,
+     then rises nearly vertical to the guard at z 15.8, where no corner
+     stands clear of the band and the blade goes about 6 mm without a tip.
 
-   A cell is eligible when no blocker covers it and its centre stands farther
-   than the xy distance plus half a cell's diagonal from the model on the
-   layer at the neck's bottom, the wall skip's own test on the lattice. The
-   planner logs `scaffold plan: <n> birth, <n> underside, <n> stability,
-   <n> enforced tips` at debug level. On plate 1 it runs in about 0.26 s.
+   A point is eligible when no blocker covers its cell and it stands outside
+   the band on the layer at the neck's bottom. The lattice rejects first,
+   where a cell of the model lies within the xy distance plus half a cell's
+   diagonal, and `wall_band` then reads the band as the seam and the wall
+   skip build it, the layer's slices grown by the xy distance with miter
+   joins, which reach up to three times the distance out from a sharp
+   corner. A tip on the model's edge, as every stability tip is, stands where
+   the lattice's rounding decides, so without the exact band the wall skip
+   removed tips the planner had counted on. The planner logs
+   `scaffold plan: <n> birth, <n> underside, <n> stability, <n> enforced
+   tips` at debug level. On plate 1 it runs in 0.29 to 0.35 s, after
+   `prepare_plan` spends about 0.07 s once per slice.
 2. The wall skip. The seam clips support inside the xy distance of the model,
    so a head whose neck stood in that band would lose its neck while its ring
    survived. The selection reads the object layer at the neck's bottom, one head

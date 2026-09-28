@@ -63,6 +63,7 @@ struct PlanInput
     std::vector<LayerGrid>             material;           // one per object layer, labelled by piece
     std::vector<LayerGrid>             blocked;            // one per object layer, 1 under a support blocker
     std::vector<ExPolygons>            down_facing;        // one per object layer: its material the layer below lacks
+    std::vector<ExPolygons>            wall_band;          // one per object layer: its material grown by the xy distance, as the seam clips it
     std::vector<double>                self_support_mm;    // one per object layer: the step the layer below carries
     double toolpath_width_mm = 0., xy_distance_mm = 0., neck_depth_mm = 0.;
 };

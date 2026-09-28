@@ -2035,26 +2035,39 @@ TEST_CASE("Need-driven tips hold corpus plate 1's hand and sword with few contac
     const SupportAnalysis::Report &report = *po.support_analysis();
     CHECK(report.floating_pieces_removed == 0);
 
+    CHECK(report.islands_under_held == 0);
+
+    // The sword hangs point-down from the raised hand: its blade stands free from z 1.04 and widens from its point to
+    // about 7 mm by z 6.5, then rises nearly vertical to the guard at z 15.8, too steep there for a straight neck.
     ScaffoldSupport::TipGrades grades = candidates->grades;
-    for (const double density : { 0., 1. }) {
+    for (const double density : { 0., 1., 2. }) {
         const ScaffoldPoints points = ScaffoldSupport::retune_points(po, *candidates, density, grades);
-        size_t               hand = 0;
-        std::set<long>       sword_heights;
+        size_t               hand = 0, low_blade = 0;
+        std::vector<double>  sword;
         bool                 heavy_point = false;
         for (const ScaffoldPoint &pt : points) {
             const Vec3d p = po.trafo_centered() * pt.pos.cast<double>();
             if (p.x() > 8. && p.x() < 15.5 && p.z() > 20. && p.z() < 29.)
                 ++ hand;
-            if (p.x() > -10. && p.x() < -0.2 && p.y() > 2.5 && p.z() < 17.2) {
-                sword_heights.insert(std::lround(p.z()));
+            if (p.x() > -10. && p.x() < -0.2 && p.y() > 2.5 && p.z() < 15.) {
+                sword.push_back(p.z());
+                low_blade += p.z() < 7.5;
                 heavy_point = heavy_point || (p.z() < 1.5 && pt.size == ScaffoldHeadSize::Heavy);
             }
         }
-        INFO("density " << density << ": " << points.size() << " points, " << hand << " on the hand, sword at " << sword_heights.size()
-                        << " heights");
-        CHECK(hand <= 10);
-        CHECK(sword_heights.size() >= 3);
+        std::sort(sword.begin(), sword.end());
+        double gap = 15. - (sword.empty() ? 0. : sword.back());
+        for (size_t i = 1; i < sword.size(); ++ i)
+            gap = std::max(gap, sword[i] - sword[i - 1]);
+        INFO("density " << density << ": " << points.size() << " points, " << hand << " on the hand, " << sword.size()
+                        << " on the blade under z 15, " << low_blade << " under z 7.5, largest gap " << gap << " mm");
+        if (density < 2.)
+            CHECK(hand <= 10);
         CHECK(heavy_point);
+        // No stretch of blade under the guard longer than 7 mm goes without a tip, and the widening lower blade takes
+        // one more tip per tier past Light.
+        CHECK(gap <= 7.);
+        CHECK(low_blade >= size_t(1. + density));
         CHECK(points.size() <= 200);
     }
 }
