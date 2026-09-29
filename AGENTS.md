@@ -11,8 +11,8 @@ brew install cmake ninja automake libtool texinfo
 ./build_release_macos.sh -d -a arm64 -x
 
 # macOS
-cmake --build build/arm64 --config Release --target fff_print_tests -- -j5
-cmake --build build/arm64 --config Release --target OrcaSlicer -- -j5
+cmake --build build/arm64 --config Release --target fff_print_tests -- -j6
+cmake --build build/arm64 --config Release --target OrcaSlicer -- -j6
 
 # Linux
 cmake --build build --config Release --target all --
@@ -34,15 +34,22 @@ actually gets, grep the generated `build/<dir>/CMakeFiles/impl-<Config>.ninja` f
 
 Cap Ninja's job count on a 16 GB Mac. `cmake --build` without `-j` runs 12 compilers on 10 cores
 and each clang here peaks at 1.4 to 2.1 GB, so the machine pages: rebuilding the 22 `fff_print`
-test objects took 395 s at `-j12` and 53 s at `-j5` (measured 2026-09-08). Pass `-- -j5` or set
-`CMAKE_BUILD_PARALLEL_LEVEL=5` in the shell.
+test objects took 395 s at `-j12` and 53 s at `-j5` (measured 2026-09-08). Since the precompiled headers instantiate
+their templates, a compile's peak memory is 16 to 28 % lower, and a `libslic3r.h` edit rebuilding `fff_print_tests` took 190 s at
+`-j5` and 161 s at `-j6` with no swapouts in `vm_stat` (2026-09-28). Pass `-- -j6` or set
+`CMAKE_BUILD_PARALLEL_LEVEL=6` in the shell.
 
 Build the target you are iterating on, not `all`: `all` is 929 objects, `OrcaSlicer` 716,
 `fff_print_tests` 385 (106 of them Catch2, compiled once; counted 2026-09-08). Preview what a change will rebuild with
-`ninja -C build/arm64 -f build-Release.ninja -n -d explain <target> | head`. Headers in the
-precompiled header set (`libslic3r.h`, `Point.hpp`, `PrintConfig.hpp`, `Config.hpp`) reach every
-object in libslic3r and the GUI, `Print.hpp` reaches about 120 per config, `Support/*.hpp` reach 7
-or fewer. A `CMakeLists.txt` edit reconfigures but recompiles only what its flags change:
+`ninja -C build/arm64 -f build-Release.ninja -n -d explain <target> | head`. The headers in
+`src/libslic3r/pchheader.hpp` (`libslic3r.h`, `Point.hpp`, `Config.hpp`) reach every object in libslic3r and the GUI.
+`PrintConfig.hpp` sits only in `src/slic3r/pchheader.hpp` and reaches every GUI object plus 119 of 240 libslic3r
+objects, `Print.hpp` reaches 287 Release objects (200 of them GUI), and `Support/*.hpp` reach 7 or fewer
+(`ninja -t deps`, 2026-09-28). `tests/fff_print/fff_print_pch.hpp` holds libslic3r's `pchheader.hpp`, Catch2 and six
+libslic3r headers including `Model.hpp` and `Print.hpp`, so an edit to one of them rebuilds that header before the test
+objects. Count a header's reach with its directory in the pattern, since a bare `Print.hpp` also matches `SLAPrint.hpp`:
+`ninja -C build/arm64 -f build-Release.ninja -t deps | awk -v h=/libslic3r/Print.hpp '/^[^ ].*: #deps/{t=$1} index($0,h){n[t]=1} END{print length(n)}'`.
+A `CMakeLists.txt` edit reconfigures but recompiles only what its flags change:
 the `git_commit_hash_header` target in `src/slic3r/CMakeLists.txt` regenerates `git_commit_hash.h` on every build,
 rewriting it only when the hash changes, and only `GUI/BuildCommit.cpp` (plus `BaseException.cpp` on Windows) and
 `tests/fff_print/support_validation.cpp` include it, where the former global `add_definitions()` re-stamped every object
@@ -56,6 +63,15 @@ on a 16 GB Mac (2026-09-08). Check `pgrep -x ninja` first: under an agent harnes
 build-Release.ninja'` matches the invoking shell's own command line and reports a build that is not running,
 so a guard of the form `pgrep -fl ... || cmake --build ...` never lets a build start (2026-09-10).
 
+Configure a build dir with `-DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_C_COMPILER_LAUNCHER=ccache` (`brew install ccache`).
+Ninja rebuilds by mtime, so a checkout, reset or branch switch back to content already built recompiles every dependent,
+about 40000 s of compile in the month to 2026-09-28; ccache hashes the content and returns the stored object. The
+precompiled headers need `sloppiness = pch_defines,time_macros,include_file_mtime,include_file_ctime` in
+`~/Library/Preferences/ccache/ccache.conf`, next to `depend_mode = true`, `compiler_check = %compiler% -v` and
+`max_size = 20G`; `add_precompiled_header` already passes `-Xclang -fno-pch-timestamp`. Adding the launcher changes
+every command line, so the first build after it recompiles everything. Time a build with `CCACHE_DISABLE=1`: a
+`touch`ed file whose content did not change is a cache hit and reads as a fast compile.
+
 ## Testing
 
 Catch2 framework. Tests in `tests/`; see [tests/AGENTS.md](tests/AGENTS.md) for where a new test belongs and the conventions to follow.
@@ -65,6 +81,23 @@ cd build && ctest -C Release --output-on-failure    # all tests
 ctest --test-dir ./tests/libslic3r -C Release       # individual suite
 ctest --test-dir ./tests/fff_print -C Release
 ```
+
+A direct `fff_print_tests "[ScaffoldSupport]~[.]"` runs its cases one after another; `ctest --test-dir
+build/arm64/tests/fff_print -C Release -j5 -L '^ScaffoldSupport$'` runs five at a time, longest first (26.8 s against
+14.3 s, 2026-09-28). `-L` takes a regex, so anchor it. While iterating on libslic3r code, build and test only the
+targets that skip `libslic3r_gui`, which a `PrintConfig.hpp` edit spares 435 GUI objects, and leave out the two cases
+that set the gate's wall clock:
+
+```bash
+cmake --build build/arm64 --config Release --target fff_print_tests libslic3r_tests sla_print_tests libnest2d_tests filament_group_tests -- -j6
+for d in fff_print libslic3r sla_print libnest2d filament_group; do
+    ctest --test-dir build/arm64/tests/$d -C Release -j5 -E 'Surface centering survives|FilamentGroup property checks' || break
+done
+```
+
+`slic3rutils_tests` is the only test target that links `libslic3r_gui`, so the loop skips its directory rather than
+running its stale binary; an exclude list by test name would also drop fff_print's copy of `init_print functionality`,
+which both suites compile from `test_helpers.cpp`. Run the full gate and build `OrcaSlicer` before a merge.
 
 The legacy tree support's output is not run-to-run reproducible. Seven `--slice` runs of one Release
 binary on one project (plate 2 of a 32 mm miniature, Tree Slim) spread the `Support` extrusion-move
