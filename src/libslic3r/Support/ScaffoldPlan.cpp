@@ -703,11 +703,12 @@ private:
     // Whether a tip may stand at `p` on object layer `l` with its neck straight down.
     bool eligible(size_t l, const Point &p) const { return m_necks.clear(l, p, straight_down); }
 
-    // Whether the builder aims a head at `p` on the bottom of slab `l` within the face cap of straight down: it aims the
-    // head along `sla::normals` at the point, read at the head's radius, one toolpath width: the normal of the face
-    // nearest the point, or where that nearest point lies within the radius of a vertex or an edge, the average of the
-    // faces sharing it. The cap holds its own angle: on a square edge where a 45 degree face meets an upright one the
-    // average reads the cap exactly, and float rounding must not decide it.
+    // Whether the face a head's pin meets at `p` on the bottom of slab `l` stands within the face cap of straight down:
+    // its normal as `sla::normals` reads it at the point at the head's radius, one toolpath width, the normal of the
+    // face nearest the point, or where that nearest point lies within the radius of a vertex or an edge, the average of
+    // the faces sharing it. The builder aims the head of a tip with a zero axis along that normal, and one with an axis
+    // along the axis, whose pin still meets that face. The cap holds its own angle: on a square edge where a 45 degree
+    // face meets an upright one the average reads the cap exactly, and float rounding must not decide it.
     bool faces_down(size_t l, const Point &p) const
     {
         if (m_in.mesh == nullptr)
@@ -1452,10 +1453,10 @@ private:
     // window takes a small tip at a corner of its stem's down-facing surface above that section and within the window
     // under its top, at least half the window from what holds the part, since a tip beside an anchor shortens no lever,
     // and within the window of the farthest point. The corner whose face turns least from straight down over the two
-    // slabs under it goes first, then the one farthest from what holds the part, and it must be eligible with the head
-    // the builder aims there within the face cap. Where no corner both clears straight down and holds its head within
-    // the face cap, the first corner in that order whose head stands within the cap and whose neck clears leaning takes
-    // the least lean that clears, as a birth's neck does, and hands it to the builder as its axis. A branch with no such
+    // slabs under it goes first, then the one farthest from what holds the part, and it must be eligible with its face
+    // within the face cap, `faces_down`. Where no corner both clears straight down and faces within the cap, the first
+    // corner in that order whose face stands within the cap and whose neck clears leaning takes the least lean that
+    // clears, as a birth's neck does, and hands it to the builder as its axis. A branch with no such
     // corner counts slender once. A piece with no such corner, or still past its window with the new tip, is measured
     // again `stability_retry_mm` higher.
     void stability(size_t l)
