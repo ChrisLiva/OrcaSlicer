@@ -1037,7 +1037,11 @@ bool SupportTreeBuildsteps::search_pillar_and_connect(const Head &source)
 
         if(nearest_id >= 0) {
             if (size_t(nearest_id) < m_builder.pillarcount()) {
-                if(!connect_to_nearpillar(source, nearest_id) ||
+                // Checking the radius first leaves a pillar the head passes
+                // over without a bridge that joins nothing.
+                const bool too_thin = m_cfg.branch_off_retry &&
+                                      m_builder.pillar(nearest_id).r < source.r_back_mm;
+                if(too_thin || !connect_to_nearpillar(source, nearest_id) ||
                     m_builder.pillar(nearest_id).r < source.r_back_mm) {
                     nearest_id = SupportTreeNode::ID_UNSET;    // continue searching
                     spindex.remove(ne);       // without the current pillar

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <unordered_set>
 #include <unordered_map>
 #include <random>
@@ -37,6 +38,17 @@ TriangleMesh box(double x, double y, double z, float dx, float dy, float dz)
     TriangleMesh m = make_cube(x, y, z);
     m.translate(dx, dy, dz);
     return m;
+}
+
+// The head the builder placed at a support point's position, or nullptr
+// when the filter placed none there.
+const sla::Head *head_at(const sla::SupportTreeBuilder &builder, const Vec3f &pos)
+{
+    const auto &heads = builder.heads();
+    const auto  it    = std::find_if(heads.begin(), heads.end(), [&pos](const sla::Head &h) {
+        return (h.pos - pos.cast<double>()).norm() < 1e-6;
+    });
+    return it == heads.end() ? nullptr : &*it;
 }
 
 // A 40x40x4 block at x 0..40, y 0..40, z 0..4 with a 4x4x10 column at
@@ -109,6 +121,25 @@ sla::SupportTreeConfig slot_fin_config(bool retry_thin_head)
 }
 
 const sla::SupportPoints SLOT_FIN_POINTS = {sla::SupportPoint(Vec3f(0.f, 0.f, 4.2f), 0.2f)};
+
+// slot_fin_mesh with its blocks run on to y 30, and a 2x2x0.5 lip at
+// x -1..1, y 5.45..7.45, z 5.4..5.9. PARKED_LIP_POINTS puts one point under
+// the fin at (0, 4.45, 4.2), whose 0.4 head meets the blocks and which
+// retries thin down the slot to stand a 0.22 pillar, and one under the lip
+// at (0, 6.45, 5.4), whose 0.4 head reaches that pillar with a bridge clear
+// of the fin's end and the blocks but is thicker than it.
+indexed_triangle_set parked_lip_mesh()
+{
+    indexed_triangle_set its = slot_fin_mesh();
+    its_merge(its, box(9.2, 20., 1.5, -10.f, 10.f, 0.f).its);
+    its_merge(its, box(9.2, 20., 1.5, 0.8f, 10.f, 0.f).its);
+    its_merge(its, box(2., 2., 0.5, -1.f, 5.45f, 5.4f).its);
+
+    return its;
+}
+
+const sla::SupportPoints PARKED_LIP_POINTS = {sla::SupportPoint(Vec3f(0.f, 4.45f, 4.2f), 0.2f),
+                                              sla::SupportPoint(Vec3f(0.f, 6.45f, 5.4f), 0.2f)};
 
 // A 22x40x3 shelf at x -20..2, y -20..20, z 0..3 and a 6x6x1 lip at
 // x -5..1, y -3..3, z 7.4..8.4. A point under the lip at (0, 0, 7.4) takes a
@@ -445,6 +476,46 @@ TEST_CASE("A head whose 0.6 junction is blocked retries thin and reaches the pad
     REQUIRE(head.pillar_id >= 0);
     const sla::Pillar &pillar = thin.pillars()[size_t(head.pillar_id)];
     CHECK_THAT(pillar.endpoint().z(), Catch::Matchers::WithinAbs(thin.ground_level, 1e-6));
+}
+
+TEST_CASE("A pillar the pillar search passes over for its radius keeps no bridge", "[SLASupportGeneration]") {
+    // The fin's head retries thin and stands a 0.22 pillar down the slot. The lip's 0.4 head finds that pillar in
+    // its search, reaches it with a bridge and passes it over as thinner than itself, so the bridge it laid stays
+    // on a pillar it never joined; searching with the radius first, it lays none.
+    indexed_triangle_set mesh = parked_lip_mesh();
+    const auto build = [&mesh](bool branch) {
+        sla::SupportTreeConfig cfg = slot_fin_config(true);
+        cfg.route_in_order      = true;
+        cfg.head_back_radius_mm = 0.4;
+        cfg.branch_off_retry    = branch;
+        sla::SupportTreeBuilder builder;
+        sla::SupportableMesh    sm{mesh, PARKED_LIP_POINTS, cfg};
+        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(builder, sm));
+        return builder;
+    };
+
+    const sla::SupportTreeBuilder plain = build(false);
+    const sla::Head *plain_fin = head_at(plain, PARKED_LIP_POINTS[0].pos);
+    const sla::Head *plain_lip = head_at(plain, PARKED_LIP_POINTS[1].pos);
+    REQUIRE(plain_fin != nullptr);
+    REQUIRE(plain_lip != nullptr);
+    CHECK(plain.bridges().size() == 1);
+    REQUIRE(plain.pillars().size() == 1);
+    CHECK(plain.bridgecount(plain.pillars().front()) == 1);
+    CHECK_FALSE(plain_lip->is_valid());
+    CHECK(plain_fin->is_valid());
+    CHECK_THAT(plain_fin->r_back_mm, Catch::Matchers::WithinAbs(0.22, 1e-9));
+
+    const sla::SupportTreeBuilder branched = build(true);
+    const sla::Head *fin = head_at(branched, PARKED_LIP_POINTS[0].pos);
+    const sla::Head *lip = head_at(branched, PARKED_LIP_POINTS[1].pos);
+    REQUIRE(fin != nullptr);
+    REQUIRE(lip != nullptr);
+    CHECK(branched.bridges().size() == 0);
+    REQUIRE(branched.pillars().size() == 1);
+    CHECK(branched.bridgecount(branched.pillars().front()) == 0);
+    CHECK_FALSE(lip->is_valid());
+    CHECK(fin->is_valid());
 }
 
 TEST_CASE("Routing the same points in order builds the same tree every run", "[SLASupportGeneration]") {

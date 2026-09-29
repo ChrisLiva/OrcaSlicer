@@ -107,6 +107,15 @@ struct SupportTreeConfig
     // model and reach the ground.
     bool island_axis_retry = false;
 
+    // Whether a head facing the model tries to branch off the pillars other
+    // heads stood before it gives up: the thin and island axis retries search
+    // the pillars from each pose they take before trying the ground, the pillar
+    // search passes over a pillar thinner than the head without bridging to it,
+    // and after the ordered routing every head still unrouted searches the
+    // pillars once more from its own pose and the retries' poses, trying no
+    // ground route.
+    bool branch_off_retry = false;
+
     // The unbraced height-to-diameter ratio above which interconnect_pillars
     // braces a pillar. 0 keeps the cascade linking.
     double pillar_link_slenderness = 0.;
