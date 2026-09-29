@@ -25,6 +25,12 @@ set(CATCH_EXTRA_ARGS "" CACHE STRING "Extra arguments for catch2 test suites.") 
 add_library(test_common INTERFACE)
 target_compile_definitions(test_common INTERFACE TEST_DATA_DIR=R"\(${TEST_DATA_DIR}\)" PROFILES_DIR=R"\(${PROFILES_DIR}\)" CATCH_CONFIG_FAST_COMPILE)
 target_include_directories(test_common INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
+# Test sources hold fixtures and assertions; the slicing they call stays at -O3 in libslic3r. -O1 keeps
+# __OPTIMIZE__ defined, so it still matches a precompiled header, which -O0 would not. MSVC and clang-cl read
+# /O1 as optimize for size.
+if (NOT MSVC)
+    target_compile_options(test_common INTERFACE $<$<CONFIG:Release>:-O1>)
+endif ()
 
 if (APPLE)
     target_link_libraries(test_common INTERFACE "-liconv -framework IOKit" "-framework CoreFoundation" -lc++)

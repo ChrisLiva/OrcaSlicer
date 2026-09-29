@@ -39,6 +39,12 @@ if (TARGET git_commit_hash_header)
 endif ()
 target_link_libraries(${_TEST_NAME}_tests test_common libslic3r Catch2::Catch2WithMain)
 target_include_directories(${_TEST_NAME}_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/libslic3r)
+if (SLIC3R_PCH AND NOT SLIC3R_SYNTAXONLY)
+    include(PrecompiledHeader)
+    add_precompiled_header(${_TEST_NAME}_tests fff_print_pch.hpp FORCEINCLUDE)
+    # It defines NANOSVG_IMPLEMENTATION before including nanosvg.h, which the precompiled header has already included.
+    set_source_files_properties(${_TEST_NAME}_tests.cpp PROPERTIES SKIP_PRECOMPILE_HEADERS ON)
+endif ()
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
 
 orcaslicer_copy_test_dlls()
