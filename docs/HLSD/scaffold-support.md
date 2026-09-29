@@ -205,8 +205,9 @@ leaning. It then runs steps 2 to 4 of the auto path on those sites:
   enforced and never skipped; a point Generate copied carries the flag its tip
   had.
 - The island count reads the islands by the planner's rule and gives none a
-  tip: an island with a point on it is held, one the birth rule holds with no
-  tip needs none, and any other is under-held and recorded as a bare island.
+  tip: an island with a point on its birth piece is held, one the birth rule
+  holds with no tip needs none, and any other is under-held and recorded as a
+  bare island.
   It marks every point under a mid-air island as holding it, so the builder
   retries that point's head along leaning axes as it retries an auto slice's
   island holders, and a list Generate copied routes the island tips the auto
@@ -622,10 +623,13 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    map's pieces are the plan input's, index for index, since both come from
    `build_components` over the same slabs and ground. A point belongs to the
    island that owns the model piece over it on the overhang's own layer, one
-   above the node's layer, and holds that island, as the planner's one birth
-   tip holds it, however far the island stands free and however many more
-   tips its birth piece has room for. An island with no point on it is read
-   by the planner's birth rule, `read_births`. A birth piece continuing the
+   above the node's layer. A point on the island's birth piece holds the
+   island, as the planner's one birth tip or an enforced tip there holds it,
+   however far the island stands free and however many more tips its birth
+   piece has room for. A point elsewhere on the island stands in for no birth
+   tip, as in the planner, since the island's layers under it would print on
+   nothing. An island with no point on its birth piece is read by the
+   planner's birth rule, `read_births`. A birth piece continuing the
    slab below and debris need no tip. A nub needs none where its merge holds
    it as the planner's merge would, walked bottom up over the list's points:
    a point of the list stands on its own part, or it lies within the merge

@@ -86,16 +86,15 @@ PlanInput plan_input(const PrintObject &object, const Params &params, double thr
                         threshold_rad, blockers, mesh);
 }
 
-// The island that owns the model piece over `tip`, on the overhang's own layer, one above the node's; npos where none
-// does.
-size_t island_of(const SupportAnalysis::IslandMap &map, const TipSite &tip)
+// The model piece over `tip`, on the overhang's own layer, one above the node's; npos where none holds it.
+size_t piece_of(const SupportAnalysis::IslandMap &map, const TipSite &tip)
 {
     const size_t s = size_t(tip.obj_layer_nr + 1);
     if (tip.obj_layer_nr + 1 < 0 || s >= map.components.slab_range.size())
         return size_t(-1);
     for (size_t p = map.components.slab_range[s].first; p < map.components.slab_range[s].second; ++ p)
         if (map.components.pieces[p].polygon.contains(tip.position))
-            return map.island_of_piece[p];
+            return p;
     return size_t(-1);
 }
 
@@ -113,11 +112,12 @@ size_t birth_piece_index(const SupportAnalysis::IslandMap &map, size_t k)
 
 // Where each mid-air island of the model prints with no tip of a baked list holding it, read by the planner's island
 // rule, so a list and an automatic slice hold an island alike. A tip belongs to the island that owns the model piece
-// over it, on the overhang's own layer, one above the node's, and holds it: it is marked `holds_island`. An island with
-// no tip is read by the birth rule, `read_births`: one continuing the slab below, debris, or a nub the list's tips or
-// the bed hold at its merge needs none. Any other prints unheld, named at the tip the rule would stand under it, or,
-// where no neck clears, at its birth point, the deepest point of its birth piece at the piece's bottom, as the plan
-// names it.
+// over it, on the overhang's own layer, one above the node's, and is marked `holds_island`. It holds the island only
+// on the birth piece, the island's one piece with nothing under it, as the planner holds a birth with the enforced tip
+// on that piece and stands no tip higher on the part in for it. An island with no tip on its birth piece is read by
+// the birth rule, `read_births`: one continuing the slab below, debris, or a nub the list's tips or the bed hold at its
+// merge needs none. Any other prints unheld, named at the tip the rule would stand under it, or, where no neck clears,
+// at its birth point, the deepest point of its birth piece at the piece's bottom, as the plan names it.
 std::vector<Vec3d> unheld_islands(const PlanInput &input, std::vector<TipSite> &tips)
 {
     using namespace SupportAnalysis;
@@ -128,10 +128,12 @@ std::vector<Vec3d> unheld_islands(const PlanInput &input, std::vector<TipSite> &
     const IslandMap   map = island_joins(input.slabs, input.slabs.front().bottom_z);
     std::vector<char> held(map.islands.size(), 0);
     for (TipSite &tip : tips)
-        if (const size_t k = island_of(map, tip); k < held.size()) {
-            tip.holds_island = true;
-            held[k]          = 1;
-        }
+        if (const size_t p = piece_of(map, tip); p != size_t(-1))
+            if (const size_t k = map.island_of_piece[p]; k < held.size()) {
+                tip.holds_island = true;
+                if (map.components.pieces[p].below.empty())
+                    held[k] = 1;
+            }
     std::vector<size_t> births;
     for (size_t k = 0; k < map.islands.size(); ++ k)
         if (const size_t p = birth_piece_index(map, k); ! held[k] && p != size_t(-1))

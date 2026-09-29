@@ -514,6 +514,25 @@ TriangleMesh hanging_islands_fixture()
     return base;
 }
 
+// The hanging islands' base, column and bar, with a tee hanging from the bar: a 6 x 6 x 1.6 mm ledge at x 5..11, y 3..9,
+// z 7.4..9, and under its middle a 1.5 x 1.5 mm stem at x 7.25..8.75, y 5.25..6.75 down to z 6. The tee is one island,
+// born at the stem's bottom 2 mm over the base, and its ledge hangs 1.4 mm higher around the stem.
+TriangleMesh hanging_tee_fixture()
+{
+    TriangleMesh base   = make_cube(24., 12., 4.);
+    TriangleMesh column = make_cube(2., 2., 6.);
+    column.translate(0.f, 5.f, 4.f);
+    TriangleMesh bar = make_cube(16., 6., 1.);
+    bar.translate(0.f, 3.f, 9.f);
+    TriangleMesh ledge = make_cube(6., 6., 1.6);
+    ledge.translate(5.f, 3.f, 7.4f);
+    TriangleMesh stem = make_cube(1.5, 1.5, 1.4);
+    stem.translate(7.25f, 5.25f, 6.f);
+    for (const TriangleMesh *part : { &column, &bar, &ledge, &stem })
+        base.merge(*part);
+    return base;
+}
+
 // A JSON config written to the OS temp directory and removed when the guard leaves scope.
 struct ScratchJson
 {
@@ -1415,6 +1434,52 @@ TEST_CASE("A baked list holds an island by the planner's rule and names every is
     CHECK(baked.islands_under_held == placed.islands_under_held);
     CHECK(baked.bare_islands.size() == placed.bare_islands.size());
     CHECK(at(baked.bare_islands, rod));
+}
+
+TEST_CASE("A baked point holds an island only on its birth piece", "[ScaffoldSupport]")
+{
+    // At 0.2 mm layers the tee is born on the slab at z 6 under its stem, and its ledge's underside starts at z 7.4. The
+    // planner holds the tee with one birth tip under the stem. A point under the ledge stands on the tee's part and is
+    // marked as holding it, but the stem's 1.4 mm under it print on nothing, so a list holding only the ledge
+    // reads the tee under-held and names it at the tip the rule would stand under the stem, while a point there holds it.
+    Print print;
+    Model model;
+    init_print({ hanging_tee_fixture() }, print, model, fixture_config({ { "enable_support", "0" }, { "layer_change_gcode", "G92 E0" } }));
+    print.process();
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    const DrawOnLayers draw(object);
+    const double       threshold = M_PI / 6.;
+    const ScaffoldSupport::TipSite stem  = site_under(object, Vec2d(8., 6.), 5.);
+    const ScaffoldSupport::TipSite ledge = site_under(object, Vec2d(5.5, 3.5), 5.);
+    REQUIRE_THAT(stem.print_z, WithinAbs(6., 1e-6));
+    REQUIRE_THAT(ledge.print_z, WithinAbs(7.4, 1e-6));
+
+    const ScaffoldSupport::Tips placed = ScaffoldSupport::place_tips(object, {}, draw.params, threshold, {});
+    CHECK(placed.islands_under_held == 0);
+    const auto tee = std::find_if(placed.plan.islands.begin(), placed.plan.islands.end(),
+                                  [](const ScaffoldSupport::Island &island) { return std::abs(island.birth.z() - 6.) < 1e-6; });
+    REQUIRE(tee != placed.plan.islands.end());
+    REQUIRE(tee->holders.size() == 1);
+    CHECK(placed.plan.tips[tee->holders.front()].need == ScaffoldSupport::TipNeed::Birth);
+    CHECK_THAT(placed.plan.tips[tee->holders.front()].site.print_z, WithinAbs(6., 1e-6));
+
+    const ScaffoldPoints        on_ledge   = { ScaffoldSupport::point_of(object, draw.params, ledge, 2. * draw.params.toolpath_width_mm) };
+    const ScaffoldSupport::Tips ledge_only = ScaffoldSupport::baked_tips(object, on_ledge, draw.params, threshold);
+    REQUIRE(ledge_only.sites.size() == 1);
+    CHECK(ledge_only.sites.front().holds_island);
+    CHECK(ledge_only.islands_under_held == 1);
+    REQUIRE(ledge_only.bare_islands.size() == 1);
+    const Vec3d &bare = ledge_only.bare_islands.front();
+    INFO("bare island at (" << bare.x() << ", " << bare.y() << ", " << bare.z() << ")");
+    CHECK((bare.head<2>() - unscale(stem.position)).norm() <= 0.3);
+    CHECK_THAT(bare.z(), WithinAbs(6., 1e-6));
+
+    const ScaffoldPoints        both = { on_ledge.front(), ScaffoldSupport::point_of(object, draw.params, stem, 2. * draw.params.toolpath_width_mm) };
+    const ScaffoldSupport::Tips held = ScaffoldSupport::baked_tips(object, both, draw.params, threshold);
+    REQUIRE(held.sites.size() == 2);
+    CHECK(held.islands_under_held == 0);
+    CHECK(held.bare_islands.empty());
 }
 
 TEST_CASE("A head whose neck bottoms in the xy band is dropped while one whose neck clears it keeps its head and no ring floats",

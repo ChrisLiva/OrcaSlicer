@@ -63,8 +63,8 @@ ScaffoldPoint point_of(const PrintObject &object, const Params &params, const Ti
 // A baked list in the builder's frame: each point mapped through trafo_centered(), z + params.z_offset_mm, snapped
 // to the bottom of the object layer holding it; each point not enforced leaning its neck as the planner would there,
 // read off the plan input `threshold_rad` builds with no blocker, since a list ignores blockers as it ignores paint;
-// wall skip (enforced exempt), the islands the list leaves unheld counted by the planner's rule with no tip given, each
-// point under a mid-air island marked `holds_island`, alias merge.
+// wall skip (enforced exempt), the islands the list leaves unheld counted by the planner's rule with no tip given, a
+// point holding an island only on its birth piece, each point under a mid-air island marked `holds_island`, alias merge.
 Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const Params &params, double threshold_rad);
 // Whether a list baked under the linear part `pose` still holds under `linear`: the change between them keeps lengths
 // and keeps the Z axis, as a turn about Z or a mirror in X or Y does, and a tilt, a Z mirror or a scale does not.
