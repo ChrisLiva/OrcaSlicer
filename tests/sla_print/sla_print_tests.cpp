@@ -179,6 +179,22 @@ indexed_triangle_set floored_slot_mesh()
 const sla::SupportPoint FLOORED_SLOT_NUB(Vec3f(0.f, 0.f, 3.7f), 0.2f);
 const sla::SupportPoint FLOORED_SLOT_OPEN(Vec3f(0.f, 2.2f, 4.2f), 0.2f);
 
+// floored_slot_mesh with a second nub at x -0.3..0.3, y 4.1..4.7, z 3.7..4.2
+// over a second floor at x -0.8..0.8, y 3.4..5.4, z 0..0.4, mirroring the
+// first about the open point's y 2.2. A point under either nub takes a 0.6
+// head that meets the blocks and a thin retry whose drop meets its floor, and
+// each thin head reaches the open point's pillar with a 2.2 mm bridge.
+indexed_triangle_set twin_nub_slot_mesh()
+{
+    indexed_triangle_set its = floored_slot_mesh();
+    its_merge(its, box(0.6, 0.6, 0.5, -0.3f, 4.1f, 3.7f).its);
+    its_merge(its, box(1.6, 2., 0.4, -0.8f, 3.4f, 0.f).its);
+
+    return its;
+}
+
+const sla::SupportPoint TWIN_NUB_SLOT_FAR(Vec3f(0.f, 4.4f, 3.7f), 0.2f);
+
 // A 22x40x3 shelf at x -20..2, y -20..20, z 0..3 and a 6x6x1 lip at
 // x -5..1, y -3..3, z 7.4..8.4. A point under the lip at (0, 0, 7.4) takes a
 // head straight down whose junction hangs 3 mm over the shelf, 2 mm in from
@@ -625,6 +641,50 @@ TEST_CASE("A head whose thin retry cannot drop straight down branches into a pil
         CHECK(again.pillars == first.pillars);
         CHECK(again.bridges == first.bridges);
         CHECK(again.valid == first.valid);
+    }
+}
+
+TEST_CASE("Heads the ordered loop leaves unrouted take a pillar's last bridge slot in the points' order", "[SLASupportGeneration]") {
+    // Both nubs come before the open point, so their heads route before any pillar stands and both reach the second
+    // pass. Each thin head can bridge into the open point's pillar, which takes one bridge, so the nub earlier in the
+    // points' order branches off and the other stays unrouted, in every build.
+    indexed_triangle_set mesh = twin_nub_slot_mesh();
+    const bool far_first = GENERATE(false, true);
+    INFO("far nub first " << far_first);
+    const sla::SupportPoint &early = far_first ? TWIN_NUB_SLOT_FAR : FLOORED_SLOT_NUB;
+    const sla::SupportPoint &late  = far_first ? FLOORED_SLOT_NUB : TWIN_NUB_SLOT_FAR;
+    const sla::SupportPoints points = {early, late, FLOORED_SLOT_OPEN};
+    const auto build = [&mesh, &points](bool branch) {
+        sla::SupportTreeConfig cfg = slot_fin_config(true);
+        cfg.route_in_order        = true;
+        cfg.max_bridges_on_pillar = 1;
+        cfg.branch_off_retry      = branch;
+        sla::SupportTreeBuilder builder;
+        sla::SupportableMesh    sm{mesh, points, cfg};
+        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(builder, sm));
+        return builder;
+    };
+
+    const sla::SupportTreeBuilder plain = build(false);
+    const sla::Head *plain_early = head_at(plain, early.pos);
+    const sla::Head *plain_late  = head_at(plain, late.pos);
+    REQUIRE(plain_early != nullptr);
+    REQUIRE(plain_late != nullptr);
+    CHECK_FALSE(plain_early->is_valid());
+    CHECK_FALSE(plain_late->is_valid());
+
+    for (int run = 0; run < 10; ++run) {
+        INFO("run " << run);
+        const sla::SupportTreeBuilder branched = build(true);
+        const sla::Head *head_early = head_at(branched, early.pos);
+        const sla::Head *head_late  = head_at(branched, late.pos);
+        REQUIRE(head_early != nullptr);
+        REQUIRE(head_late != nullptr);
+        CHECK(head_early->is_valid());
+        CHECK(head_early->bridge_id >= 0);
+        CHECK_FALSE(head_late->is_valid());
+        CHECK(branched.pillars().size() == 1);
+        CHECK(branched.bridges().size() == 1);
     }
 }
 
