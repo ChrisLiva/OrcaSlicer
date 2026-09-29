@@ -56,3 +56,4 @@ __pycache__/
 .crank/
 /.test/
 docs/superpowers/
+ctest_results.xml
