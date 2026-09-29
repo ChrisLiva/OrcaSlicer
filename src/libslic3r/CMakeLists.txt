@@ -94,6 +94,7 @@ set(lisbslic3r_sources
     Brim.cpp
     BrimEarsPoint.hpp
     ScaffoldPoints.hpp
+    ScaffoldRecord.hpp
     Brim.hpp
     BuildVolume.cpp
     BuildVolume.hpp

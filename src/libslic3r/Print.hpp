@@ -9,7 +9,6 @@
 #include "ExtrusionEntityCollection.hpp"
 #include "Flow.hpp"
 #include "Point.hpp"
-#include "ScaffoldPoints.hpp"
 #include "Slicing.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "GCode/ToolOrdering.hpp"
@@ -41,6 +40,7 @@ class SupportLayer;
 class TreeSupportData;
 class TreeSupport;
 class ExtrusionLayers;
+struct ScaffoldRecord;
 
 namespace SupportAnalysis {
 struct EmittedSupport;

@@ -2,7 +2,7 @@
 #include <limits>
 #include <memory>
 #include "TreeSupport.hpp"          // SupportNode, LayerHeightData
-#include "../ScaffoldPoints.hpp"
+#include "../ScaffoldRecord.hpp"
 #include "ScaffoldPlan.hpp"
 namespace Slic3r::ScaffoldSupport {
 struct Params {   // filled by TreeSupport from its config and support params

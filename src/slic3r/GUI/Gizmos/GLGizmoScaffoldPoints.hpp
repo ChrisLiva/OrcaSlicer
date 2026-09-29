@@ -5,7 +5,7 @@
 #include "slic3r/GUI/GLSelectionRectangle.hpp"
 #include "slic3r/GUI/I18N.hpp"
 #include "libslic3r/ObjectID.hpp"
-#include "libslic3r/ScaffoldPoints.hpp"
+#include "libslic3r/ScaffoldRecord.hpp"
 
 #include <optional>
 
