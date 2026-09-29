@@ -16,6 +16,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/SLA/SupportTree.hpp"
 #include "libslic3r/Support/PresupportedConversion.hpp"
+#include "libslic3r/Support/ScaffoldPlan.hpp"
 #include "GLGizmoUtils.hpp"
 
 namespace Slic3r { namespace GUI {
@@ -608,10 +609,11 @@ void GLGizmoScaffoldPoints::convert()
     plater->set_plater_dirty(true);
     notifications->push_notification(NotificationType::CustomNotification, NotificationManager::NotificationLevel::RegularNotificationLevel,
                                      into_u8(format_wxstr(_L("Converted %1% artist tips into scaffold points: %2% duplicates removed, "
-                                                             "%3% axes clamped to 45 degrees, %4% micro struts dropped, "
+                                                             "%3% axes clamped to %6% degrees, %4% micro struts dropped, "
                                                              "%5% tips on supports standing on the figure."),
                                                           summary.tips_converted, summary.duplicates_removed, summary.axes_clamped,
-                                                          summary.micro_struts_dropped, summary.tips_rooted_on_figure)));
+                                                          summary.micro_struts_dropped, summary.tips_rooted_on_figure,
+                                                          int(std::lround(Geometry::rad2deg(ScaffoldSupport::max_head_tilt_rad))))));
     select_plate_of(*mo, *mo->instances[active]);
     plater->reslice();
 }
