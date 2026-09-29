@@ -1110,6 +1110,10 @@ bool SupportTreeBuildsteps::connect_along_axes(Head &head)
                 head.r_back_mm = size.r_back;
                 head.width_mm  = size.width;
                 clears         = true;
+                // A head whose walk along the axis meets the model may still
+                // bridge into a pillar another head stood.
+                if (m_cfg.branch_off_retry && search_pillar_and_connect(head))
+                    return true;
                 if (connect_to_ground(head, axis, m_cfg.safety_distance_mm))
                     return true;
             }

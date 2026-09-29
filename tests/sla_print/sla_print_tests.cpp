@@ -173,6 +173,26 @@ indexed_triangle_set shelf_lip_mesh()
     return its;
 }
 
+// A 24x24x1 roof at x -12..12, y -12..12, z 8..9 over a 40x40x3 shelf at
+// x -20..20, y -20..20, z 0..3 with a 2.6 mm square hole centred 4 mm from
+// the origin at 7.5 degrees, between two of the island retry's axes, which
+// lie 15 degrees apart. A point at the hole's centre stands a 0.6 pillar
+// straight down through it. An island point under the roof at the origin
+// meets the shelf on every straight walk, and on every walk along a retry
+// axis, which passes beside the hole, while leaning out it reaches the
+// pillar with a bridge.
+indexed_triangle_set holed_shelf_mesh()
+{
+    const double hx = 4. * std::cos(7.5 * M_PI / 180.), hy = 4. * std::sin(7.5 * M_PI / 180.), h = 1.3;
+    indexed_triangle_set its = box(24., 24., 1., -12.f, -12.f, 8.f).its;
+    its_merge(its, box(40., 20. + hy - h, 3., -20.f, -20.f, 0.f).its);
+    its_merge(its, box(40., 20. - hy - h, 3., -20.f, float(hy + h), 0.f).its);
+    its_merge(its, box(20. + hx - h, 2. * h, 3., -20.f, float(hy - h), 0.f).its);
+    its_merge(its, box(20. - hx - h, 2. * h, 3., float(hx + h), float(hy - h), 0.f).its);
+
+    return its;
+}
+
 // A 30x3x1 ledge at x 0..30, y 0..3, z 10..11 over a 40x7.5x4.5 block at
 // x -5..35, y -5..2.5, z 0..4.5, with a 40x6x5.5 wall on the block at
 // x -5..35, y -5..1, z 4.5..10 up to the ledge. `comb_points` puts 30 points
@@ -647,6 +667,51 @@ TEST_CASE("An island head with no straight route routes along a retry axis", "[S
     CHECK(std::any_of(retried.pillars().begin(), retried.pillars().end(), [&](const sla::Pillar &p) {
         return std::abs(p.endpoint().z() - retried.ground_level) < 1e-6;
     }));
+}
+
+TEST_CASE("An island head's axis retry branches into a pillar before walking to the ground", "[SLASupportGeneration]") {
+    // The point in the hole stands a 0.6 pillar through it. The island point under the roof meets the shelf on every
+    // straight walk and on every walk along a retry axis; branching off, a head leaning along a retry axis bridges into
+    // that pillar instead.
+    indexed_triangle_set mesh = holed_shelf_mesh();
+    const sla::SupportPoint island(Vec3f(0.f, 0.f, 8.f), 0.2f, true);
+    const sla::SupportPoints points = {
+        island, sla::SupportPoint(Vec3f(float(4. * std::cos(7.5 * M_PI / 180.)), float(4. * std::sin(7.5 * M_PI / 180.)), 8.f), 0.2f)};
+    const auto build = [&mesh, &points](bool branch) {
+        sla::SupportTreeConfig cfg;
+        cfg.object_elevation_mm     = 0.;
+        cfg.head_back_radius_mm     = 0.6;
+        cfg.head_fallback_radius_mm = 0.22;
+        cfg.allow_model_anchors     = false;
+        cfg.route_in_order          = true;
+        cfg.island_axis_retry       = true;
+        cfg.branch_off_retry        = branch;
+        sla::SupportTreeBuilder builder;
+        sla::SupportableMesh    sm{mesh, points, cfg};
+        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(builder, sm));
+        return builder;
+    };
+
+    const sla::SupportTreeBuilder plain = build(false);
+    const sla::Head *plain_head = head_at(plain, island.pos);
+    REQUIRE(plain_head != nullptr);
+    CHECK_FALSE(plain_head->is_valid());
+
+    const sla::SupportTreeBuilder branched = build(true);
+    const sla::Head *head = head_at(branched, island.pos);
+    REQUIRE(head != nullptr);
+    REQUIRE(head->is_valid());
+    CHECK_THAT(head->r_back_mm, Catch::Matchers::WithinAbs(0.6, 1e-9));
+    const auto [polar, azimuth] = sla::dir_to_spheric(head->dir);
+    INFO("head dir (" << head->dir.x() << ", " << head->dir.y() << ", " << head->dir.z() << ")");
+    CHECK(polar <= M_PI - M_PI / 12. + 1e-9);
+    REQUIRE(head->bridge_id >= 0);
+    REQUIRE(branched.pillars().size() == 1);
+    REQUIRE(size_t(head->bridge_id) < branched.bridges().size());
+    const sla::Pillar &pillar = branched.pillars().front();
+    const sla::Bridge &bridge = branched.bridges()[head->bridge_id];
+    CHECK_THAT(bridge.endp.x(), Catch::Matchers::WithinAbs(pillar.endpoint().x(), 1e-6));
+    CHECK_THAT(bridge.endp.y(), Catch::Matchers::WithinAbs(pillar.endpoint().y(), 1e-6));
 }
 
 TEST_CASE("A stop condition halts the builder between steps", "[SLASupportGeneration]") {
