@@ -42,7 +42,8 @@ uint32_t ms_since(const std::chrono::steady_clock::time_point &start)
 // branch diameter, bridges and braces no longer than the scaffold bridge length, a brace on every pillar standing
 // more than the brace slenderness in diameters unbraced, and nothing anchored on the model. Heads facing the model
 // route in the points' order, so one slice builds one tree, and one no route reaches retries thin and, holding an
-// island, along leaning axes.
+// island, along leaning axes. A head first branches off the pillars the others stood from each pose it tries, and
+// every head left unrouted searches them once more after all have routed.
 sla::SupportTreeConfig tree_config(const Params &params)
 {
     sla::SupportTreeConfig cfg;
@@ -67,6 +68,7 @@ sla::SupportTreeConfig tree_config(const Params &params)
     cfg.route_in_order              = true;
     cfg.retry_thin_head             = true;
     cfg.island_axis_retry           = true;
+    cfg.branch_off_retry            = true;
     return cfg;
 }
 

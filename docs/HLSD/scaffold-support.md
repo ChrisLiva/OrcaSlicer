@@ -1104,6 +1104,18 @@ a scan of every face would build.
   in its reference pose, an island born at z 35.2 clears retry axes with its
   head, none of them routes it at the full distance, and the slice names the
   island as bare.
+- Branch-off retry. With `branch_off_retry`, default false, the thin and
+  island axis retries search the pillars other heads have stood from each pose
+  they take before trying the ground, and the pillar search passes over a
+  pillar thinner than the head without bridging to it. After the ordered
+  routing, every head still unrouted searches the pillars once more from its
+  own pose and the retries' poses and tries no ground route, since a ground
+  attempt reads only the mesh and would fail the same way. A head whose own
+  retries reach no ground still reaches a pillar a neighbour stood, and a head
+  routed before its neighbour stood that pillar reaches it on the second pass.
+  SLA printing leaves the field off. On corpus plate 3 upright the scaffold
+  routes 201 of 220 tips with it against 195 without it, and the three
+  under-held islands stay under-held.
 - Model anchors. `SupportTreeConfig::allow_model_anchors`, default true, gates
   the last-resort route of a head to the model body. The scaffold sets it
   false, so a head that reaches neither a pillar nor the ground is
@@ -1307,7 +1319,13 @@ full head is dropped while the thin retry drops a 0.22 mm pillar down the
 slot, a comb of 30 points under a ledge that builds one tree in 20 runs
 routed in order, and a point under a lip over a shelf whose head is dropped
 unless the point starts an island, when it leans out along a retry axis and
-stands a pillar past the shelf's edge.
+stands a pillar past the shelf's edge. Under `branch_off_retry`, a head under
+a lip whose pillar search turns away from a thinner pillar lays no bridge to
+it, where the search without the flag leaves one; a thin head at a nub over a
+floored slot bridges into the pillar a neighbour stood, whether it routes
+before or after that neighbour; and an island head under a roof leans out
+along a retry axis into a pillar standing through a hole in the shelf. Without
+the flag the last two are dropped.
 
 `tests/fff_print/test_scaffold_plan.cpp` holds the `[ScaffoldPlan]` cases,
 which call `prepare_plan` and `plan_tips` on fixtures sliced without support,
@@ -1461,7 +1479,7 @@ tree-slim slice's; the upright pose also requires at most three under-held
 islands, all born at z 15.4 with birth tips the builder cannot route, one of
 them leaning its neck 41.4 degrees. The stored pose places 76 tips and routes
 all 76, eight of its births leaning their necks 15.5 to 41.4 degrees, and the
-upright pose places 220 and routes 195 on every run, since the builder routes
+upright pose places 220 and routes 201 on every run, since the builder routes
 in order and isolates its searches.
 
 The hidden case "A list Generate copies from corpus plate 1's auto slice
