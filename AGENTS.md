@@ -186,8 +186,9 @@ safety distance, 2026-09-29). On an unchanged corpus hash a non-zero
 `floating_pieces_removed` or a changed placed, routed or dropped count is a regression; only the process times vary
 between runs.
 The corpus `elf_test.3mf` carries no painted enforcers since its intentional rewrite at 14:02 on 2026-09-25 (sha256
-`201c5418…`). The hidden case pins that hash in its manifest but never checks it, so a corpus rewrite reads as a code
-regression. Hash the corpus with `shasum -a 256` before reading a hidden-case failure (2026-09-26).
+`201c5418…`). A second rewrite at 16:07 on 2026-09-29 (sha256 `84e5b41f…`) left every plate-3 number of the hidden case
+unchanged. The three hidden `elf_test.3mf` cases pin that hash in their manifests but never check it, so a corpus
+rewrite reads as a code regression. Hash the corpus with `shasum -a 256` before reading a hidden-case failure (2026-09-26).
 The legacy tree's own floating pass is not idle on the corpus: a tree-slim slice of plate 3 strips 123 printed
 pieces in the stored pose and 97 upright, every one a base shard of 0.002 to 0.59 mm2 (a temporary role log in
 `remove_floating_toolpaths`, 2026-09-24), so an oracle expecting `floating_pieces_removed == 0` from a legacy style

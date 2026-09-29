@@ -3077,7 +3077,7 @@ TEST_CASE("Scaffold support over corpus plate 3 in two poses", "[ScaffoldSupport
     SupportValidation::ManifestCase c;
     c.id            = "plate3";
     c.model         = "elf_test.3mf";
-    c.sha256        = "201c541805e94a2914c3cf0a0aebaee68ee3f6199cc096ae36993069fc781ba6";
+    c.sha256        = "84e5b41feee5059d994042c9b04bd9d1d92ba4335044e83fd359db904c845da4";
     c.selectors     = { "name:10_Dark Elves 3_test.stl" };
     c.styles        = { "tree_slim", "tree_scaffold" };
     c.feature_modes = { "on" };
@@ -3194,7 +3194,7 @@ TEST_CASE("Need-driven tips hold corpus plate 1's hand and sword with few contac
     SupportValidation::ManifestCase c;
     c.id            = "plate1";
     c.model         = "elf_test.3mf";
-    c.sha256        = "201c541805e94a2914c3cf0a0aebaee68ee3f6199cc096ae36993069fc781ba6";
+    c.sha256        = "84e5b41feee5059d994042c9b04bd9d1d92ba4335044e83fd359db904c845da4";
     c.selectors     = { "name:10_Dark Elves 1.stl" };
     c.styles        = { "tree_scaffold" };
     c.feature_modes = { "on" };
@@ -3279,7 +3279,7 @@ TEST_CASE("A list Generate copies from corpus plate 1's auto slice routes what t
     SupportValidation::ManifestCase c;
     c.id            = "plate1";
     c.model         = "elf_test.3mf";
-    c.sha256        = "201c541805e94a2914c3cf0a0aebaee68ee3f6199cc096ae36993069fc781ba6";
+    c.sha256        = "84e5b41feee5059d994042c9b04bd9d1d92ba4335044e83fd359db904c845da4";
     c.selectors     = { "name:10_Dark Elves 1.stl" };
     c.styles        = { "tree_scaffold" };
     c.feature_modes = { "on" };
