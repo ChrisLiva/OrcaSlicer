@@ -40,9 +40,9 @@ struct Output { std::vector<LayerAreas> layers;   // one entry per planned layer
               };
 // The tips `draw` builds heads for, the plan they came from and how long it took, with the islands the placement leaves
 // unheld: their count, and where each prints with no tip holding it, x and y in mm and print z. A baked list has no
-// plan: its unheld islands are the ones the hold floor would have seeded a tip under, and it also names the `source`
-// of each point the wall skip took out. `mesh` is the object mesh the plan read, which `draw` builds on; a baked list
-// leaves it to `draw`.
+// plan: its unheld islands are the ones the planner's island rule reads unheld under its points, and it also names the
+// `source` of each point the wall skip took out. `mesh` is the object mesh the plan read, which `draw` builds on; a
+// baked list leaves it to `draw`.
 struct Tips { std::vector<TipSite> sites; Plan plan; size_t islands_under_held = 0; uint32_t island_joins_ms = 0;
               std::vector<int> wall_skipped; std::vector<Vec3d> bare_islands; std::shared_ptr<const ObjectMesh> mesh; };
 // What routing left of a plan. `tips` is each planned tip's result, read off a drawn site within `sla::D_SP` of it in
@@ -63,8 +63,8 @@ ScaffoldPoint point_of(const PrintObject &object, const Params &params, const Ti
 // A baked list in the builder's frame: each point mapped through trafo_centered(), z + params.z_offset_mm, snapped
 // to the bottom of the object layer holding it; each point not enforced leaning its neck as the planner would there,
 // read off the plan input `threshold_rad` builds with no blocker, since a list ignores blockers as it ignores paint;
-// wall skip (enforced exempt), island count seeding nothing, each point under a mid-air island marked `holds_island`,
-// alias merge.
+// wall skip (enforced exempt), the islands the list leaves unheld counted by the planner's rule with no tip given, each
+// point under a mid-air island marked `holds_island`, alias merge.
 Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const Params &params, double threshold_rad);
 // Whether a list baked under the linear part `pose` still holds under `linear`: the change between them keeps lengths
 // and keeps the Z axis, as a turn about Z or a mirror in X or Y does, and a tilt, a Z mirror or a scale does not.

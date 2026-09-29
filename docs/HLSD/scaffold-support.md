@@ -202,8 +202,9 @@ then runs steps 2 to 4 of the auto path on those sites:
   each point's neck end along its axis. A point placed with the tool is
   enforced and never skipped; a point Generate copied carries the flag its tip
   had.
-- The hold floor counts the islands the list leaves under-held but seeds and
-  restores no tip: where it would have seeded one, it records a bare island.
+- The island count reads the islands by the planner's rule and gives none a
+  tip: an island with a point on it is held, one the birth rule holds with no
+  tip needs none, and any other is under-held and recorded as a bare island.
   It marks every point under a mid-air island as holding it, so the builder
   retries that point's head along leaning axes as it retries an auto slice's
   island holders, and a list Generate copied routes the island tips the auto
@@ -235,7 +236,9 @@ islands differ by pass:
   size and flag. Its result is `draw`'s outcome (`Routed`, `Filtered`,
   `Unrouted` or `Neck`) for a point with a drawn site, `Wall` for a point the
   wall skip took out and `Merged` for any other point without a site. Its bare
-  islands are where the hold floor would have seeded a tip.
+  islands are the islands the island count reads under-held, one per island
+  `islands_under_held` counts: at the tip the planner's rule would stand under
+  each, or at the birth point of one no neck clears.
 - An auto record holds one tip per site handed to `draw`, with `draw`'s
   outcome and a size read back from the tip's grade: `Heavy` above three
   support lines, `Light` otherwise. Its bare islands are the birth points of
@@ -589,37 +592,32 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    vertical enforcer point painted facets place, becomes a `TipSite` with
    `enforced` set, and the skip keeps it however close the wall stands, so
    the tip fuses where the user asked for support and leaves its scar there.
-3. The island hold floor, on a baked list only, where it seeds no tip and
-   records bare islands. `SupportAnalysis::island_joins` maps every mid-air
-   island of the model to the slab where it first meets the rooted body. An
-   island needs one tip when its unjoined height is at most 1 mm, two up to
-   5 mm and three above, counted greedily from the lowest tip and only where a
-   tip stands a pillar diameter from every tip counted before it. A
-   never-joining island's height runs to the top of the part it ends up in:
-   where two such islands meet in mid-air the older owns the pieces above the
-   merge, so a short leg of a taller floating part measures to that part's top
-   and keeps its floor and its seed. Only a whole never-joining part at most
-   1 mm tall is mesh debris, at any height: its islands get no floor, no tip
-   and no count, and log
-   `scaffold island skipped at z: debris` at debug level. An island with no tip
-   and no dropped contact under it is read by the planner's birth rule,
-   `read_births`, so a list and an auto slice hold it alike. A birth piece
-   continuing the slab below and debris get no tip and no count. A nub gets
-   none where its merge holds it as the planner's merge would, walked bottom
-   up over the list's tips: a tip of the list stands on its own part, or it
-   lies within the merge slab's `a` plus `R` of a part the bed or a tip of the
-   list holds. These log `scaffold island held at z: <why>` at debug level.
-   Any other nub, like any other birth, is tipped by the rule, and a nub
-   tipped so holds its part for the nubs meeting it after it, as the planner's
-   tip would. An island the rule tips gets that tip seeded, in the small grade
-   with its neck's axis; one no neck clears counts as under-held. The map's pieces are the plan input's, index
-   for index, since both come from `build_components` over the same slabs and
-   ground. An island counts as under-held only
-   when it holds fewer tips than both its floor and the number its birth piece
-   fits, the points of a hexagonal grid at the pillar diameter inside the piece
-   shrunk by half a pillar diameter, never fewer than one. A tip belongs to the
+3. The island count, on a baked list only, where it gives no island a tip
+   and names the islands the list leaves unheld, by the planner's island rule
+   so that a list and an auto slice count an island alike.
+   `SupportAnalysis::island_joins` maps every mid-air island of the model, a
+   birth piece off the bed with nothing under it, to the pieces it owns; the
+   map's pieces are the plan input's, index for index, since both come from
+   `build_components` over the same slabs and ground. A point belongs to the
    island that owns the model piece over it on the overhang's own layer, one
-   above the node's layer.
+   above the node's layer, and holds that island, as the planner's one birth
+   tip holds it, however far the island stands free and however many more
+   tips its birth piece has room for. An island with no point on it is read
+   by the planner's birth rule, `read_births`. A birth piece continuing the
+   slab below and debris need no tip. A nub needs none where its merge holds
+   it as the planner's merge would, walked bottom up over the list's points:
+   a point of the list stands on its own part, or it lies within the merge
+   slab's `a` plus `R` of a part the bed or a point of the list holds. Any
+   other nub, like any other birth, needs the tip the rule would stand under
+   it, and a nub the rule tips holds its part for the nubs meeting it after
+   it, as the planner's tip would. An island that needs a tip the list lacks
+   is under-held, and so is one no neck clears, which the plan counts unheld
+   too: each counts in `islands_under_held` and is named in the bare islands,
+   at the tip the rule would stand under it, or, where no neck clears, at its
+   birth point, the deepest point of its birth piece at the piece's bottom.
+   Each logs
+   `scaffold island at (x, y, z) unheld: <cause>` at debug level, the cause
+   `no point` or `no neck`.
 4. The alias merge. Two tips can stand on one spot on two consecutive layers,
    and the builder keeps one point of each pair within
    `sla::D_SP`. The selection visits the tips lowest first, among equals by seed
@@ -651,8 +649,8 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    the order of the points the cuts left, and marks each point whose tip holds
    an island as starting one, `sla::SupportPoint::is_new_island`: on an auto
    slice `place_tips` marks every holder of an island the plan leaves
-   unrooted, whatever need placed it, and on a baked list the hold floor marks
-   every point under a mid-air island. The draw sets
+   unrooted, whatever need placed it, and on a baked list the island count
+   marks every point under a mid-air island. The draw sets
    the elevation to the mesh's lowest z: the builder grounds pillars at that z
    less the elevation, so the ground sits at the pad's top on the bed for an
    object standing on it and for one lifted off it with auto-drop off. A
@@ -774,8 +772,11 @@ drawn site, reads `Wall`. An island with holders that is not `rooted` and
 whose holders all failed to route prints with no tip holding it, and a failed
 Underside head's `answered_mm2` goes back into `underside_unmet_mm2`.
 `islands_under_held` is the placement's count, the plan's `NoNeck` islands or
-the hold floor's on a baked list, plus those islands, and `Output::bare_islands`
-adds each one's birth point to the placement's list. Each unheld island logs
+the island count's on a baked list, plus those islands, and `Output::bare_islands`
+adds each one's birth point to the placement's list. A baked list carries no
+plan, so an island whose points all fail to route adds nothing there: its
+points count only in `tips_dropped` and in the baked warning's dropped count.
+Each unheld island logs
 `scaffold island at (x, y, z) unheld: <cause>` at debug level, with z its print
 z and the cause `no neck`, a tipped island's own tip result (`unrouted`,
 `filtered`, `neck` or `wall`) or, for a hung island, `holders unrouted`, so an
@@ -984,7 +985,8 @@ pass fills under every style that runs it. They read zero under every other
 style except the last. `islands_under_held` counts the islands that print
 with no tip holding them once the build has routed, and `underside_unmet_mm2`
 the underside left hanging past one and a half reaches, with what dropped
-Underside heads answered; both read the plan and the build together.
+Underside heads answered; both read the plan and the build together. A baked
+list has no plan, so its `islands_under_held` is the island count's alone.
 `islands_slender` counts the branches the stability rule left past their
 window with no corner a head can hold, once per branch, which reads the
 placement alone: a Stability head the build drops counts only in
@@ -1039,7 +1041,13 @@ a shelf, dropped as a tip holding no island and routed along a leaning axis
 as one holding the lip, a baked point there marked as holding it and
 routed, two baked points across the lip's edge merged into the one outside
 it, which holds the island for the other, and the need planner's own holder
-of the lip marked by `place_tips` and routed, a tip placed under an unseeded
+of the lip marked by `place_tips` and routed, `baked_tips` on a block and a
+rod hanging from a bar, where one point under the block holds it however far
+it stands free, the rod, which no neck clears, reads under-held and is named
+as the plan names it while a copied point under it is wall-skipped, and a point
+placed there with the tool holds it, an empty list names the block at
+the tip the rule would place and the rod, and a list copied from the auto
+slice counts and names what the auto slice does, a tip placed under an unseeded
 feature start with its ring on the layer its z tops and none under debris,
 slivers beside a wall leaning their tips away from it and routing, braces on
 slender pillars, pillars widening toward
@@ -1123,7 +1131,8 @@ paint places no tip on a baked slice, that another style records nothing,
 that an empty list builds no tip, that a revert places what the first auto
 slice placed, that a copy sharing the source's meshes prints its own list, and
 that on the seeded-islands fixture the auto slice names as many bare islands as
-it counts under-held while an empty list names where the hold floor would seed.
+it counts under-held while an empty list names each island the planner's rule
+would tip.
 The second slices two instances of one object as two PrintObjects and checks
 that a quarter turn about Z keeps the list while a 30 degree tilt leaves it
 stale with the warning, and that an instance scale and a part moved inside the

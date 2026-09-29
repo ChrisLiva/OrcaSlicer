@@ -32,7 +32,7 @@ struct TipSite
     bool               holds_island = false;
 };
 
-// The deepest point of `piece`, where the hold floor and the birth need stand a tip.
+// The deepest point of `piece`, where the birth need stands a tip and an island's birth point lies.
 Point inscribed_point(const ExPolygon &piece);
 
 // The most a head leans from straight down: the builder saturates a head's direction at this bridge slope, so the

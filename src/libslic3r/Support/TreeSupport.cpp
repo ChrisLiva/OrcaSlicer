@@ -4161,9 +4161,9 @@ std::vector<LayerHeightData> TreeSupport::plan_layer_heights(const std::vector<c
                 bounds.insert({std::max(min_print_z, print_z - height), 0}); // the bottom_z of the layer
             }
         }
-        // A scaffold tip the hold floor seeded or restored can stand where no contact does, and its top ring prints
-        // on the layer whose top is the tip's z. A tip stands at an object layer's bottom, where support layers that
-        // follow the object's layers already end one.
+        // A scaffold tip the planner placed or a baked list holds can stand where no contact does, and its top ring
+        // prints on the layer whose top is the tip's z. A tip stands at an object layer's bottom, where support layers
+        // that follow the object's layers already end one.
         for (const coordf_t z : tip_tops)
             bounds.insert({std::max(min_print_z, z), 0});
 

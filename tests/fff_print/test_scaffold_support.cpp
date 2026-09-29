@@ -493,6 +493,27 @@ TriangleMesh island_lip_fixture()
     return shelf;
 }
 
+// A 24 x 12 x 4 mm base at x 0..24, y 0..12, a 2 x 2 x 6 mm column on it at x 0..2, y 5..7, z 4..10, and a 16 x 6 x
+// 1 mm bar off the column's top at x 0..16, y 3..9, z 9..10, from which two bodies hang: a 4 x 4 mm block at x 4..8,
+// y 4..8 down to z 6, standing free 3 mm before it meets the bar, and a 1 x 1 mm rod at x 11.5..12.5, y 5.5..6.5 down
+// to z 4.6, 0.6 mm over the base. A neck from the block's underside ends clear of the base, while one from the rod's,
+// straight down or leaning up to 45 degrees, ends inside it.
+TriangleMesh hanging_islands_fixture()
+{
+    TriangleMesh base   = make_cube(24., 12., 4.);
+    TriangleMesh column = make_cube(2., 2., 6.);
+    column.translate(0.f, 5.f, 4.f);
+    TriangleMesh bar = make_cube(16., 6., 1.);
+    bar.translate(0.f, 3.f, 9.f);
+    TriangleMesh block = make_cube(4., 4., 3.);
+    block.translate(4.f, 4.f, 6.f);
+    TriangleMesh rod = make_cube(1., 1., 4.4);
+    rod.translate(11.5f, 5.5f, 4.6f);
+    for (const TriangleMesh *part : { &column, &bar, &block, &rod })
+        base.merge(*part);
+    return base;
+}
+
 // A JSON config written to the OS temp directory and removed when the guard leaves scope.
 struct ScratchJson
 {
@@ -1324,6 +1345,78 @@ TEST_CASE("A tip holding an island leans its head out where no other route reach
     CHECK(ScaffoldSupport::unheld_after_routing(placed.plan, placed.sites, planned.results).islands.empty());
 }
 
+TEST_CASE("A baked list holds an island by the planner's rule and names every island it leaves unheld", "[ScaffoldSupport]")
+{
+    // At 0.2 mm layers the block is born on the slab at z 6 and the rod on the one at z 4.6. The planner holds the
+    // block with one birth tip however far it stands free and however many more tips its underside has room for, and
+    // no neck clears under the rod, so the plan counts the rod's island unheld and names its birth point. A list reads
+    // the islands by the same rule: one point under the block's middle holds it, a point holds the rod only where it
+    // survives the wall skip, as a point placed with the tool does, and every unheld island is named, the block's at
+    // the tip the rule would stand under it.
+    Print print;
+    Model model;
+    init_print({ hanging_islands_fixture() }, print, model, fixture_config({ { "enable_support", "0" }, { "layer_change_gcode", "G92 E0" } }));
+    print.process();
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    const DrawOnLayers draw(object);
+    const double       threshold = M_PI / 6.;
+    const ScaffoldSupport::TipSite block = site_under(object, Vec2d(6., 6.), 5.);
+    const ScaffoldSupport::TipSite rod   = site_under(object, Vec2d(12., 6.), 4.5);
+    REQUIRE_THAT(block.print_z, WithinAbs(6., 1e-6));
+    REQUIRE_THAT(rod.print_z, WithinAbs(4.6, 1e-6));
+    // Whether a bare island stands at `site`, within a lattice cell's rounding of the birth's deepest point.
+    const auto at = [](const std::vector<Vec3d> &bare, const ScaffoldSupport::TipSite &site) {
+        return std::any_of(bare.begin(), bare.end(), [&site](const Vec3d &p) {
+            return (p.head<2>() - unscale(site.position)).norm() <= 0.3 && std::abs(p.z() - site.print_z) <= 1e-6;
+        });
+    };
+
+    const ScaffoldSupport::Tips placed = ScaffoldSupport::place_tips(object, {}, draw.params, threshold, {});
+    CHECK(placed.islands_under_held == 1);
+    CHECK(placed.bare_islands.size() == 1);
+    CHECK(at(placed.bare_islands, rod));
+
+    const ScaffoldPoints        one  = { ScaffoldSupport::point_of(object, draw.params, block, 2. * draw.params.toolpath_width_mm) };
+    const ScaffoldSupport::Tips held = ScaffoldSupport::baked_tips(object, one, draw.params, threshold);
+    REQUIRE(held.sites.size() == 1);
+    CHECK(held.sites.front().holds_island);
+    CHECK(held.islands_under_held == 1);
+    CHECK(held.bare_islands.size() == 1);
+    CHECK(at(held.bare_islands, rod));
+
+    // A point under the rod necks into the base: a copied one is wall-skipped and leaves the rod unheld, while one
+    // placed with the tool is enforced, stays and holds it.
+    ScaffoldPoints              pair    = { one.front(), ScaffoldSupport::point_of(object, draw.params, rod, 2. * draw.params.toolpath_width_mm) };
+    const ScaffoldSupport::Tips skipped = ScaffoldSupport::baked_tips(object, pair, draw.params, threshold);
+    CHECK(skipped.wall_skipped == std::vector<int>{ 1 });
+    CHECK(skipped.islands_under_held == 1);
+    CHECK(skipped.bare_islands.size() == 1);
+    CHECK(at(skipped.bare_islands, rod));
+    pair.back().enforced = true;
+    const ScaffoldSupport::Tips enforced = ScaffoldSupport::baked_tips(object, pair, draw.params, threshold);
+    CHECK(enforced.wall_skipped.empty());
+    CHECK(enforced.sites.size() == 2);
+    CHECK(enforced.islands_under_held == 0);
+    CHECK(enforced.bare_islands.empty());
+
+    const ScaffoldSupport::Tips empty = ScaffoldSupport::baked_tips(object, {}, draw.params, threshold);
+    CHECK(empty.islands_under_held == 2);
+    CHECK(empty.bare_islands.size() == 2);
+    CHECK(at(empty.bare_islands, block));
+    CHECK(at(empty.bare_islands, rod));
+
+    // A list Generate copied from the auto slice counts and names what the auto slice does.
+    ScaffoldPoints copied;
+    for (const ScaffoldSupport::TipSite &site : placed.sites)
+        copied.push_back(ScaffoldSupport::point_of(object, draw.params, site, site.grade_mm));
+    const ScaffoldSupport::Tips baked = ScaffoldSupport::baked_tips(object, copied, draw.params, threshold);
+    CHECK(baked.sites.size() == placed.sites.size());
+    CHECK(baked.islands_under_held == placed.islands_under_held);
+    CHECK(baked.bare_islands.size() == placed.bare_islands.size());
+    CHECK(at(baked.bare_islands, rod));
+}
+
 TEST_CASE("A head whose neck bottoms in the xy band is dropped while one whose neck clears it keeps its head and no ring floats",
           "[ScaffoldSupport]")
 {
@@ -2015,8 +2108,8 @@ TEST_CASE("A baked scaffold list builds the tips it holds and reports each point
     CHECK(heavier.record->baked);
     CHECK(heavier.report.support_volume_mm3 > lighter.report.support_volume_mm3);
 
-    // Bare islands: an empty list seeds no tip under an island the hold floor would hold, and the record names where
-    // it would have. The auto slice tips them and names only the islands it counts unheld, the tall sliver among them.
+    // Bare islands: the auto slice tips the fixture's islands and names as many as it counts unheld, while an empty
+    // list gives no tip to an island the planner's rule tips, and the record names each such island.
     Print                    islands_print;
     Model                    islands_model;
     const DynamicPrintConfig islands_config = scaffold_config({ { "support_remove_small_overhang", "1" } });
