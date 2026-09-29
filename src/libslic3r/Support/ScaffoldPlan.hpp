@@ -40,12 +40,8 @@ Point inscribed_point(const ExPolygon &piece);
 constexpr double max_head_tilt_rad = M_PI / 4.;
 
 // The need a planned tip answers: an enforcer asked for it, an island starts there, the underside droops too far from
-// its anchors there, or a part standing free has grown too tall over its anchors.
+// its anchors there, or a stem reaches too far from what holds it for its thickness.
 enum class TipNeed : uint8_t { Enforced, Birth, Underside, Stability };
-
-// What the planner asks of the model. `slender_ratio` is how many section widths a part may stand over its highest
-// anchor.
-struct NeedParams { double slender_ratio = 3.; };
 
 // The object's mesh in the frame its slices are in, XY centred and the bed on z 0, with the AABB tree the builder aims
 // its heads by. `place_tips` builds it once: the planner reads the faces a head meets off it and `draw` builds the tree
@@ -119,7 +115,8 @@ struct Island
 };
 
 // The tips the needs call for, lowest first, every island with how it is held, and what the needs could not meet:
-// islands no tip can stand under, parts left slender and underside area left hanging past the reach.
+// islands no tip can stand under, branches left slender with no face a head can hold, and underside area left hanging
+// past the reach.
 struct Plan
 {
     std::vector<PlannedTip> tips;
@@ -128,7 +125,7 @@ struct Plan
     double                  underside_unmet_mm2 = 0.;
 };
 // `enforced` are the contacts an enforcer asked for; each becomes a tip and an anchor.
-Plan plan_tips(const PlanInput &input, const std::vector<TipSite> &enforced, const NeedParams &need = NeedParams());
+Plan plan_tips(const PlanInput &input, const std::vector<TipSite> &enforced);
 
 // The axis a neck from `site` leans along by the planner's search, `site` the only spot tried: zero where it clears
 // straight down or no lean up to `input.max_tilt_rad` clears, else the least lean that clears, one tilt step apart, and

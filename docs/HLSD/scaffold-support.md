@@ -344,10 +344,13 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
 1. The need planner. FDM has no peel force, so area alone never calls for a
    tip. `ScaffoldSupport::plan_tips` places one only where the print needs
    it: where an island starts, where an underside hangs too far past its
-   anchors, and up a part that stands free too tall for its width. It reads
+   anchors, and along a stem that reaches farther from what holds it than its
+   thickness allows. It reads
    a `PlanInput` that `prepare_plan` builds once per slice: the object's
    layers sampled on a lattice at half the support toolpath width, each cell
-   labelled by the slab piece holding it, the pieces from `build_components`
+   labelled by the slab piece holding its centre (a point off the centre, as
+   a corner on an outline is, reads its piece off the outlines, since its
+   cell's label may name a neighbour), the pieces from `build_components`
    with the ground at the first slab, each layer's down-facing surface
    (`diff_ex` of its slices and the layer below's), each layer's
    self-support step `a`, the height of the layer below over the tangent of
@@ -360,8 +363,8 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    head along. The reach `R`, how far an underside may hang past the step, is
    two support lines: the first line past a held edge bonds its side to a held
    line and the second to a line hanging by one, but a third would lie against
-   a line hanging by two. `NeedParams` holds the slender ratio 3. The
-   `PlanInput` lives only through `place_tips`, or `baked_tips` on a list.
+   a line hanging by two. The `PlanInput` lives only through `place_tips`, or
+   `baked_tips` on a list.
 
    The planner walks the layers bottom up and tracks parts itself: a part is
    a connected set of pieces, and a part merges when a piece overlaps two
@@ -474,23 +477,53 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
      what past one and a half reaches it answered: the due cells it brought
      within the reach on its layer and the pending cells its cover took,
      which hang again if the head does not route.
-   - Stability. A part's lever on a layer is how far the farthest corner of
-     its section's convex hull stands from the part's nearest tip in 3-D, or
-     above its highest anchor while no tip holds it, so a blade hanging from
-     its point reads the reach it widens by as well as the height it climbs.
-     The part turns slender when its lever passes the window, the larger of
-     3 mm and the slender ratio times the hull's narrowest width. It then
-     takes a small tip on its down-facing surface within the window's height
-     under the layer, at the corner of a face farthest from its tips that is
-     eligible and stands at least half the window from them. Every corner of
-     every face is a candidate, and down-facing surface is exact, so a rising
-     edge steeper than the threshold, such as the corpus sword's lower edge,
-     still offers corners. A part with no such corner counts once in
-     `islands_slender`, and it, or a part still slender with its new tip, is
-     measured again 1 mm higher. On plate 1 the sword blade widens from its
-     point to about 7 mm by z 6.5 and takes a tip per window up that edge,
-     then rises nearly vertical to the guard at z 15.8, where no corner
-     stands clear of the band and the blade goes about 6 mm without a tip.
+   - Stability. Each piece of each slab is measured against its own window
+     `W`, the larger of 3 mm and three times its stem's thickness `t`: the
+     piece's own or, where thicker, that of a piece it grows out of 1 mm under
+     its top, reached down through the pieces under it. A piece's thickness is
+     the diameter of the largest circle inside it, which `inscribed_radius`
+     finds by bisecting inward offsets to 0.01 mm, the search
+     `inscribed_point` runs for a birth tip; the planner fills it for every
+     piece in parallel before it walks, about 1.2 s on plate 1's figure, which
+     a baked list, never planned, does not pay. A rod bends as F L^3 / (E
+     t^4), and the nozzle pushes a section with a force that grows with the
+     section it prints, so a fixed reach per thickness holds a fixed
+     deflection; three thicknesses meet the 3 mm floor at a 1 mm stem. The
+     piece's lever is how far the farthest point of its outline at its top
+     stands from what holds its part: the part's tips in 3-D, the first slab's
+     outline under a part the bed roots, and the first section under the stem,
+     no deeper than the lever, that holds a piece twice as thick as the stem
+     and so 16 times as stiff, which clamps it. A point stands from an outline
+     by the hypotenuse of its distance to it in x and y, 0 inside, and its
+     height over it. A part held by none of these reads a point's height over
+     its highest anchor. A piece whose lever passes its window takes a small
+     tip at a corner of its stem's down-facing surface above that clamping
+     section and within `W` under its top, standing at least `W / 2` from what
+     holds the part, since a tip beside an anchor shortens no lever, and
+     within `W` of the farthest point, since a tip farther off cannot bring
+     that point within the window. The corner whose face turns least from
+     straight down goes first, then the one farthest from what holds the part.
+     The face's turn is its slice angle, atan of the two slabs' rise over the
+     corner's distance to the slab two under it, taken to the whole degree,
+     since the slices read a flat face's angle only to float rounding. The
+     corner must be eligible, and the builder's normal there must stand within
+     60 degrees of down, as for an underside head. Where a 45 degree face
+     meets an upright side at a square edge that normal averages to exactly 60
+     degrees, which counts as within. So legs, torso sides and head sides,
+     which stand near upright, stay bare, while a raised spear, a fist, a
+     forearm's underside or a hem takes holds, and a panel hanging from its
+     corner takes them on its keel, not on its drafted sides. A square-edged
+     keel more than 45 degrees from down reads past the cap at its corners,
+     where the builder's normal averages it with the upright side. A branch
+     with no such corner counts once in `islands_slender`, and the pieces
+     growing out of it carry that count, so on a figure standing on a base
+     each leg taller than three thicknesses counts once and the torso over
+     them adds none. A piece with no corner, or still past its window with its
+     new tip, is measured again 1 mm higher, and a piece takes the highest
+     such height of the pieces under it. Rooted parts run the rule as floating
+     ones do. A level member shares its slab pieces with the body it joins, so
+     it reads the body's thickness, and the underside rule's bridge holds it.
+     A plate reads as a rod as thick as the plate.
 
    A tip's neck runs one neck depth, a head width plus a toolpath width, from
    the tip along its axis. It clears when no blocker covers the tip's cell and
@@ -525,8 +558,9 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    same search at one spot, which is how a baked list reads a point's axis
    again. The planner logs
    `scaffold plan: <n> birth, <n> underside, <n> stability, <n> enforced
-   tips` at debug level. On plate 1's figure it runs in about 0.36 s, after
-   `prepare_plan` spends about 0.07 s once per slice.
+   tips` at debug level. On plate 1's figure it runs in about 1.8 s, 1.2 s of
+   it filling the piece thicknesses, after `prepare_plan` spends about 0.08 s
+   once per slice.
 2. The wall skip. The seam clips support inside the xy distance of the model,
    so a head whose neck stood in that band would lose its neck while its ring
    survived. The selection reads the neck's end, one head width plus one
@@ -759,10 +793,19 @@ slicing with the neck checks, which
 
 ## Builder changes
 
-The SLA builder takes eleven additions. Each defaults to the behaviour SLA
+The SLA builder takes twelve additions. Each defaults to the behaviour SLA
 printing had before, except the corrector cap, whose change the SLA suite
-tolerates, and the isolated searches, which run on every path.
+tolerates, and the isolated searches and the face lookup, which run on every
+path.
 
+- Face lookup. `sla::normals` averages, for a point within its `eps` of a
+  mesh vertex or edge, the normals of the faces using that vertex or edge.
+  `IndexedMesh::faces_of_vertex` finds them through the mesh's AABB tree, since
+  every such face holds the vertex on its bounding box, and returns them in
+  ascending order, the order the normals' unstable sort and sum take them in, so
+  the normal reads as a scan of every face would read it. The planner reads that
+  normal at each stability candidate, hundreds of times a slice, and a scan of
+  a 1.67M-facet miniature takes about 4 ms a read.
 - Head axes. `SupportableMesh::head_axes`, parallel to the points and empty
   by default, gives a point the direction its head is aimed along in place of
   the mesh normal, and a zero entry keeps the normal. The filter then
@@ -938,9 +981,11 @@ style except the last. `islands_under_held` counts the islands that print
 with no tip holding them once the build has routed, and `underside_unmet_mm2`
 the underside left hanging past one and a half reaches, with what dropped
 Underside heads answered; both read the plan and the build together.
-`islands_slender` counts the parts the planner left standing slender for want
-of a down-facing point, which reads the placement alone: a Stability head the
-build drops counts only in `tips_dropped`.
+`islands_slender` counts the branches the stability rule left past their
+window with no corner a head can hold, once per branch, which reads the
+placement alone: a Stability head the build drops counts only in
+`tips_dropped`. It is routine on a figure standing on the bed, whose legs
+stand taller than three thicknesses, and no warning reads it.
 
 `PrintObject::_generate_support_material` logs one info line per object when
 miniature contacts are on or the style is Tree Scaffold: `Support contact
@@ -1012,44 +1057,56 @@ stands a pillar past the shelf's edge.
 
 `tests/fff_print/test_scaffold_plan.cpp` holds the `[ScaffoldPlan]` cases,
 which call `prepare_plan` and `plan_tips` on fixtures sliced without support,
-with the object mesh and the config's 10 mm `max_bridge_length`: the
-lattice's area, a rod hanging under a slab taking one birth tip at its lowest
-point, a 1 mm ledge taking no tip and a 1.5 mm one taking heads with no
-unmet area, a fin whose hanging area is under a head's disc taking none
-while a wider ledge takes one, a cantilever taking its heads within two lines
-and a cell of its far or side edges, a ramp between two walls bridging its
-middle 2 mm and taking heads there with `max_bridge_length` 0, a lifted
-9 mm disc born whole taking a ring of heads within two lines and a cell of
-its rim and heads deeper with no bridge hold, a lifted disc whose rim no
-head's neck clears taking heads inside rather than bridging to that rim, a
-narrow ledge whose end leans back taking its heads only where the builder's
-normal stands within 60 degrees of down, a U-shaped ledge with no bridge hold
-whose near arm takes one head while the cells a far arm head covers across
-the gap hang rather than call their own, births carrying their parts taking
-the heavy disc only on sections that fuse it to twice the small disc's area,
-a floating plate covered within one and a half reaches with no bridge hold, a
-10 degree flare taking more tips than a 15 degree one and a 30 degree one
-none, a flare's runs restarting at a solid column however the column is held,
-a blade whose edges rise steeper than the threshold taking tips at three
-heights or more, stability and underside tips taking the small disc, a squat
-floating block taking no stability tip, and the birth rule: at 0.05 mm layers
-a nub within the merge slab's step plus the reach of a held column hangs rooted
-from it while one farther off and a taller one take birth tips, the same nub
-at 0.1 mm layers taking a tip, of two nubs meeting in mid-air one taking the
-birth tip and the other listing it as its holder, a fin within the step of
-the column beside it taking no tip and counting no island, a far nub wide
-enough for a head taking an underside head on its own layer and holding by it
-with no second tip, and a rod over a shelf taking a birth tip whose neck leans
-the least that clears, which `neck_axis` reads again at its spot and which no
-lean a step smaller clears, and with no lean allowed no tip and an unheld
-island, a rod over a shelf 0.3 mm thin whose straight neck ends clear under
-the shelf but crosses it leaning past the shelf's edge, and with no lean
-allowed no tip, a lattice built by hand where a one-cell plate in a neck's
-shaft makes it lean and the lean takes the azimuth whose end stands farthest
-from a wall, and a baked list's tipless nubs read by `read_births`: the near
-nub hanging from the rooted column, the far and the taller ones tipped, the far
-nub held once the list holds its underside head, and of two nubs meeting in
-mid-air one tipped and the other hanging from it.
+with the object mesh and the config's 10 mm `max_bridge_length`: the lattice's
+area, a rod hanging under a slab taking one birth tip at its lowest point, a 1
+mm ledge taking no tip and a 1.5 mm one taking heads with no unmet area, a fin
+whose hanging area is under a head's disc taking none while a wider ledge
+takes one, a cantilever taking its heads within two lines and a cell of its
+far or side edges, a ramp between two walls bridging its middle 2 mm and
+taking heads there with `max_bridge_length` 0, a lifted 9 mm disc born whole
+taking a ring of heads within two lines and a cell of its rim and heads deeper
+with no bridge hold, a lifted disc whose rim no head's neck clears taking
+heads inside rather than bridging to that rim, a narrow ledge whose end leans
+back taking its heads only where the builder's normal stands within 60 degrees
+of down, a U-shaped ledge with no bridge hold whose near arm takes one head
+while the cells a far arm head covers across the gap hang rather than call
+their own, births carrying their parts taking the heavy disc only on sections
+that fuse it to twice the small disc's area, a floating plate covered within
+one and a half reaches with no bridge hold, a 10 degree flare taking more tips
+than a 15 degree one and a 30 degree one none, a flare's runs restarting at a
+solid column however the column is held, the stability rule: a blade whose
+lower edge rises 40 degrees, steeper than the threshold, taking tips at three
+heights or more; stability and underside tips taking the small disc on the
+cantilever, a leaning rod and a hanging panel; a squat floating block taking
+no stability tip beside a post a third as thick as it is tall; a blade
+widening from its point taking tips up its spine within its 4.5 mm window,
+three blade thicknesses, of each other and of the spine's end; a 1 mm rod
+leaning 45 degrees out of a block on the bed taking at least three tips up its
+underside, each at least half a window from the block; a panel hanging from
+its corner taking tips only on its keel, not on its drafted sides; every
+stability tip on a blade whose edge faces 50 degrees from down, on the rod
+and on the panel standing where the builder's normal reads within 60 degrees
+of down; a figure
+standing on a base taking none and counting its two legs slender; a floating
+cone taking none at its apex and counting nothing; and a level spear held by
+underside heads no more than `max_bridge_length` apart, the last covering its
+end. Then the birth rule: at 0.05 mm layers a nub within the merge slab's step
+plus the reach of a held column hangs rooted from it while one farther off and
+a taller one take birth tips, the same nub at 0.1 mm layers taking a tip, of
+two nubs meeting in mid-air one taking the birth tip and the other listing it
+as its holder, a fin within the step of the column beside it taking no tip and
+counting no island, a far nub wide enough for a head taking an underside head
+on its own layer and holding by it with no second tip, and a rod over a shelf
+taking a birth tip whose neck leans the least that clears, which `neck_axis`
+reads again at its spot and which no lean a step smaller clears, and with no
+lean allowed no tip and an unheld island, a rod over a shelf 0.3 mm thin whose
+straight neck ends clear under the shelf but crosses it leaning past the
+shelf's edge, and with no lean allowed no tip, a lattice built by hand where a
+one-cell plate in a neck's shaft makes it lean and the lean takes the azimuth
+whose end stands farthest from a wall, and a baked list's tipless nubs read by
+`read_births`: the near nub hanging from the rooted column, the far and the
+taller ones tipped, the far nub held once the list holds its underside head,
+and of two nubs meeting in mid-air one tipped and the other hanging from it.
 
 Two `[ScaffoldSupport]` cases cover the baked list on the shelf fixture. The
 first bakes an auto slice's routed tips and slices from them with no contact
@@ -1081,19 +1138,23 @@ no floating piece removed, a process time at most 1.5 times the tree-slim
 slice's, `island_joins` within 2 s and a support volume at most 2.5 times the
 tree-slim slice's; the upright pose also requires at most three under-held
 islands, all born at z 15.4 with birth tips the builder cannot route, one of
-them leaning its neck 15.5 degrees. The stored pose places 71 tips and routes
-69, eight of its births leaning their necks 5 to 21 degrees, and the upright
-pose places 218 and routes 193 on every run, since the builder routes in
-order and isolates its searches.
+them leaning its neck 15.5 degrees. The stored pose places 76 tips and routes
+all 76, eight of its births leaning their necks 5 to 21 degrees, and the
+upright pose places 220 and routes 195 on every run, since the builder routes
+in order and isolates its searches.
 
 The hidden case "Need-driven tips hold corpus plate 1's hand and sword with
 few contacts" slices plate 1 and requires of the tips its record holds at most
 10 on the hand over the raised knee, a heavy one at the sword's point, two
-under z 7.5 on the blade, no stretch of blade under z 15 longer than 7 mm
-without one, and at most 200 in all, and of its islands at most four
-under-held, each named among the record's bare islands. Plate 1's record
-holds 86 tips, 7 on the hand, 4 under z 7.5 and a largest gap of 6.84 mm,
-and four bare islands: two born at z 35.2 whose birth tips the builder cannot
-route, and two born at z 40.4 and 42.7 whose necks lean off a wall, one
-unrouted and one cut by the neck check. The three unrouted heads hold
-islands, so the builder ran its routing retries on each before dropping it.
+under z 7.5 on the blade, no stretch of blade under z 15 longer than 9 mm
+without one, and at most 117 in all, the resin reference's count for the
+figure, and of its islands at most four under-held, each named among the
+record's bare islands. Plate 1's record holds 86 tips, 7 on the hand, and on
+the blade tips at z 1.04 (the heavy birth tip), 1.16, 3.56 and 12.32: the
+widening edge takes a stability tip at 3.56, and above it the blade rises
+nearly upright to the guard with no corner the stability rule may hold until
+12.32, a gap of 8.76 mm. It has four bare islands: two born at z 35.2 whose
+birth tips the builder cannot route, and two born at z 40.4 and 42.7 whose
+necks lean off a wall, one unrouted and one cut by the neck check. The three
+unrouted heads hold islands, so the builder ran its routing retries on each
+before dropping it.

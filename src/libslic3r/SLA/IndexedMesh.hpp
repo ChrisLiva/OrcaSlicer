@@ -137,6 +137,9 @@ public:
 
     Vec3d normal_by_face_id(int face_id) const;
 
+    // The faces using vertex `vertex_id`, in ascending order.
+    std::vector<size_t> faces_of_vertex(int vertex_id) const;
+
     const indexed_triangle_set * get_triangle_mesh() const { return m_tm; }
 };
 

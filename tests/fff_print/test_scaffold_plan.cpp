@@ -405,18 +405,65 @@ TEST_CASE("A flare's runs restart at a solid column however its column is held",
 }
 
 namespace {
-// A 1.5 mm thick blade whose lower edge rises at 60 degrees from its point at z 2, steeper than the threshold, so it
-// has no underside above its point: 9.24 mm across in x, it stands 16 mm free before a block at x 7..12, z 18..21 on a
-// rooted column at x 12..15 takes it in.
-TriangleMesh standing_blade()
+// A 1.5 mm thick blade whose lower edge rises at `edge_deg` from its point at z 2, steeper than the threshold, so it
+// has no underside above its point: 16 / tan(edge_deg) across in x, 19.07 mm at 40 degrees, it stands 16 mm free
+// before a block from 2 mm short of its whole-mm run, x 17..22 at 40 degrees, z 18..21, on a rooted column past the
+// block takes it in. Its edge faces `edge_deg` from down, and where it meets an upright side at a square corner the
+// builder's normal reads the two faces averaged: 57 degrees from down at 40, within the face cap, and 63 at 50, past it.
+TriangleMesh standing_blade(double edge_deg = 40.)
 {
-    const double       run = 16. / std::tan(Geometry::deg2rad(60.));
+    const double       run = 16. / std::tan(Geometry::deg2rad(edge_deg)), block = std::floor(run) - 2.;
     std::vector<Vec3d> blade;
     for (double y : { 0., 1.5 })
         for (const Vec3d &p : { Vec3d(0., y, 2.), Vec3d(run, y, 18.), Vec3d(0., y, 5.), Vec3d(run, y, 21.) })
             blade.push_back(p);
-    return merged({ hull(blade), box(7, -1, 18, 5, 3.5, 3), box(12, -1, 0, 3, 3.5, 21) });
+    return merged({ hull(blade), box(block, -1, 18, 5, 3.5, 3), box(block + 5., -1, 0, 3, 3.5, 21) });
 }
+
+// A 1 x 1 mm rod rising 45 degrees out of the top of a 6 x 6 x 8 block standing on the bed: the hull of the square at
+// x 2.5..3.5, y 2.5..3.5, z 8..9 and the same square moved 10 mm along x and 10 mm up.
+TriangleMesh leaning_rod()
+{
+    std::vector<Vec3d> rod;
+    for (double along : { 0., 10. })
+        for (double x : { 2.5, 3.5 })
+            for (double y : { 2.5, 3.5 })
+                for (double z : { 8., 9. })
+                    rod.emplace_back(x + along, y, z + along);
+    return merged({ box(0, 0, 0, 6, 6, 8), hull(rod) });
+}
+
+// A panel hanging from its lowest corner at (0, 0..1, 2) beside a 5 x 5 post that roots the object: its lower edge,
+// the keel, rises 40 degrees to x 8, and the panel stands to z 12, 1 mm thick at the keel and drafted 3 degrees
+// outward on both sides.
+const double keel_deg = 40.;
+TriangleMesh hanging_panel()
+{
+    const double       rise = std::tan(Geometry::deg2rad(keel_deg)), draft = std::tan(Geometry::deg2rad(3.));
+    std::vector<Vec3d> panel;
+    for (const Vec2d &xz : { Vec2d(0., 2.), Vec2d(8., 2. + 8. * rise), Vec2d(8., 12.), Vec2d(0.3, 12.) }) {
+        const double out = draft * (xz.y() - 2.);
+        panel.emplace_back(xz.x(), -out, xz.y());
+        panel.emplace_back(xz.x(), 1. + out, xz.y());
+    }
+    return merged({ hull(panel), box(-9, 0, 0, 5, 5, 13) });
+}
+
+// The Stability tips of `plan` in the fixture frame, lowest first.
+std::vector<Vec3d> stability_tips(const Sliced &s, const Plan &plan)
+{
+    std::vector<Vec3d> tips;
+    for (const PlannedTip &tip : plan.tips)
+        if (tip.need == TipNeed::Stability) {
+            const Vec2d xy = s.at(tip);
+            tips.emplace_back(xy.x(), xy.y(), tip.site.print_z);
+        }
+    std::sort(tips.begin(), tips.end(), [](const Vec3d &a, const Vec3d &b) { return a.z() < b.z(); });
+    return tips;
+}
+
+// A stem's stability window: three times its thickness, and never under 3 mm.
+double window_of(double thickness_mm) { return std::max(3., 3. * thickness_mm); }
 } // namespace
 
 TEST_CASE("A blade standing free takes tips up its height", "[ScaffoldPlan]")
@@ -428,7 +475,7 @@ TEST_CASE("A blade standing free takes tips up its height", "[ScaffoldPlan]")
     bool           point = false;
     for (const PlannedTip &tip : plan.tips) {
         const Vec2d xy = s.at(tip);
-        if (xy.x() > 10.5 || tip.site.print_z > 18.)
+        if (xy.x() > 16.9 || tip.site.print_z > 17.9)
             continue;
         heights.insert(std::lround(tip.site.print_z));
         low   = std::min(low, tip.site.print_z);
@@ -444,8 +491,8 @@ TEST_CASE("A blade standing free takes tips up its height", "[ScaffoldPlan]")
 TEST_CASE("Stability and Underside tips take the small disc", "[ScaffoldPlan]")
 {
     // A stability tip steadies a part that already stands on its birth, and an underside tip holds a line or two, so
-    // each takes the small disc, two lines across: on the cantilever's ledge and up the standing blade.
-    for (const TriangleMesh &fixture : { cantilever(), standing_blade() }) {
+    // each takes the small disc, two lines across: on the cantilever's ledge, up the leaning rod and on the panel's keel.
+    for (const TriangleMesh &fixture : { cantilever(), leaning_rod(), hanging_panel() }) {
         Sliced     s(fixture);
         const Plan plan  = s.plan();
         size_t     small = 0;
@@ -460,7 +507,9 @@ TEST_CASE("Stability and Underside tips take the small disc", "[ScaffoldPlan]")
 
 TEST_CASE("A squat floating block takes no stability tip", "[ScaffoldPlan]")
 {
-    Sliced s(merged({ box(0, 0, 3, 8, 8, 4), box(-5, 0, 0, 2, 2, 8) }));
+    // The post that roots the object stands 8 mm, within its window of three times its 3 mm: a thinner post would count
+    // as slender itself.
+    Sliced s(merged({ box(0, 0, 3, 8, 8, 4), box(-5, 0, 0, 3, 3, 8) }));
     const Plan plan = s.plan();
     CHECK(std::none_of(plan.tips.begin(), plan.tips.end(), [](const PlannedTip &t) { return t.need == TipNeed::Stability; }));
     CHECK(plan.islands_slender == 0);
@@ -471,18 +520,21 @@ TEST_CASE("A blade widening from its point takes stability tips along its spine"
     // A 1.5 mm thick blade hangs from its point at z 1: its front edge stands at x 0 and its spine runs out to x -10 at
     // z 8, rising 35 degrees, steeper than the threshold, so the spine has no underside. It stands 10 mm free before a
     // crossbar at z 11..13 on a rooted column takes it in. The blade reaches out from its point faster than it climbs,
-    // so its tips follow the spine, each within the stability window of the last.
+    // so its tips follow the spine, each within the stability window of the last: 4.5 mm, three blade thicknesses.
     std::vector<Vec3d> blade;
     for (double y : { 0., 1.5 })
         for (const Vec3d &p : { Vec3d(0., y, 1.), Vec3d(-10., y, 8.), Vec3d(-10., y, 11.), Vec3d(0., y, 11.) })
             blade.push_back(p);
     Sliced s(merged({ hull(blade), box(-11, -1, 11, 13, 3.5, 2), box(2, -1, 0, 3, 3.5, 13) }));
-    const double       window = std::max(3., NeedParams().slender_ratio * 1.5);
+    const double       window = window_of(1.5);
     const Plan         plan   = s.plan();
     std::vector<Vec3d> tips;
     for (const PlannedTip &tip : plan.tips)
-        if (const Vec2d xy = s.at(tip); xy.x() < 0.5 && tip.site.print_z < 8.5)
+        if (const Vec2d xy = s.at(tip); xy.x() < 0.5 && tip.site.print_z < 8.5) {
             tips.emplace_back(xy.x(), xy.y(), tip.site.print_z);
+            if (tip.need == TipNeed::Stability)
+                CHECK_THAT(tip.site.grade_mm, Catch::Matchers::WithinAbs(2. * width_mm, 1e-9));
+        }
     std::sort(tips.begin(), tips.end(), [](const Vec3d &a, const Vec3d &b) { return a.z() < b.z(); });
     double apart = 0., end = std::numeric_limits<double>::max();
     for (size_t i = 0; i < tips.size(); ++ i) {
@@ -497,6 +549,127 @@ TEST_CASE("A blade widening from its point takes stability tips along its spine"
     // A layer and a corner's offset along the face over the window.
     CHECK(apart <= window + 0.5);
     CHECK(end <= window + 0.5);
+}
+
+TEST_CASE("A rod leaning out of a block on the bed takes stability tips along its underside", "[ScaffoldPlan]")
+{
+    // The rod grows out of a block the bed roots, and its underside faces 45 degrees from down, steeper than the
+    // threshold, so no underside tip holds it. It is 1 mm thick and may reach 3 mm from what holds it: the block it
+    // grows out of, six times as thick, and its own tips. So it takes stability tips up its underside, each at least
+    // half that window from the block and within a window of the next, the last within a window of its end.
+    Sliced                   s(leaning_rod());
+    const Plan               plan = s.plan();
+    const std::vector<Vec3d> tips = stability_tips(s, plan);
+    const double             window = window_of(1.);
+    const Vec3d              end(13., 3., 18.5);
+    INFO(tips.size() << " stability tips, slender " << plan.islands_slender);
+    REQUIRE(tips.size() >= 3);
+    // Its keel corners read exactly the face cap, a 45 degree face averaged with an upright one, and count as within
+    // it: the rod is held from its first window over the block on, and no stretch of it is left slender.
+    CHECK(plan.islands_slender == 0);
+    double nearest_end = std::numeric_limits<double>::max();
+    for (size_t i = 0; i < tips.size(); ++ i) {
+        const Vec3d  &tip        = tips[i];
+        const double  from_block = (tip - tip.cwiseMax(Vec3d::Zero()).cwiseMin(Vec3d(6., 6., 8.))).norm();
+        INFO("tip " << i << " at (" << tip.x() << ", " << tip.y() << ", " << tip.z() << "), " << from_block << " mm from the block");
+        CHECK(from_block >= 0.5 * window);
+        if (i == 0)
+            CHECK(from_block <= window + 0.5);
+        else
+            CHECK((tip - tips[i - 1]).norm() <= window + 0.5);
+        nearest_end = std::min(nearest_end, (tip - end).norm());
+    }
+    CHECK(nearest_end <= window + 0.5);
+}
+
+TEST_CASE("A panel hanging from its corner takes stability tips on its keel", "[ScaffoldPlan]")
+{
+    // The keel faces 40 degrees from down and the drafted sides 87: a head on a side would meet a wall, so the panel's
+    // holds stand on its keel, within 0.2 mm in x and z of the line it rises along from its corner.
+    Sliced                   s(hanging_panel());
+    const std::vector<Vec3d> tips = stability_tips(s, s.plan());
+    REQUIRE_FALSE(tips.empty());
+    const double rise = std::tan(Geometry::deg2rad(keel_deg));
+    for (const Vec3d &tip : tips) {
+        const double off = std::abs(tip.z() - 2. - tip.x() * rise) * std::cos(Geometry::deg2rad(keel_deg));
+        INFO("tip at (" << tip.x() << ", " << tip.y() << ", " << tip.z() << "), " << off << " mm off the keel");
+        CHECK(off <= 0.2);
+    }
+}
+
+TEST_CASE("A stability tip stands only where the builder aims its head within 60 degrees of down", "[ScaffoldPlan]")
+{
+    // The builder aims a head along the mesh normal it reads at the tip, the faces within a head's radius averaged. A
+    // blade whose edge faces 50 degrees from down reads 63 degrees at its square corners, past the face cap, so it
+    // takes stability tips only where its edge face stands alone within that radius. The leaning rod reads the cap
+    // exactly at its corners and the panel about 55 degrees on its keel. The cap holds its own angle to rounding.
+    const std::pair<const char *, TriangleMesh> fixtures[] = { { "blade at 50 degrees", standing_blade(50.) },
+                                                               { "leaning rod", leaning_rod() },
+                                                               { "hanging panel", hanging_panel() } };
+    for (const auto &[name, fixture] : fixtures) {
+        Sliced     s(fixture);
+        const Plan plan = s.plan();
+        size_t     held = 0;
+        INFO(name);
+        for (const PlannedTip &tip : plan.tips)
+            if (tip.need == TipNeed::Stability) {
+                ++ held;
+                INFO("tip at z " << tip.site.print_z);
+                CHECK(s.from_down_deg(tip) <= 60.01);
+            }
+        CHECK(held > 0);
+    }
+}
+
+TEST_CASE("A figure standing on a base takes no stability tip", "[ScaffoldPlan]")
+{
+    // A 16 x 16 x 2 base carries two 2 x 2 legs to z 10.5, a 7 x 4 x 10 torso from z 10 and a 4 x 4 x 3 head on it.
+    // Near-vertical legs, torso and head offer no face a head can hold within 60 degrees of down, so they stay bare.
+    // Each leg reaches past its window, three times its 2 mm, over the base it grows out of about 6 mm up, and counts
+    // as slender once; the torso and head above them carry the legs' count on.
+    Sliced     s(merged({ box(-8, -8, 0, 16, 16, 2), box(-3, -1, 2, 2, 2, 8.5), box(1, -1, 2, 2, 2, 8.5), box(-3.5, -2, 10, 7, 4, 10),
+                          box(-2, -2, 20, 4, 4, 3) }));
+    const Plan plan = s.plan();
+    const std::vector<Vec3d> tips = stability_tips(s, plan);
+    INFO(tips.size() << " stability tips, the first at z " << (tips.empty() ? 0. : tips.front().z()));
+    CHECK(tips.empty());
+    CHECK(plan.islands_slender == 2);
+}
+
+TEST_CASE("A floating cone takes no stability tip at its apex", "[ScaffoldPlan]")
+{
+    // A cone of radius 4 stands 8 mm on its flat base at z 3 beside a 5 x 5 post that roots the object. Its tip
+    // narrows to nothing, but it grows out of the cone's own wider sections below it, which hold it within its window.
+    TriangleMesh cone = make_cone(4., 8.);
+    cone.translate(0.f, 0.f, 3.f);
+    Sliced     s(merged({ cone, box(-11, -2.5, 0, 5, 5, 12) }));
+    const Plan plan = s.plan();
+    CHECK(stability_tips(s, plan).empty());
+    CHECK(plan.islands_slender == 0);
+}
+
+TEST_CASE("A level spear takes a tip at least every bridge length", "[ScaffoldPlan]")
+{
+    // A spear 1.1 mm across runs level 15 mm out of the +x face of a 3 x 3 x 10 column standing on the bed, its axis at
+    // z 8. Held level, it shares each slab piece with the column, so it reads the column's thickness; what holds it is
+    // the underside rule's bridge: a head at least every `max_bridge_length`, 10 mm, from the column out, and one whose
+    // cover, the reach plus the 0.26 mm step plus a toolpath width, and half a cell for where the lattice samples it,
+    // takes in its end.
+    TriangleMesh spear = make_cylinder(0.55, 15.);
+    spear.rotate_y(float(M_PI / 2.));
+    spear.translate(3.f, 1.5f, 8.f);
+    Sliced     s(merged({ box(0, 0, 0, 3, 3, 10), spear }));
+    const Plan plan = s.plan();
+    std::vector<double> held { 3. };
+    for (const PlannedTip &tip : plan.tips)
+        if (const Vec2d xy = s.at(tip); xy.x() > 3. && std::abs(xy.y() - 1.5) < 0.6 && tip.site.print_z > 7.3 && tip.site.print_z < 8.1)
+            held.push_back(xy.x());
+    std::sort(held.begin(), held.end());
+    INFO(held.size() - 1 << " tips under the spear, the last at x " << held.back());
+    REQUIRE(held.size() > 1);
+    for (size_t i = 1; i < held.size(); ++ i)
+        CHECK(held[i] - held[i - 1] <= s.input.bridge_mm);
+    CHECK(held.back() >= 18. - (3. * width_mm + 0.26 + 0.5 * s.input.cell_mm));
 }
 
 namespace {

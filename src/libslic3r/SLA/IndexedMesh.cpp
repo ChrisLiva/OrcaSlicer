@@ -4,6 +4,7 @@
 #include <libslic3r/AABBTreeIndirect.hpp>
 #include <libslic3r/TriangleMesh.hpp>
 
+#include <algorithm>
 #include <numeric>
 
 #ifdef SLIC3R_HOLE_RAYCASTER
@@ -49,6 +50,12 @@ public:
     {
         AABBTreeIndirect::intersect_ray_all_hits(its.vertices, its.indices,
                                                  m_tree, s, dir, hits, m_triangle_ray_epsilon);
+    }
+
+    // The faces whose bounding box holds `point`.
+    void faces_boxing(const Vec3f &point, std::vector<size_t> &faces) const
+    {
+        AABBTreeIndirect::get_candidate_idxs(m_tree, point, faces);
     }
 
     double squared_distance(const indexed_triangle_set & its,
@@ -315,6 +322,19 @@ double IndexedMesh::squared_distance(const Vec3d &p, int& i, Vec3d& c) const {
 }
 
 
+std::vector<size_t> IndexedMesh::faces_of_vertex(int vertex_id) const
+{
+    // Every face using the vertex holds it on its bounding box.
+    std::vector<size_t> faces;
+    m_aabb->faces_boxing(vertices(size_t(vertex_id)), faces);
+    faces.erase(std::remove_if(faces.begin(), faces.end(), [&](size_t n) {
+        const Vec3i32 &face = indices(n);
+        return face(X) != vertex_id && face(Y) != vertex_id && face(Z) != vertex_id;
+    }), faces.end());
+    std::sort(faces.begin(), faces.end());
+    return faces;
+}
+
 static bool point_on_edge(const Vec3d& p, const Vec3d& e1, const Vec3d& e2,
                           double eps = 0.05)
 {
@@ -389,22 +409,19 @@ PointSet normals(const PointSet& points,
                 ib = trindex(2);
             }
 
-            // vector for the neigboring triangles including the detected one.
+            // vector for the neigboring triangles including the detected one,
+            // in ascending order: the sort below is not stable, so the order
+            // it takes them in decides how ties sum.
             std::vector<size_t> neigh;
             if (ic >= 0) { // The point is right on a vertex of the triangle
-                for (size_t n = 0; n < mesh.indices().size(); ++n) {
-                    thr();
-                    Vec3i32 ni = mesh.indices(n);
-                    if ((ni(X) == ic || ni(Y) == ic || ni(Z) == ic))
-                        neigh.emplace_back(n);
-                }
+                thr();
+                neigh = mesh.faces_of_vertex(ic);
             } else if (ia >= 0 && ib >= 0) { // the point is on and edge
                 // now get all the neigboring triangles
-                for (size_t n = 0; n < mesh.indices().size(); ++n) {
-                    thr();
+                thr();
+                for (size_t n : mesh.faces_of_vertex(ia)) {
                     Vec3i32 ni = mesh.indices(n);
-                    if ((ni(X) == ia || ni(Y) == ia || ni(Z) == ia) &&
-                        (ni(X) == ib || ni(Y) == ib || ni(Z) == ib))
+                    if (ni(X) == ib || ni(Y) == ib || ni(Z) == ib)
                         neigh.emplace_back(n);
                 }
             }
