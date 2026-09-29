@@ -130,12 +130,12 @@ runs alone, 30 of 30 runs five at a time and the full gate re-run (2026-09-10, n
 once before reading a lone failure there as a regression.
 The hidden `[ScaffoldSupport][.]` case "Scaffold support over corpus plate 3 in two poses" reads one result on every
 run of one binary: `tree_config` sets `route_in_order`, so the SLA builder routes the heads in the points' order, and
-`SupportTreeBuildsteps` runs each head search and each route under `tbb::this_task_arena::isolate`. Three runs of one
-Release binary each read stored `tips placed 76 / routed 76 / dropped 0`, 726.552 mm3, and upright
-`tips placed 220 / routed 195 / dropped 25`, 3 islands under-held, 1104.32 mm3, with `floating_pieces_removed` 0 in both
-poses (2026-09-28). Once stability tips lean their necks, two runs read stored 721.307 mm3 with the same counts and
-upright unchanged (2026-09-28). On an unchanged corpus hash a non-zero `floating_pieces_removed` or a changed placed,
-routed or dropped count is a regression; only the process times vary between runs.
+`SupportTreeBuildsteps` runs each head search and each route under `tbb::this_task_arena::isolate`. Every run reads
+stored `tips placed 76 / routed 76 / dropped 0`, 721.307 mm3, and upright `tips placed 220 / routed 195 / dropped 25`,
+3 islands under-held, 1104.32 mm3, with `floating_pieces_removed` 0 in both poses (four runs over three Release builds
+of the same placement code, 2026-09-28 and 2026-09-29). On an unchanged corpus hash a non-zero
+`floating_pieces_removed` or a changed placed, routed or dropped count is a regression; only the process times vary
+between runs.
 The corpus `elf_test.3mf` carries no painted enforcers since its intentional rewrite at 14:02 on 2026-09-25 (sha256
 `201c5418…`). The hidden case pins that hash in its manifest but never checks it, so a corpus rewrite reads as a code
 regression. Hash the corpus with `shasum -a 256` before reading a hidden-case failure (2026-09-26).
