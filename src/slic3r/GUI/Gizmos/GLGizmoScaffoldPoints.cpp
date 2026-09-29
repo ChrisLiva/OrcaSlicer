@@ -453,8 +453,6 @@ void GLGizmoScaffoldPoints::on_dragging(const UpdateData &data)
     if (!unproject_on_mesh(data.mouse_pos.cast<double>(), pos, normal, world_normal) || faces_up(world_normal)) return;
     m_editing_cache[m_hover_id].point.pos = pos;
     m_editing_cache[m_hover_id].normal    = normal;
-    // A converted point's axis is the artist's lean at the old site; at the new one the head follows the mesh.
-    m_editing_cache[m_hover_id].point.axis = Vec3f::Zero();
     // The last slice placed the point elsewhere.
     m_editing_cache[m_hover_id].result.reset();
 }
@@ -467,6 +465,8 @@ void GLGizmoScaffoldPoints::on_stop_dragging()
         m_editing_cache[m_hover_id] = *m_point_before_drag;
         Plater::TakeSnapshot snapshot(wxGetApp().plater(), "Move scaffold point");
         m_editing_cache[m_hover_id] = moved;
+        // A converted point's axis is the artist's lean at the old site; at the new one the head follows the mesh.
+        m_editing_cache[m_hover_id].point.axis = Vec3f::Zero();
     }
     m_point_before_drag.reset();
 }
