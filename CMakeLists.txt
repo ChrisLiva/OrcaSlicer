@@ -401,6 +401,13 @@ if (${CMAKE_CXX_COMPILER_ID} STREQUAL "AppleClang" AND ${CMAKE_CXX_COMPILER_VERS
     add_compile_definitions(BOOST_NO_CXX98_FUNCTION_BASE _HAS_AUTO_PTR_ETC=0)
 endif()
 
+# Modules/Compiler/Clang.cmake gives -fpch-instantiate-templates to LLVM clang but not to AppleClang, so each source
+# using a precompiled header re-instantiated that header's templates, about 1.2 s per object. Set at directory scope:
+# target_precompile_headers reads it in the scope of the target's directory.
+if (CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 13)   # LLVM 11 or later
+    set(CMAKE_CXX_COMPILE_OPTIONS_INSTANTIATE_TEMPLATES_PCH -fpch-instantiate-templates)
+endif ()
+
 if (MINGW)
     add_compile_options(-Wa,-mbig-obj)
 endif ()
