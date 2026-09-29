@@ -2548,8 +2548,9 @@ TEST_CASE("Need-driven tips hold corpus plate 1's hand and sword with few contac
 
     // Three islands print with no tip holding them, and the record names each: two born at z 35.2 whose birth tips drop
     // their necks straight and do not route, and one born at z 40.4 beside a wall, where no neck leaning up to 45 degrees
-    // both clears the band and fits the builder's full head. The island born at z 42.7 beside it leans its birth tip's
-    // neck 41.4 degrees, where the head fits, and routes.
+    // both clears the band and fits the builder's full head, so its birth tip takes the least lean its neck alone clears,
+    // 20.7 degrees, and does not route either. The island born at z 42.7 beside it leans its birth tip's neck 41.4
+    // degrees, where the head fits, and routes.
     CHECK(report.islands_under_held <= 3);
     CHECK(record->bare_islands.size() == report.islands_under_held);
 

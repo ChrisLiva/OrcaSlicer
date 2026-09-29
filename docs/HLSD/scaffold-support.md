@@ -195,8 +195,9 @@ model and in the 3MF file, stores no head axis, so `baked_tips` builds the plan
 input `place_tips` builds, with no blocker, on the object mesh it builds and
 hands to `draw`, and gives each point that is not enforced the axis the
 planner's neck search reads at that spot, `neck_axis`, fitting the head at the
-pin of the point's size: a birth or stability tip Generate copied leans its
-neck as the auto slice leaned it. The input reads no blocker because
+pin of the point's size, and reading a point on a birth piece as a birth tip:
+a birth or stability tip Generate copied leans its neck as the auto slice
+leaned it. The input reads no blocker because
 `Necks::clear` refuses every axis at a blocked cell: a point under a blocker
 drawn after the list was written would lose its lean, and the wall skip would
 take out a point whose neck clears only leaning. It then runs steps 2 to 4 of
@@ -414,7 +415,9 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
        farther than to any underside the planner leaves bare, and it prints one
        sagged layer. Any other nub takes its birth tip then, which holds its
        part for the nubs after it, so of two nubs meeting each other in
-       mid-air the first takes a tip and the second hangs from it.
+       mid-air the first takes a tip and the second hangs from it. A birth
+       tip whose full head does not fit, which the neck search below
+       describes, holds no part, so a nub meeting its part takes its own tip.
      - Any other island takes one birth tip where a neck clears, at the
        deepest point of its birth piece (`inscribed_point`) or at the cell of
        the piece nearest it whose neck clears, straight down or leaning as the
@@ -428,14 +431,15 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
      model within one toolpath width over the tip, the depth the pin reaches,
      fills at least twice as many lattice cells of the heavy disc as of the
      small one, and the small disc otherwise: on a thin section the heavy disc
-     adds scar and no hold. An island left without a tip anchors what grows on
-     it. The plan lists every island in `Plan::islands` with its birth point,
+     adds scar and no hold. An island left without a tip, or held only by a
+     birth tip whose full head does not fit, anchors what grows on it. The
+     plan lists every island in `Plan::islands` with its birth point,
      the deepest point of its birth piece at the piece's bottom, and how it is
      held: `Tip`, by its own birth tip, the enforced tip on its birth piece or,
      for a nub, the underside head its own layer placed; `Hung`, from the
-     parts it met, with every tip on the held parts within its hang, whatever
-     need placed it, as its holders and `rooted` set when the bed held one of
-     them; `NoNeck`, the under-held ones; or `Debris`.
+     parts it met, with every tip anchoring the held parts within its hang,
+     whatever need placed it, as its holders and `rooted` set when the bed
+     held one of them; `NoNeck`, the under-held ones; or `Debris`.
    - Underside. Each cell carries a run, how far it hangs past what anchors
      it: 0 under a head, and otherwise the least, through the layer's
      material, of a neighbour's run plus the step between them, where a cell
@@ -595,16 +599,21 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    the 0.22 mm head, whose rings the neck check cuts where they float, and a
    tip the builder drops still anchors its part in the plan. A lean whose head
    meets the model is refused, so a candidate whose every lean fails falls
-   through to the next. Eight rays can pass a post narrower than the gap
-   between two of them standing inside the head's cone, and the builder passes
-   it too. The filter also refuses a full head whose back reaches under the
-   pad's top, which the planner leaves to the builder: a tip that low stands
-   on a post or a thin head by the pad. A straight neck takes no head test,
-   since the builder aims a head with no axis along the mesh normal, not along
-   the neck. An underside tip stands only where its neck clears straight down. A
-   stability tip leans only where no candidate both clears straight down and
-   holds its head within the face cap, and then takes the least lean that
-   clears with its head fitting at its corner, `Necks::leaning`.
+   through to the next, and only a birth that no candidate holds with its
+   head fitting falls back to a lean whose head meets the model. Eight rays
+   can pass a post narrower than the gap between two of them standing inside
+   the head's cone, and the builder passes it too. The filter also refuses a
+   full head whose back reaches under the pad's top, which the planner leaves
+   to the builder: a tip that low stands on a post or a thin head by the pad.
+   A straight neck takes no head test, since the builder aims a head with no
+   axis along the mesh normal, not along the neck. An underside tip stands
+   only where its neck clears straight down. A stability tip leans only where
+   no candidate both clears straight down and holds its head within the face
+   cap, and then takes the least lean that clears with its head fitting at its
+   corner, `Necks::leaning`. A corner whose neck clears only along leans the
+   head does not fit takes no tip: a stability tip holds its part only as an
+   anchor, and one the builder cannot route would still displace the holds
+   the plan places after it.
    A birth's neck search, `Necks::search`, tries the deepest point and
    then the piece's cells nearest it first, straight down. Failing that it
    leans the neck in steps of asin(cell / neck depth), 5.2 degrees at a
@@ -613,7 +622,17 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    head at: at the least lean at which any candidate's neck clears with its
    head fitting, it takes the first such candidate and, among the azimuths one
    cell apart at the end whose neck clears and whose head fits, the one whose
-   end stands farthest from the model's material on the end's slab. The head
+   end stands farthest from the model's material on the end's slab. Where no
+   candidate leans with its head fitting, the birth takes, by the same order,
+   the least lean at which a candidate's neck alone clears. The builder then
+   searches its own pose off the axis, and retries a head holding an island
+   along other axes before it drops it, and an island whose birth tip does not
+   route is counted and named under-held as one no neck clears is. The plan
+   counts on that tip for its own island only, `place_unanchored`: the tip
+   anchors no part and no cell and takes no pending underside, so the walk
+   reads the island as it reads one no neck clears, a nub meeting its part
+   takes its own tip, and a tip the builder cannot route leaves every other
+   hold where the plan would place it with no tip there. The head
    fits at the pin the tip's grade gives it, so a birth reads its candidate's
    `birth_grade` and a stability tip the small disc's.
    A birth or stability tip carries its lean as `TipSite::axis`, which the
@@ -621,7 +640,10 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    other tip carries a zero axis and keeps the builder's normal: a head on a
    side-on face already tilts to the cap along that normal and routes there.
    `neck_axis` runs the same search at one spot, which is how a baked list
-   reads a point's axis again. The planner logs
+   reads a point's axis again. It reads a point on a birth piece off the bed,
+   which holds its island as a birth tip does, by the birth's fallback, so a
+   birth tip Generate copied keeps its lean and the wall skip reads its band
+   along it. The planner logs
    `scaffold plan: <n> birth, <n> underside, <n> stability, <n> enforced
    tips` at debug level. On plate 1's figure it runs in about 1.8 s, 1.2 s of
    it filling the piece thicknesses, after `prepare_plan` spends about 0.08 s
@@ -674,7 +696,8 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    slab's `a` plus `R` of a part the bed or a point of the list holds. Any
    other nub, like any other birth, needs the tip the rule would stand under
    it, and a nub the rule tips holds its part for the nubs meeting it after
-   it, as the planner's tip would. A nub its merge holds keeps no holders, so
+   it, as the planner's tip would, unless that tip's full head does not
+   fit. A nub its merge holds keeps no holders, so
    the draw never counts it under-held, even where every point holding its
    merge fails to route, while an auto slice counts such a nub once the tips
    on its own part or on the parts it hangs from all fail. An island that
@@ -861,8 +884,8 @@ result, and one with several reads `holders unrouted`. A planned slice with
 islands logs
 `scaffold islands: <t> tipped, <h> hung, <u> unheld (<n> no neck, <m> not
 routed)` at info level, debris left out. The planner does not re-plan:
-corpus plate 1 reads one island unheld at plan time, where no neck clears with
-its head fitting, and two whose birth tips the builder cannot route.
+corpus plate 1 reads no island unheld at plan time and three whose birth tips
+the builder cannot route, one of them leaning where no lean fits the head.
 
 The returned `Output` carries one `LayerAreas` per planned layer (base,
 interface and exempt heads), the number of
@@ -1207,16 +1230,26 @@ taking a tip, of two nubs meeting in mid-air one taking the birth tip and the
 other listing it as its holder, a fin within the step of the column beside it
 taking no tip and counting no island, a far nub wide enough for a head taking
 an underside head on its own layer and holding by it with no second tip, and a
-rod over a shelf taking a birth tip whose neck leans the least that clears,
-which `neck_axis` reads again at its spot and which no lean a step smaller
-clears, and with no lean allowed no tip and an unheld island, a rod over a
+rod over a shelf taking a birth tip whose neck leans the least that clears
+with the full head fitting, which `neck_axis` reads again at its spot, while a
+step smaller the neck clears there only along leans whose head meets the
+shelf, and with no lean allowed no tip and an unheld island, a rod over a
 shelf 0.3 mm thin whose straight neck ends clear under the shelf but crosses
 it leaning past the shelf's edge, and with no lean allowed no tip, a bar over
 that shelf whose neck read alone leans from the middle of its edge over a wall
 on the bed that the neck's end clears and the builder's full head meets, and
 with the head fitted leans at the same angle from the nearest spot along the
 edge where the pinhead test reads the head clear, one cell nearer the middle
-still meeting the wall, on a raft as without one, a lattice built by hand
+still meeting the wall, on a raft as without one, the same bar beside a wall
+along its whole length, where every lean its neck clears meets the full head,
+taking its birth tip at the spot and lean the neck alone reads, which
+`neck_axis` and `read_births` read again, while with an enforced tip holding
+its island the stability tip the neck alone stands at the bar's far corner is
+refused, a nub beside that bar and two nubs meeting each other along its
+edge each taking its own birth tip, since a birth tip whose head does not fit
+holds no island but its own, which `read_births` reads alike, the bar held
+from below by a strip reading no lean at that spot through `neck_axis`, since
+only a birth falls back to the neck alone, a lattice built by hand
 where a one-cell plate in a neck's shaft makes it lean and the lean takes the
 azimuth whose end stands farthest from a wall, the same lattice read against a
 mesh block that the heads at its two farthest-standing azimuths meet, where
@@ -1269,7 +1302,7 @@ reference's count for the figure; of the tips the builder routes, a heavy one
 at the sword's point, two under z 7.5 on the blade and no stretch of blade
 under z 15 longer than 7 mm without one, the blade's stability window of three
 2.25 mm thicknesses rounded up; and of its islands at most three under-held,
-each named among the record's bare islands. Plate 1's record holds 94 tips, 7
+each named among the record's bare islands. Plate 1's record holds 95 tips, 7
 on the hand, and on the blade routed tips at z 1.04 (the heavy birth tip),
 1.16, 3.56, 8.24, 12.32 and 12.44: the widening edge takes a stability tip at
 3.56, and above it the blade rises nearly upright to the guard, where the tip
@@ -1278,9 +1311,11 @@ and 41 degrees off the blade, a largest gap of 4.68 mm. Of the record's 22
 stability tips 11 lean, and 9 of those route. It has three bare islands: two
 born at z 35.2 whose birth tips the builder cannot route, and one born at z
 40.4 beside a wall, where no lean up to 45 degrees both clears the band and
-fits the full head. The island born at z 42.7 beside it leans its birth tip 41
-degrees and routes. The record holds four unrouted heads: the two unrouted
-births and the leaning stability tips at z 38.12 and 39.44, whose heads fit
-along their axes and stand, and from which no route, retries included,
-reaches the pad. All four hold islands, as every stability tip in the record
-does, so the builder ran its routing retries on each before dropping it.
+fits the full head, so its birth tip leans 20.7 degrees, the least its neck
+clears, and the builder cannot route it either. The island born at z 42.7
+beside it leans its birth tip 41 degrees and routes. The record holds five
+unrouted heads: the three unrouted births and the leaning stability tips at
+z 38.12 and 39.44, whose heads fit along their axes and stand, and from which
+no route, retries included, reaches the pad. All five hold islands, as every
+stability tip in the record does, so the builder ran its routing retries on
+each before dropping it.

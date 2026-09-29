@@ -367,16 +367,21 @@ public:
                    .distance() > head.length_mm;
     }
 
-    // Where a tip stands under birth piece `piece` of slab `l`, whose deepest point is `deepest`, and the axis its neck
-    // takes, zero for straight down; `pin_mm` gives the pin radius of a tip at a candidate. The candidates are `deepest`
-    // and then the piece's cells, nearest it first. The first candidate whose neck clears straight down wins; failing
-    // that, the least lean, in tilt steps up to the cap, at which a candidate's neck clears and its head fits, at the
-    // first such candidate along the azimuth whose end stands farthest from the model. None where no candidate clears.
-    std::optional<std::pair<Point, Vec3f>> search(size_t l, size_t piece, const Point &deepest,
-                                                  const std::function<double(const Point &)> &pin_mm) const
+    // Where a birth tip stands, the axis its neck takes, zero for straight down, and whether the builder's full head fits
+    // along that axis. A straight neck always fits, since the builder aims its head along the mesh normal instead.
+    struct Spot { Point at; Vec3f axis; bool fits; };
+
+    // Where a tip stands under birth piece `piece` of slab `l`, whose deepest point is `deepest`; `pin_mm` gives the pin
+    // radius of a tip at a candidate. The candidates are `deepest` and then the piece's cells, nearest it first. The
+    // first candidate whose neck clears straight down wins; failing that, the least lean, in tilt steps up to the cap,
+    // at which a candidate's neck clears and its head fits, at the first such candidate along the azimuth whose end
+    // stands farthest from the model. Where no lean fits the head, the least lean at which a candidate's neck alone
+    // clears, by the same order, which does not fit: the builder's own pose search and its axis retry for a head holding
+    // an island may still route a head there. None where no candidate's neck clears.
+    std::optional<Spot> search(size_t l, size_t piece, const Point &deepest, const std::function<double(const Point &)> &pin_mm) const
     {
         if (clear(l, deepest, straight_down))
-            return std::make_pair(deepest, Vec3f::Zero().eval());
+            return Spot { deepest, Vec3f::Zero(), true };
         const LayerGrid   &g     = m_in.material[l];
         const uint16_t     label = uint16_t(piece - m_in.components.slab_range[l].first + 1);
         std::vector<Point> candidates { deepest };
@@ -388,22 +393,26 @@ public:
         });
         for (auto it = candidates.begin() + 1; it != candidates.end(); ++ it)
             if (clear(l, *it, straight_down))
-                return std::make_pair(*it, Vec3f::Zero().eval());
+                return Spot { *it, Vec3f::Zero(), true };
         std::vector<double> pins(candidates.size(), -1.);
         for (const double tilt : tilts())
             for (size_t i = 0; i < candidates.size(); ++ i) {
                 if (pins[i] < 0.)
                     pins[i] = pin_mm(candidates[i]);
                 if (const std::optional<Vec3d> axis = lean(l, candidates[i], tilt, pins[i]))
-                    return std::make_pair(candidates[i], axis->cast<float>().eval());
+                    return Spot { candidates[i], axis->cast<float>(), true };
             }
+        for (const double tilt : tilts())
+            for (const Point &c : candidates)
+                if (const std::optional<Vec3d> axis = lean(l, c, tilt, std::nullopt))
+                    return Spot { c, axis->cast<float>(), false };
         return std::nullopt;
     }
 
     // The least lean past straight down, in tilt steps up to the cap, at which a neck from `p` on the bottom of slab `l`
-    // clears and the head of a pin `pin_mm` in radius fits, along the azimuth whose end stands farthest from the model;
-    // none where no lean does.
-    std::optional<Vec3f> leaning(size_t l, const Point &p, double pin_mm) const
+    // clears and the head of a pin `pin_mm` in radius fits, or with no pin the neck alone clears, along the azimuth whose
+    // end stands farthest from the model; none where no lean does.
+    std::optional<Vec3f> leaning(size_t l, const Point &p, std::optional<double> pin_mm) const
     {
         for (const double tilt : tilts())
             if (const std::optional<Vec3d> axis = lean(l, p, tilt, pin_mm))
@@ -412,10 +421,16 @@ public:
     }
 
     // The axis a neck from `p` on the bottom of slab `l` takes by the same rule, `p` the only candidate: zero where it
-    // clears straight down or no lean does.
-    Vec3f axis_at(size_t l, const Point &p, double pin_mm) const
+    // clears straight down or no lean does. A `birth` tip where no lean fits the head takes the least lean its neck
+    // alone clears, as `search` does.
+    Vec3f axis_at(size_t l, const Point &p, double pin_mm, bool birth) const
     {
-        return clear(l, p, straight_down) ? Vec3f::Zero() : leaning(l, p, pin_mm).value_or(Vec3f::Zero());
+        if (clear(l, p, straight_down))
+            return Vec3f::Zero();
+        std::optional<Vec3f> axis = leaning(l, p, pin_mm);
+        if (! axis && birth)
+            axis = leaning(l, p, std::nullopt);
+        return axis.value_or(Vec3f::Zero());
     }
 
 private:
@@ -445,10 +460,10 @@ private:
         return out;
     }
     // Among the azimuths at lean `tilt`, one cell apart at the neck's end, the axis whose neck clears and along which the
-    // head of a pin `pin_mm` in radius fits, the one whose end stands farthest from the material of the slab it ends on,
-    // the first on a tie; none where no azimuth does. The head test casts rays, so it runs on the clearing axes in that
-    // order and stops at the first that fits.
-    std::optional<Vec3d> lean(size_t l, const Point &p, double tilt, double pin_mm) const
+    // head of a pin `pin_mm` in radius fits, or with no pin whose neck clears, the one whose end stands farthest from the
+    // material of the slab it ends on, the first on a tie; none where no azimuth does. The head test casts rays, so it
+    // runs on the clearing axes in that order and stops at the first that fits.
+    std::optional<Vec3d> lean(size_t l, const Point &p, double tilt, std::optional<double> pin_mm) const
     {
         const double depth = m_in.neck_depth_mm;
         const int    n     = std::max(1, int(std::ceil(2. * M_PI * depth * std::sin(tilt) / m_in.cell_mm)));
@@ -462,7 +477,7 @@ private:
         }
         std::stable_sort(clearing.begin(), clearing.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
         for (const auto &[r, axis] : clearing)
-            if (head_fits(l, p, axis, pin_mm))
+            if (! pin_mm || head_fits(l, p, axis, *pin_mm))
                 return axis;
         return std::nullopt;
     }
@@ -693,8 +708,8 @@ private:
     // own part holds a tip, an underside head its layer placed, is held by that tip. One lying wholly within the merge
     // slab's step plus the reach of what the held parts, those a tip or the bed holds, have under the merge hangs from
     // their tips: the merge layer bridges no farther to it than to any underside the planner leaves bare. Any other nub
-    // takes its birth tip now, which holds its part for the nubs after it and takes the pending cells under its cover,
-    // or counts as unheld where no neck clears.
+    // takes its birth tip now, which holds its part for the nubs after it and takes the pending cells under its cover
+    // unless its head does not fit, `place_unanchored`, or counts as unheld where no neck clears.
     void settle(size_t s, size_t q, const std::vector<size_t> &roots)
     {
         std::vector<std::pair<size_t, size_t>> waiting;   // (island, its part's root)
@@ -736,16 +751,17 @@ private:
                 island.reason = IslandReason::Hung;
                 continue;
             }
-            if (const std::optional<std::pair<Point, Vec3f>> spot =
+            if (const std::optional<Necks::Spot> spot =
                     m_necks.search(birth.slab, birth.piece, birth.deepest, birth_pin(birth.slab, birth.piece))) {
                 BOOST_LOG_TRIVIAL(debug) << "scaffold island at " << z << " joins nothing held near it: tip";
-                TipSite site = site_at(birth.slab, spot->first, birth_grade(m_in, m_births, birth.slab, birth.piece, spot->first));
-                site.axis    = spot->second;
-                const size_t tip = place(site, TipNeed::Birth, nullptr);
-                const auto [x, y] = cell_of(site.position);
-                take_pending(x, y, float(site.print_z), cover_mm(birth.slab) / m_in.cell_mm);
-                island.holders = { tip };
+                TipSite site = site_at(birth.slab, spot->at, birth_grade(m_in, m_births, birth.slab, birth.piece, spot->at));
+                site.axis    = spot->axis;
+                island.holders = { spot->fits ? place(site, TipNeed::Birth, nullptr) : place_unanchored(site) };
                 island.reason  = IslandReason::Tip;
+                if (spot->fits) {
+                    const auto [x, y] = cell_of(site.position);
+                    take_pending(x, y, float(site.print_z), cover_mm(birth.slab) / m_in.cell_mm);
+                }
             } else {
                 island.reason = IslandReason::NoNeck;
                 ++ m_plan.islands_unheld;
@@ -813,6 +829,16 @@ private:
                     }
                 }
         return index;
+    }
+
+    // A birth tip whose full head does not fit along its lean holds its own island and nothing else, since the builder
+    // routes few such tips: it anchors no part and no cell and takes no pending cells, so the walk reads its island as one
+    // no neck clears. A nub meeting its part takes its own tip, and a tip the builder cannot route leaves every other hold
+    // where the plan would place it with no tip there. Returns the tip's index in the plan.
+    size_t place_unanchored(const TipSite &site)
+    {
+        m_plan.tips.push_back({ site, TipNeed::Birth });
+        return m_plan.tips.size() - 1;
     }
 
     TipSite site_at(size_t l, const Point &p, double grade_mm) const
@@ -1315,8 +1341,9 @@ private:
     // island. Debris takes no tip. A nub prints its layer as it hangs and waits for its merge, which `settle` reads; its
     // cells hang from the nearest other material on their layer, what the merge bridges them from, so one standing far
     // from it can take an underside head on its own layer. Any other island takes one tip where `Necks::search` finds a
-    // neck, graded by `birth_grade`, and counts as unheld where none clears. An island left without a tip otherwise
-    // prints as it hangs, so its cells anchor what grows on them. Every island goes into the plan with how it is held.
+    // neck, graded by `birth_grade`, and counts as unheld where none clears. An island left without a tip otherwise, or
+    // held only by a tip whose head does not fit, `place_unanchored`, prints as it hangs, so its cells anchor what grows
+    // on them. Every island goes into the plan with how it is held.
     void births(size_t l, const std::vector<size_t> &enforced, Heap &heap)
     {
         const LayerGrid &g     = *m_grid;
@@ -1386,7 +1413,7 @@ private:
                 hang(p);
                 continue;
             }
-            const std::optional<std::pair<Point, Vec3f>> spot = m_necks.search(l, p, deepest, birth_pin(l, p));
+            const std::optional<Necks::Spot> spot = m_necks.search(l, p, deepest, birth_pin(l, p));
             if (! spot) {
                 BOOST_LOG_TRIVIAL(debug) << "scaffold island at " << piece.bottom_z << ": no neck";
                 island.reason = IslandReason::NoNeck;
@@ -1394,13 +1421,18 @@ private:
                 accept(p);
                 continue;
             }
-            TipSite site = site_at(l, spot->first, birth_grade(m_in, m_births, l, p, spot->first));
-            site.axis    = spot->second;
+            TipSite site = site_at(l, spot->at, birth_grade(m_in, m_births, l, p, spot->at));
+            site.axis    = spot->axis;
             if (! site.axis.isZero())
                 BOOST_LOG_TRIVIAL(debug) << "scaffold island at " << piece.bottom_z << " leans its neck "
                                          << std::acos(std::clamp(-double(site.axis.z()), -1., 1.)) * 180. / M_PI << " degrees";
-            island.holders = { place(site, TipNeed::Birth, &heap) };
-            island.reason  = IslandReason::Tip;
+            island.reason = IslandReason::Tip;
+            if (spot->fits)
+                island.holders = { place(site, TipNeed::Birth, &heap) };
+            else {
+                island.holders = { place_unanchored(site) };
+                accept(p);
+            }
         }
     }
 
@@ -1488,10 +1520,12 @@ private:
     // and within the window of the farthest point. The corner whose face turns least from straight down over the two
     // slabs under it goes first, then the one farthest from what holds the part, and it must be eligible with its face
     // within the face cap, `faces_down`. Where no corner both clears straight down and faces within the cap, the first
-    // corner in that order whose face stands within the cap and whose neck clears leaning takes the least lean that
-    // clears, as a birth's neck does, and hands it to the builder as its axis. A branch with no such
-    // corner counts slender once. A piece with no such corner, or still past its window with the new tip, is measured
-    // again `stability_retry_mm` higher.
+    // corner in that order whose face stands within the cap and whose neck clears leaning with the builder's full head
+    // fitting takes the least such lean, and hands it to the builder as its axis. Unlike a birth, a corner whose neck
+    // clears only along leans the head does not fit takes no tip: a stability tip holds its part only as an anchor, and
+    // one the builder cannot route would still displace the holds the plan places after it. A branch with no such corner
+    // counts slender once. A piece with no such corner, or still past its window with the new tip, is measured again
+    // `stability_retry_mm` higher.
     void stability(size_t l)
     {
         const auto [first, last] = m_in.components.slab_range[l];
@@ -1668,7 +1702,13 @@ Vec3f neck_axis(const PlanInput &input, const TipSite &site)
         return Vec3f::Zero();
     // The pin `draw` gives the tip: half its grade, or of the small disc where it has none.
     const double pin_mm = 0.5 * (site.grade_mm > 0. ? site.grade_mm : 2. * input.toolpath_width_mm);
-    return Necks(input).axis_at(size_t(l), site.position, pin_mm);
+    // A site on a birth piece off the bed holds its island as the planner's birth tip there does, so it leans as one. An
+    // input with no pieces reads none.
+    bool birth = false;
+    if (l > 0 && size_t(l) < input.components.slab_range.size())
+        if (const size_t q = piece_at(input, size_t(l), site.position); q != size_t(-1))
+            birth = input.components.pieces[q].below.empty();
+    return Necks(input).axis_at(size_t(l), site.position, pin_mm, birth);
 }
 
 std::vector<BirthRead> read_births(const PlanInput &input, const std::vector<size_t> &pieces, const std::vector<TipSite> &tips)
@@ -1684,15 +1724,17 @@ std::vector<BirthRead> read_births(const PlanInput &input, const std::vector<siz
         return size_t(std::upper_bound(ranges.begin(), ranges.end(), p,
                                        [](size_t p, const std::pair<size_t, size_t> &range) { return p < range.first; }) - ranges.begin()) - 1;
     };
-    // The tip the neck search stands under birth `i`, if any clears.
+    // The tip the neck search stands under birth `i`, if any clears, and whether the builder's full head fits there.
     const auto tip = [&](size_t i) {
         const size_t p = pieces[i], l = slab_of(p);
         const auto pin = [&](const Point &c) { return 0.5 * birth_grade(input, births, l, p, c); };
-        if (const auto spot = necks.search(l, p, inscribed_point(all[p].polygon), pin)) {
+        const auto spot = necks.search(l, p, inscribed_point(all[p].polygon), pin);
+        if (spot) {
             out[i].hold      = BirthHold::Tip;
-            out[i].site      = { spot->first, input.slabs[l].bottom_z, int(l) - 1 };
-            out[i].site.axis = spot->second;
+            out[i].site      = { spot->at, input.slabs[l].bottom_z, int(l) - 1 };
+            out[i].site.axis = spot->axis;
         }
+        return spot && spot->fits;
     };
     std::vector<std::vector<size_t>> waiting(all.size());   // per root: its nubs, as indices into `pieces`
     bool                             nubs = false;
@@ -1707,7 +1749,7 @@ std::vector<BirthRead> read_births(const PlanInput &input, const std::vector<siz
         return out;
     // The nubs settle at their merges bottom up as the plan's `settle` settles them, a part held where the bed roots it
     // or one of `tips` stands on it under the merge slab. A nub the rule tips holds its part for the nubs after it, as
-    // the tip the plan would place there would.
+    // the tip the plan would place there would, unless that tip's full head does not fit, which the plan anchors nowhere.
     std::vector<char> tipped(all.size(), 0), held(all.size(), 0);   // per piece, and per root
     for (const TipSite &site : tips)
         if (const int l = site.obj_layer_nr + 1; l >= 0 && size_t(l) < input.slabs.size())
@@ -1744,8 +1786,7 @@ std::vector<BirthRead> read_births(const PlanInput &input, const std::vector<siz
                                ! under.empty() && within(all[p].polygon, under, hang)) {
                         out[i].hold = BirthHold::Nub;
                     } else {
-                        tip(i);
-                        held[r] = out[i].hold == BirthHold::Tip;
+                        held[r] = tip(i);
                     }
                 }
             }

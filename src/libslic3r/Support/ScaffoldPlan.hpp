@@ -69,8 +69,10 @@ struct LayerGrid
 
 // The builder's full head: the back's radius, the length the filter tests the head clear over, from the tip's point,
 // where the pin meets the model, to the far side of the back sphere, and the clearance it keeps from the model, as the
-// builder's config sets them. A leaning neck is accepted only where this head, at the tip's pin, clears the mesh along
-// its axis, so the builder keeps the axis and the full head; a zero length tests no head.
+// builder's config sets them. A leaning neck is accepted first where this head, at the tip's pin, clears the mesh along
+// its axis, so the builder keeps the axis and the full head: a stability tip leans only there, and a birth no such lean
+// holds takes the least lean its neck alone clears, a tip the plan counts on for its own island only. A zero length
+// tests no head.
 struct HeadShape
 {
     double back_mm = 0., length_mm = 0., safety_mm = 0.;
@@ -114,8 +116,8 @@ enum class IslandReason : uint8_t { Tip, Hung, NoNeck, Debris };
 // A birth piece off the bed with nothing under it, unless every point of it lies within the slab below's step of that
 // slab's material: such a piece continues the slab below as an overhang does and is no island. `birth` is its deepest
 // point at its bottom, x and y in mm and print z. `holders` index `Plan::tips`: an island's own tips, or for one that
-// hangs, every tip on the held parts within its hang, whatever need placed it. `rooted` is true where the bed held one
-// of those parts.
+// hangs, every tip anchoring the held parts within its hang, whatever need placed it; a birth tip whose full head does
+// not fit anchors none. `rooted` is true where the bed held one of those parts.
 struct Island
 {
     Vec3d               birth = Vec3d::Zero();
@@ -139,15 +141,16 @@ Plan plan_tips(const PlanInput &input, const std::vector<TipSite> &enforced);
 
 // The axis a neck from `site` leans along by the planner's search, `site` the only spot tried: zero where it clears
 // straight down or no lean up to `input.max_tilt_rad` clears with the head fitting at the pin of `site`'s grade, else
-// the least lean that does, one tilt step apart, and at it the azimuth whose end stands farthest from the model. A baked
-// point carries no axis, so its list reads it again.
+// the least lean that does, one tilt step apart, and at it the azimuth whose end stands farthest from the model. A site
+// on a birth piece off the bed holds its island as a birth tip does, so where no lean fits the head it takes the least
+// lean its neck alone clears, as the birth search does. A baked point carries no axis, so its list reads it again.
 Vec3f neck_axis(const PlanInput &input, const TipSite &site);
 
 // What the birth rule makes of a birth piece with no tip of a list the planner did not place: the piece continues the
 // slab below as an overhang does, it is debris, it is a nub held at its merge, or it needs a neck, which the tip at
 // `site` has, `site.axis` included, or which none clears. A nub is held as the plan's merge holds it: by a tip on its
 // own part, or by the tips or the bed holding a part it lies within the hang of. Any other nub needs a neck as any
-// birth does, and one that gets it holds its part for the nubs meeting it after it.
+// birth does, and one that gets it with the full head fitting holds its part for the nubs meeting it after it.
 enum class BirthHold : uint8_t { Overhang, Debris, Nub, Tip, NoNeck };
 struct BirthRead { BirthHold hold = BirthHold::NoNeck; TipSite site; };
 // `pieces` index `input.components.pieces`, each one a birth piece; the reads follow their order. `tips` are the list's

@@ -975,8 +975,8 @@ TEST_CASE("A birth over a shelf takes a tilted tip", "[ScaffoldPlan]")
     // A 0.8 mm rod hangs from the slab of a 4 x 4 column standing on the bed down to z 4, at x 7..7.8, over a shelf off
     // the column at z 2..3 that ends at x 7.5, under the rod. Every neck straight down from the rod ends within the xy
     // distance of the shelf, and one leaning away from it, past x 8, clears it: the birth tip takes the least lean that
-    // clears, which no smaller lean at its spot does, and hands the builder that axis. With no lean allowed no tip
-    // stands under the rod and the plan counts its island unheld.
+    // clears with the builder's full head fitting, which no smaller lean at its spot does, and hands the builder that
+    // axis. With no lean allowed no tip stands under the rod and the plan counts its island unheld.
     Sliced s(merged({ box(0, 0, 0, 4, 4, 10), box(0, 0, 8, 12, 10, 2), box(4, 3, 2, 3.5, 3, 1), box(7, 4.6, 4, 0.8, 0.8, 4) }));
     const BoundingBoxf3 rod(Vec3d(6.8, 4.4, 3.9), Vec3d(8., 5.6, 4.1));
     const Plan          plan = s.plan();
@@ -988,13 +988,19 @@ TEST_CASE("A birth over a shelf takes a tilted tip", "[ScaffoldPlan]")
     CHECK_THAT(double(tip.site.axis.norm()), Catch::Matchers::WithinAbs(1., 1e-6));
     CHECK(lean > 0.);
     CHECK(lean <= 45. + 1e-6);
-    // The planner hands the tip the axis the neck search reads at its spot, the one a baked list recomputes, and at one
-    // tilt step less nothing clears there.
+    // The planner hands the tip the axis the neck search reads at its spot, the one a baked list recomputes. At one tilt
+    // step less the neck clears there only along leans whose head meets the model, and the birth takes the least of those
+    // only because no lean up to that cap fits the head.
     const Vec3f again = neck_axis(s.input, tip.site);
     CHECK_THAT(double((again - tip.site.axis).norm()), Catch::Matchers::WithinAbs(0., 1e-6));
     const double step = std::asin(s.input.cell_mm / s.input.neck_depth_mm);
     s.input.max_tilt_rad = Geometry::deg2rad(lean) - step + 1e-9;
-    CHECK(neck_axis(s.input, tip.site).isZero());
+    const Vec3f less     = neck_axis(s.input, tip.site);
+    REQUIRE_FALSE(less.isZero());
+    INFO("one tilt step less: leaning " << lean_deg(less) << " degrees, head room " << s.head_room(tip, less) << " of "
+                                        << full_head.length_mm << " mm");
+    CHECK(lean_deg(less) < lean);
+    CHECK(s.head_room(tip, less) <= full_head.length_mm);
 
     s.input.max_tilt_rad = 0.;
     const Plan upright = s.plan();
@@ -1206,7 +1212,201 @@ size_t birth_piece(const Sliced &s, const BoundingBoxf3 &box)
             return p;
     return size_t(-1);
 }
+
+// The slab of the 4 x 4 column over a 0.3 mm shelf at z 3..3.3 that runs under the whole slab in y, y 0..10, out to x 8.2,
+// beside a wall 1.4 mm wide, x 9..10.4, standing on the bed to z 2.3 along the whole slab, y 0..10.
+TriangleMesh long_wall()
+{
+    return merged({ box(0, 0, 0, 4, 4, 10), box(0, 0, 8, 12, 10, 2), box(4, 0, 3, 4.2, 10, 0.3), box(9, 0, 0, 1.4, 10, 2.3) });
+}
+// The full-head case's bar, x 7..7.8 and y 2..7, hanging to z 4 from the slab over the long wall. No neck straight down
+// from the bar clears the shelf, and none leaning along y does; one from the bar's +x edge leaning about 42 degrees
+// towards +x passes the shelf's edge and ends over the wall's top, while the builder's full head along it meets the wall
+// at every spot along the bar.
+TriangleMesh bar_beside_long_wall() { return merged({ long_wall(), box(7, 2, 4, 0.8, 5, 4) }); }
+const BoundingBoxf3 long_wall_bar(Vec3d(6.8, 1.8, 3.9), Vec3d(8., 7.2, 4.1));
 } // namespace
+
+TEST_CASE("A birth whose every clearing lean meets the full head still takes its tip along the lean its neck clears", "[ScaffoldPlan]")
+{
+    // Read by the neck alone the bar's birth tip leans along +x from its edge, and the builder's pinhead test finds its
+    // head meeting the wall. With the head fitted no spot on the bar leans with its head fitting, so the birth takes
+    // that same tip and axis rather than going unheld: the builder's own pose search and the island's axis retry may
+    // still route a head there, and an island whose tip fails to route is counted as one no neck holds is.
+    Sliced     s(bar_beside_long_wall());
+    const auto birth_tip = [&](const Plan &plan) {
+        REQUIRE(count_in(s, plan, long_wall_bar, { TipNeed::Birth }) == 1);
+        return *std::find_if(plan.tips.begin(), plan.tips.end(),
+                             [&](const PlannedTip &t) { return t.need == TipNeed::Birth && inside(s, t, long_wall_bar); });
+    };
+    const auto describe = [&](const PlannedTip &tip) {
+        std::ostringstream out;
+        out << "(" << s.at(tip).x() << ", " << s.at(tip).y() << ", " << tip.site.print_z << ") leaning " << lean_deg(tip.site.axis)
+            << " degrees along (" << tip.site.axis.x() << ", " << tip.site.axis.y() << ", " << tip.site.axis.z() << "), head room "
+            << s.head_room(tip) << " of " << full_head.length_mm << " mm";
+        return out.str();
+    };
+
+    s.input.head          = HeadShape{};
+    const PlannedTip bare = birth_tip(s.plan());
+    INFO("read by the neck alone: " << describe(bare));
+    CHECK_FALSE(bare.site.axis.isZero());
+    CHECK(bare.site.axis.x() > 0.f);
+    CHECK(s.head_room(bare) <= full_head.length_mm);
+
+    s.input.head          = full_head;
+    const Plan       plan = s.plan();
+    const PlannedTip tip  = birth_tip(plan);
+    INFO("with the head fitted: " << describe(tip));
+    CHECK(tip.site.position.x() == bare.site.position.x());
+    CHECK(tip.site.position.y() == bare.site.position.y());
+    CHECK_THAT(double((tip.site.axis - bare.site.axis).norm()), Catch::Matchers::WithinAbs(0., 1e-6));
+    CHECK(plan.islands_unheld == 0);
+    const std::vector<const Island *> held = islands_in(s, plan, long_wall_bar);
+    REQUIRE(held.size() == 1);
+    CHECK(held.front()->reason == IslandReason::Tip);
+    // A baked list reads the same axis at the tip, and the birth rule stands the same tip under the bar when the list
+    // has none there.
+    CHECK_THAT(double((neck_axis(s.input, tip.site) - tip.site.axis).norm()), Catch::Matchers::WithinAbs(0., 1e-6));
+    const size_t piece = birth_piece(s, long_wall_bar);
+    REQUIRE(piece != size_t(-1));
+    const BirthRead read = read_births(s.input, { piece }, {}).front();
+    REQUIRE(read.hold == BirthHold::Tip);
+    CHECK(read.site.position.x() == tip.site.position.x());
+    CHECK(read.site.position.y() == tip.site.position.y());
+    CHECK_THAT(double((read.site.axis - tip.site.axis).norm()), Catch::Matchers::WithinAbs(0., 1e-6));
+}
+
+TEST_CASE("A stability tip on the same bar takes no lean whose head meets the wall", "[ScaffoldPlan]")
+{
+    // An enforced tip at the bar's -y end holds its island, so on its first slab the bar reaches 4.6 mm past that tip,
+    // past its 3 mm window, and its stability tip goes to a corner of its bottom at the far end, whose neck clears only
+    // leaning towards +x as the birth's does. Read by the neck alone the corner takes the tip along that lean, whose head
+    // meets the wall. With the head fitted the stability search refuses it: a stability tip that fails to route would
+    // still anchor its part and displace the holds the plan places after it, so no corner of the bar's bottom takes the
+    // tip.
+    Sliced              s(bar_beside_long_wall());
+    const BoundingBoxf3 far_end(Vec3d(6.8, 5.5, 3.9), Vec3d(8., 7.2, 4.1));
+    const auto          bottom = std::find_if(s.input.slabs.begin(), s.input.slabs.end(),
+                                              [](const SupportAnalysis::Slab &slab) { return std::abs(slab.bottom_z - 4.) < 1e-6; });
+    REQUIRE(bottom != s.input.slabs.end());
+    const int l = int(bottom - s.input.slabs.begin());
+    TipSite   enforced { Point::new_scale(7.4 + s.shift.x(), 2.4 + s.shift.y()), bottom->bottom_z, l - 1 };
+    enforced.enforced = true;
+    const auto leaning_at_end = [&](const Plan &plan) {
+        std::vector<PlannedTip> out;
+        for (const PlannedTip &tip : plan.tips)
+            if (tip.need == TipNeed::Stability && inside(s, tip, far_end)) {
+                INFO("stability tip at (" << s.at(tip).x() << ", " << s.at(tip).y() << ", " << tip.site.print_z << ") leaning "
+                                          << lean_deg(tip.site.axis) << " degrees, head room " << s.head_room(tip));
+                CHECK_FALSE(tip.site.axis.isZero());
+                out.push_back(tip);
+            }
+        return out;
+    };
+
+    s.input.head = HeadShape{};
+    const std::vector<PlannedTip> by_neck = leaning_at_end(plan_tips(s.input, { enforced }));
+    REQUIRE(by_neck.size() == 1);
+    CHECK(by_neck.front().site.axis.x() > 0.f);
+    CHECK(s.head_room(by_neck.front()) <= full_head.length_mm);
+
+    s.input.head    = full_head;
+    const Plan plan = plan_tips(s.input, { enforced });
+    CHECK(leaning_at_end(plan).empty());
+    CHECK(count_in(s, plan, long_wall_bar, { TipNeed::Stability }) == 0);
+    CHECK(plan.islands_unheld == 0);
+}
+
+TEST_CASE("A birth tip whose head meets the model holds no island but its own", "[ScaffoldPlan]")
+{
+    // The builder routes few birth tips leaning where the full head meets the model, so the plan counts on one for its
+    // own island only, and a nub meeting its part takes its own tip as it would beside an island no neck clears.
+    const auto birth_tips = [](const Sliced &s, const Plan &plan, const BoundingBoxf3 &box) {
+        std::vector<size_t> out;
+        for (size_t i = 0; i < plan.tips.size(); ++ i)
+            if (plan.tips[i].need == TipNeed::Birth && inside(s, plan.tips[i], box)) {
+                INFO("birth tip at (" << s.at(plan.tips[i]).x() << ", " << s.at(plan.tips[i]).y() << ", " << plan.tips[i].site.print_z
+                                      << ") leaning " << lean_deg(plan.tips[i].site.axis) << " degrees, head room "
+                                      << s.head_room(plan.tips[i]) << " of " << full_head.length_mm << " mm");
+                CHECK(s.head_room(plan.tips[i]) <= full_head.length_mm);
+                out.push_back(i);
+            }
+        return out;
+    };
+    // A nub 0.6 mm square hangs at z 5..5.07 0.2 mm off the bar's +x face and joins the bar one 0.05 mm layer up, well
+    // within its hang of the bar. The bar holds by its leaning birth tip alone, so the nub takes its own birth tip.
+    {
+        Sliced s(merged({ bar_beside_long_wall(), box(8, 4.2, 5, 0.6, 0.6, 0.07), box(7, 4.2, 5.07, 1.6, 0.6, 0.5) }), 0.05);
+        const BoundingBoxf3 nub(Vec3d(7.9, 4.1, 4.9), Vec3d(8.7, 4.9, 5.1));
+        const Plan          plan = s.plan();
+        CHECK(birth_tips(s, plan, long_wall_bar).size() == 1);
+        const std::vector<const Island *> found = islands_in(s, plan, nub);
+        REQUIRE(found.size() == 1);
+        CHECK(found.front()->reason == IslandReason::Tip);
+        REQUIRE(found.front()->holders.size() == 1);
+        CHECK(plan.tips[found.front()->holders.front()].need == TipNeed::Birth);
+        CHECK(inside(s, plan.tips[found.front()->holders.front()], nub));
+        CHECK(plan.islands_unheld == 0);
+    }
+    // Two nubs 0.6 mm square hang at z 4..4.07 along the bar's +x edge, 0.2 mm apart in y, and meet one layer up in a
+    // strand rising into the slab, each within its hang of the other. Every lean either's neck clears meets the full head
+    // at the wall, so the first settled takes its birth tip along such a lean, and the second takes its own rather than
+    // hanging from it. A baked list with neither tip reads both by the same rule.
+    {
+        Sliced s(merged({ long_wall(), box(7.2, 4.2, 4, 0.6, 0.6, 0.07), box(7.2, 5, 4, 0.6, 0.6, 0.07), box(7.2, 4.2, 4.07, 0.6, 1.4, 3.93) }),
+                 0.05);
+        const BoundingBoxf3 low_y(Vec3d(7.1, 4.1, 3.9), Vec3d(7.9, 4.9, 4.1)), high_y(Vec3d(7.1, 4.9, 3.9), Vec3d(7.9, 5.7, 4.1));
+        const Plan          plan = s.plan();
+        for (const BoundingBoxf3 &nub : { low_y, high_y }) {
+            const std::vector<size_t> own = birth_tips(s, plan, nub);
+            CHECK(own.size() == 1);
+            const std::vector<const Island *> found = islands_in(s, plan, nub);
+            REQUIRE(found.size() == 1);
+            CHECK(found.front()->reason == IslandReason::Tip);
+            CHECK(found.front()->holders == own);
+        }
+        CHECK(plan.islands_unheld == 0);
+        const size_t a = birth_piece(s, low_y), b = birth_piece(s, high_y);
+        REQUIRE(a != size_t(-1));
+        REQUIRE(b != size_t(-1));
+        const std::vector<BirthRead> reads = read_births(s.input, { a, b }, {});
+        CHECK(reads[0].hold == BirthHold::Tip);
+        CHECK(reads[1].hold == BirthHold::Tip);
+    }
+}
+
+TEST_CASE("A baked point off a birth piece takes no lean whose head meets the model", "[ScaffoldPlan]")
+{
+    // A strip off the column at z 3.7..4, y 2..3, reaches under the bar's -y end, so the bar's bottom grows out of it and
+    // is no birth. At the spot on the bar's +x edge where the birth tip leans, a baked point reads the lean its neck
+    // clears while no head is fitted, and with the full head, which meets the wall along every such lean, it reads no
+    // lean: only a point holding an island as a birth tip falls back to the neck alone.
+    Sliced     s(merged({ bar_beside_long_wall(), box(4, 2, 3.7, 3.3, 1, 0.3) }));
+    const auto bottom = std::find_if(s.input.slabs.begin(), s.input.slabs.end(),
+                                     [](const SupportAnalysis::Slab &slab) { return std::abs(slab.bottom_z - 4.) < 1e-6; });
+    REQUIRE(bottom != s.input.slabs.end());
+    const int  l = int(bottom - s.input.slabs.begin());
+    PlannedTip point { { Point::new_scale(7.665 + s.shift.x(), 4.515 + s.shift.y()), bottom->bottom_z, l - 1 }, TipNeed::Stability };
+    point.site.grade_mm      = 2. * width_mm;
+    const auto &pieces       = s.input.components.pieces;
+    const auto [first, last] = s.input.components.slab_range[size_t(l)];
+    const auto piece         = std::find_if(pieces.begin() + first, pieces.begin() + last,
+                                            [&](const SupportAnalysis::Piece &p) { return p.polygon.contains(point.site.position); });
+    REQUIRE(piece != pieces.begin() + last);
+    CHECK_FALSE(piece->below.empty());
+
+    s.input.head        = HeadShape{};
+    const Vec3f by_neck = neck_axis(s.input, point.site);
+    INFO("read by the neck alone: leaning " << lean_deg(by_neck) << " degrees, head room " << s.head_room(point, by_neck) << " of "
+                                            << full_head.length_mm << " mm");
+    REQUIRE_FALSE(by_neck.isZero());
+    CHECK(by_neck.x() > 0.f);
+    CHECK(s.head_room(point, by_neck) <= full_head.length_mm);
+
+    s.input.head = full_head;
+    CHECK(neck_axis(s.input, point.site).isZero());
+}
 
 TEST_CASE("A list's tipless nub hangs only where the planner would hang it", "[ScaffoldPlan]")
 {
