@@ -3187,8 +3187,10 @@ void ObjectList::merge(bool to_multipart_object)
             }
 
             // merge scaffold points
+            // An axis is a direction, so it takes the linear part alone; a zero axis stays zero through normalized().
             for (const ScaffoldPoint& p : object->scaffold_points)
-                scaffold_points.push_back({ (transformation_matrix * p.pos.cast<double>()).cast<float>(), p.size, p.enforced });
+                scaffold_points.push_back({ (transformation_matrix * p.pos.cast<double>()).cast<float>(), p.size, p.enforced,
+                                            (transformation_matrix.linear() * p.axis.cast<double>()).normalized().cast<float>() });
             has_scaffold_points |= object->scaffold_points_status != ScaffoldPointsStatus::NoPoints;
         }
 
@@ -3206,8 +3208,10 @@ void ObjectList::merge(bool to_multipart_object)
             p.set_transform(new_object_inverse_matrix);
         }
         if (has_scaffold_points) {
-            for (ScaffoldPoint& p : scaffold_points)
-                p.pos = (new_object_inverse_matrix * p.pos.cast<double>()).cast<float>();
+            for (ScaffoldPoint& p : scaffold_points) {
+                p.pos  = (new_object_inverse_matrix * p.pos.cast<double>()).cast<float>();
+                p.axis = (new_object_inverse_matrix.linear() * p.axis.cast<double>()).normalized().cast<float>();
+            }
             new_object->scaffold_points          = std::move(scaffold_points);
             new_object->scaffold_points_status   = ScaffoldPointsStatus::UserModified;
             new_object->scaffold_points_pose     = new_object_trsf.get_matrix().linear();

@@ -1658,9 +1658,10 @@ TEST_CASE("Scaffold points survive a 3MF round trip and model edits clear or car
     ModelObject* unmoved = model.add_object("unmoved", "", centred);
     model.add_default_instances();
 
-    // A third, a negative, a large and a tiny magnitude: %.9g must carry every float bit.
+    // A third, a negative, a large and a tiny magnitude: %.9g must carry every float bit. The first point's approach
+    // axis holds components a short decimal cannot either.
     const ScaffoldPoints points = {
-        { Vec3f(1.f / 3.f, -7.1234565f, 9.87654321f), ScaffoldHeadSize::Heavy, true },
+        { Vec3f(1.f / 3.f, -7.1234565f, 9.87654321f), ScaffoldHeadSize::Heavy, true, Vec3f(1.f, -2.f, -3.f).normalized() },
         { Vec3f(12345.678f, 1.17549435e-38f, -0.1f), ScaffoldHeadSize::Light, false },
         { Vec3f(float(PI), 2.f / 3.f, -1e-7f), ScaffoldHeadSize::Light, false },
     };
@@ -1728,6 +1729,8 @@ TEST_CASE("Scaffold points survive a 3MF round trip and model edits clear or car
                 CHECK_THAT(exact.scaffold_points[i].pos[c], WithinAbs(points[i].pos[c], 0.));
             CHECK(exact.scaffold_points[i].size == points[i].size);
             CHECK(exact.scaffold_points[i].enforced == points[i].enforced);
+            for (int c = 0; c < 3; ++c)
+                CHECK_THAT(exact.scaffold_points[i].axis[c], WithinAbs(points[i].axis[c], 0.));
         }
         for (int r = 0; r < 3; ++r)
             for (int c = 0; c < 3; ++c)
@@ -1751,6 +1754,10 @@ TEST_CASE("Scaffold points survive a 3MF round trip and model edits clear or car
             for (int c = 0; c < 3; ++c)
                 CHECK_THAT(double(got.scaffold_points[i].pos[c]) - min_after[c],
                            WithinAbs(double(points[i].pos[c]) - min_before[c], 1e-5 + std::abs(points[i].pos[c]) * std::numeric_limits<float>::epsilon()));
+        // The shift moves positions only: an axis is a direction and comes back bit for bit.
+        for (size_t i = 0; i < points.size(); ++i)
+            for (int c = 0; c < 3; ++c)
+                CHECK_THAT(got.scaffold_points[i].axis[c], WithinAbs(points[i].axis[c], 0.));
         for (int c = 0; c < 3; ++c) {
             CHECK_THAT(got.scaffold_points_mesh_box.min[c] - min_after[c], WithinAbs(scaffolded->scaffold_points_mesh_box.min[c] - min_before[c], 1e-5));
             CHECK_THAT(got.scaffold_points_mesh_box.max[c] - min_after[c], WithinAbs(scaffolded->scaffold_points_mesh_box.max[c] - min_before[c], 1e-5));
@@ -1770,20 +1777,24 @@ TEST_CASE("Scaffold points survive a 3MF round trip and model edits clear or car
         std::string text;
         REQUIRE(read_cad_recipe_entry(test_file, text, SCAFFOLD_POINTS_ENTRY));
         std::vector<std::string> lines = split_on(text, '\n');
-        REQUIRE(lines.front() == "scaffold_points_format_version=0");
-        const std::string rewrite = GENERATE(as<std::string>{}, "version 1", "version x", "no header", "unparseable coordinate");
-        if (rewrite == "version 1")
-            lines.front() = "scaffold_points_format_version=1";
+        REQUIRE(lines.front() == "scaffold_points_format_version=1");
+        const std::string rewrite = GENERATE(as<std::string>{}, "version 2", "version x", "no header", "unparseable coordinate",
+                                             "unparseable axis", "a version-0 header over version-1 points");
+        if (rewrite == "version 2")
+            lines.front() = "scaffold_points_format_version=2";
         else if (rewrite == "version x")
             lines.front() = "scaffold_points_format_version=x";
         else if (rewrite == "no header")
             lines.erase(lines.begin());
+        else if (rewrite == "a version-0 header over version-1 points")
+            // Three points of eight numbers, 24, split into no whole number of five-number points.
+            lines.front() = "scaffold_points_format_version=0";
         else {
             // atof would read "abc" as 0, a valid coordinate; the reader must refuse the whole file instead.
             std::vector<std::string> fields = split_on(lines[1], '|');
             REQUIRE(fields.size() == 5);
             std::vector<std::string> tokens = split_on(fields[4], ' ');
-            tokens[0] = "abc";
+            tokens[rewrite == "unparseable axis" ? 5 : 0] = "abc";
             fields[4] = join_on(tokens, ' ');
             lines[1]  = join_on(fields, '|');
         }
@@ -1799,6 +1810,46 @@ TEST_CASE("Scaffold points survive a 3MF round trip and model edits clear or car
         }
     }
 
+    SECTION("A version-0 file loads each point with a zero axis") {
+        std::string text;
+        REQUIRE(read_cad_recipe_entry(test_file, text, SCAFFOLD_POINTS_ENTRY));
+        std::vector<std::string> lines = split_on(text, '\n');
+        REQUIRE(lines.front() == "scaffold_points_format_version=1");
+        // A version-0 file is the version-1 one without the three axis numbers of each point.
+        lines.front() = "scaffold_points_format_version=0";
+        for (size_t l = 1; l < lines.size(); ++l) {
+            if (lines[l].empty())
+                continue;
+            std::vector<std::string> fields = split_on(lines[l], '|');
+            REQUIRE(fields.size() == 5);
+            if (fields[4].empty())
+                continue;
+            const std::vector<std::string> tokens = split_on(fields[4], ' ');
+            REQUIRE(tokens.size() % 8 == 0);
+            std::vector<std::string> kept;
+            for (size_t k = 0; k < tokens.size(); ++k)
+                if (k % 8 < 5)
+                    kept.push_back(tokens[k]);
+            fields[4] = join_on(kept, ' ');
+            lines[l]  = join_on(fields, '|');
+        }
+        replace_archive_entry(test_file, SCAFFOLD_POINTS_ENTRY, join_on(lines, '\n'));
+
+        Model dst_model;
+        load(dst_model);
+        const ModelObject& got = *dst_model.objects[3];
+        CHECK(got.scaffold_points_status == ScaffoldPointsStatus::UserModified);
+        REQUIRE(got.scaffold_points.size() == points.size());
+        for (size_t i = 0; i < points.size(); ++i) {
+            for (int c = 0; c < 3; ++c)
+                CHECK_THAT(got.scaffold_points[i].pos[c], WithinAbs(points[i].pos[c], 0.));
+            CHECK(got.scaffold_points[i].size == points[i].size);
+            CHECK(got.scaffold_points[i].enforced == points[i].enforced);
+            for (int c = 0; c < 3; ++c)
+                CHECK_THAT(got.scaffold_points[i].axis[c], WithinAbs(0., 0.));
+        }
+    }
+
     SECTION("A point with a non-finite coordinate or an unknown size is dropped alone") {
         std::string text;
         REQUIRE(read_cad_recipe_entry(test_file, text, SCAFFOLD_POINTS_ENTRY));
@@ -1809,15 +1860,17 @@ TEST_CASE("Scaffold points survive a 3MF round trip and model edits clear or car
         std::vector<std::string> fields = split_on(*line, '|');
         REQUIRE(fields.size() == 5);
         std::vector<std::string> tokens = split_on(fields[4], ' ');
-        REQUIRE(tokens.size() == 5 * points.size());
+        REQUIRE(tokens.size() == 8 * points.size());
         const std::string bad_coordinate = GENERATE(as<std::string>{}, "nan", "inf", "-inf");
-        tokens[0]     = bad_coordinate;   // the first point's x
-        tokens[5 + 3] = "7";              // the second point's size
+        // The first point's x, its axis's x or its axis's z.
+        const size_t bad_index = GENERATE(0, 5, 7);
+        tokens[bad_index] = bad_coordinate;
+        tokens[8 + 3]     = "7";          // the second point's size
         fields[4] = join_on(tokens, ' ');
         *line     = join_on(fields, '|');
         replace_archive_entry(test_file, SCAFFOLD_POINTS_ENTRY, join_on(lines, '\n'));
 
-        DYNAMIC_SECTION(bad_coordinate) {
+        DYNAMIC_SECTION(bad_coordinate << " at number " << bad_index) {
             Model dst_model;
             load(dst_model);
             const ModelObject& got = *dst_model.objects[3];
@@ -1838,6 +1891,9 @@ TEST_CASE("Scaffold points survive a 3MF round trip and model edits clear or car
         for (size_t i = 0; i < points.size(); ++i)
             for (int c = 0; c < 3; ++c)
                 CHECK_THAT(copy->scaffold_points[i].pos[c], WithinAbs(points[i].pos[c] + delta[c], 1e-5));
+        for (size_t i = 0; i < points.size(); ++i)
+            for (int c = 0; c < 3; ++c)
+                CHECK_THAT(copy->scaffold_points[i].axis[c], WithinAbs(points[i].axis[c], 0.));
         for (int c = 0; c < 3; ++c) {
             CHECK_THAT(copy->scaffold_points_mesh_box.min[c], WithinAbs(scaffolded->scaffold_points_mesh_box.min[c] + delta[c], 1e-5));
             CHECK_THAT(copy->scaffold_points_mesh_box.max[c], WithinAbs(scaffolded->scaffold_points_mesh_box.max[c] + delta[c], 1e-5));

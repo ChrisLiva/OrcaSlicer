@@ -5,14 +5,17 @@
 #include "slic3r/GUI/Camera.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmosCommon.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
+#include "slic3r/GUI/GUI_ObjectList.hpp"
 #include "slic3r/GUI/MainFrame.hpp"
 #include "slic3r/GUI/MsgDialog.hpp"
+#include "slic3r/GUI/NotificationManager.hpp"
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/format.hpp"
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/SLA/SupportTree.hpp"
+#include "libslic3r/Support/PresupportedConversion.hpp"
 #include "GLGizmoUtils.hpp"
 
 namespace Slic3r { namespace GUI {
@@ -92,6 +95,8 @@ bool GLGizmoScaffoldPoints::on_init()
     m_desc["create"]           = _L("Create");
     m_desc["generate"]         = _L("Generate");
     m_desc["generate_tooltip"] = _L("Replace the list with the contact points the last slice routed.");
+    m_desc["convert"]          = _L("Convert");
+    m_desc["convert_tooltip"]  = _L("Remove the artist supports from a pre-supported model and place a point at each artist tip.");
     m_desc["revert"]           = _L("Revert to auto");
     m_desc["revert_tooltip"]   = _L("Clear the list so that the next slice places its contact points automatically.");
     m_desc["remove"]           = _L("Remove");
@@ -552,6 +557,68 @@ void GLGizmoScaffoldPoints::generate()
     finish_pending_generate();
 }
 
+void GLGizmoScaffoldPoints::convert()
+{
+    using PresupportedConversion::Refusal;
+    ModelObject *mo     = m_c->selection_info()->model_object();
+    const int    active = m_c->selection_info()->get_active_instance();
+    if (mo == nullptr || active < 0 || active >= int(mo->instances.size()) || m_generate_pending) return;
+
+    if (mo->scaffold_points_status == ScaffoldPointsStatus::UserModified && !mo->scaffold_points.empty()) {
+        MessageDialog dlg(wxGetApp().mainframe, _L("Convert will replace your edited scaffold points. Continue?"), _L("Scaffold Points"),
+                          wxICON_WARNING | wxYES | wxNO);
+        if (dlg.ShowModal() != wxID_YES) return;
+    }
+
+    Plater *plater  = wxGetApp().plater();
+    const bool painted = std::any_of(mo->volumes.begin(), mo->volumes.end(), [](const ModelVolume *mv) {
+        return !mv->supported_facets.empty() || !mv->seam_facets.empty() || !mv->mmu_segmentation_facets.empty() || !mv->fuzzy_skin_facets.empty();
+    });
+    // A refusal leaves the object as it was and takes no snapshot, so it leaves no empty undo step. The snapshot holds
+    // off every other one until Convert returns, so the plate switch below adds none and one undo reverts it all.
+    std::optional<Plater::TakeSnapshot> snapshot;
+    const PresupportedConversion::Summary summary = PresupportedConversion::convert(*mo, size_t(active), [&snapshot, plater]() {
+        snapshot.emplace(plater, "Convert pre-supported model");
+    });
+    NotificationManager *notifications = wxGetApp().notification_manager();
+    if (summary.refusal != Refusal::None) {
+        const wxString why =
+            summary.refusal == Refusal::SeveralParts ?
+                _L("Convert works on an object made of one part. Split the object into objects and convert each one.") :
+            summary.refusal == Refusal::NoArtistTips ?
+                _L("No artist tips found: no separate part of the model is a tip with a rounded end on the figure.") :
+                _L("No artist tips found. If this model's supports are welded to the figure, conversion cannot separate them; "
+                   "Generate can place scaffold points instead.");
+        notifications->push_notification(NotificationType::CustomNotification, NotificationManager::NotificationLevel::WarningNotificationLevel,
+                                         into_u8(why));
+        return;
+    }
+
+    m_generate_failure.clear();
+    m_click_refused = false;
+    // Reloads the scene, which rebuilds the raycasters the cache reads each point's normal from.
+    plater->changed_object(*mo);
+    const auto &objects = plater->model().objects;
+    const int   obj_idx = int(std::find(objects.begin(), objects.end(), mo) - objects.begin());
+    wxGetApp().obj_list()->update_item_error_icon(obj_idx, -1);
+    wxGetApp().obj_list()->update_info_items(size_t(obj_idx));
+    wxGetApp().obj_list()->notify_instance_updated(obj_idx);
+    if (painted)
+        notifications->push_notification(NotificationType::CustomSupportsAndSeamRemovedAfterRepair,
+                                         NotificationManager::NotificationLevel::PrintInfoNotificationLevel,
+                                         _u8L("Custom supports and color painting were removed by the conversion."));
+    reload_cache();
+    plater->set_plater_dirty(true);
+    notifications->push_notification(NotificationType::CustomNotification, NotificationManager::NotificationLevel::RegularNotificationLevel,
+                                     into_u8(format_wxstr(_L("Converted %1% artist tips into scaffold points: %2% duplicates removed, "
+                                                             "%3% axes clamped to 45 degrees, %4% micro struts dropped, "
+                                                             "%5% tips on supports standing on the figure."),
+                                                          summary.tips_converted, summary.duplicates_removed, summary.axes_clamped,
+                                                          summary.micro_struts_dropped, summary.tips_rooted_on_figure)));
+    select_plate_of(*mo, *mo->instances[active]);
+    plater->reslice();
+}
+
 void GLGizmoScaffoldPoints::finish_pending_generate()
 {
     if (!m_generate_pending) return;
@@ -810,6 +877,10 @@ void GLGizmoScaffoldPoints::on_render_input_window(float x, float y, float botto
     m_imgui->disabled_begin(m_generate_pending);
     if (m_imgui->button(m_desc["generate"], m_desc["generate_tooltip"])) wxGetApp().CallAfter([this]() {
         if (m_state == On) generate();
+    });
+    ImGui::SameLine();
+    if (m_imgui->button(m_desc["convert"], m_desc["convert_tooltip"])) wxGetApp().CallAfter([this]() {
+        if (m_state == On) convert();
     });
     m_imgui->disabled_end();
     ImGui::SameLine();

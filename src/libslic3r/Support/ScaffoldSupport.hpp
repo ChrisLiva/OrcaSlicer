@@ -67,7 +67,8 @@ Tips place_tips(const PrintObject &object, const std::vector<std::vector<Support
 // A tip as a list point in ModelObject::raw_mesh()'s frame: a grade over three toolpath widths reads Heavy.
 ScaffoldPoint point_of(const PrintObject &object, const Params &params, const TipSite &site, double grade_mm);
 // A baked list in the builder's frame: each point mapped through trafo_centered(), z + params.z_offset_mm, snapped
-// to the bottom of the object layer holding it; each point not enforced leaning its neck as the planner would there,
+// to the bottom of the object layer holding it; a point's stored axis mapped by trafo_centered()'s linear part, and
+// each point with no axis and not enforced leaning its neck as the planner would there,
 // read off the plan input `threshold_rad` and the object's mesh build with no blocker, since a list ignores blockers
 // as it ignores paint; wall skip (enforced exempt), the islands the list leaves unheld counted by the planner's rule
 // with no tip given, a point holding an island only on its birth piece or, for a nub, on the parts it hangs from, each

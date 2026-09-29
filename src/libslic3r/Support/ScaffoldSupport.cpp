@@ -988,16 +988,19 @@ Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const P
         site.enforced = points[i].enforced;
         site.grade_mm = (points[i].size == ScaffoldHeadSize::Heavy ? 4. : 2.) * params.toolpath_width_mm;
         site.source   = int(i);
+        // A direction takes the linear part alone, which a mirror or the shrinkage scale leave a direction of.
+        if (! points[i].axis.isZero())
+            site.axis = (trafo.linear() * points[i].axis.cast<double>()).normalized().cast<float>();
         sites.push_back(site);
     }
 
-    // A point keeps no axis, so each one not enforced leans its neck as the planner would lean it at that spot, its head
-    // fitted on the object's mesh as the planner fits it. A list ignores support blockers as it ignores paint, so the
-    // plan input reads none.
+    // A point with no axis and not enforced leans its neck as the planner would lean it at that spot, its head fitted
+    // on the object's mesh as the planner fits it; an enforced one with no axis is aimed along the mesh normal. A list
+    // ignores support blockers as it ignores paint, so the plan input reads none.
     tips.mesh             = std::make_shared<const ObjectMesh>(object);
     const PlanInput input = plan_input(object, params, threshold_rad, {}, tips.mesh.get());
     for (TipSite &site : sites)
-        if (! site.enforced)
+        if (! site.enforced && site.axis.isZero())
             site.axis = neck_axis(input, site);
     const std::function<bool(const TipSite &)> at_wall = wall_skip(object, sites, params);
     sites.erase(std::remove_if(sites.begin(), sites.end(), [&](const TipSite &site) {

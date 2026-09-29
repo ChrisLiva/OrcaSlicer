@@ -91,6 +91,9 @@ private:
     void  revert_to_auto();
     // Replaces the list with the tips the last auto slice routed, slicing the plate first when it holds no such slice.
     void  generate();
+    // Turns a pre-supported model into its figure and one point per artist tip, under one undo snapshot, and slices the
+    // instance's plate; a notification says what the conversion did or why it refused.
+    void  convert();
     // Ends a Generate waiting on its slice: copies the routed tips when the slice finished on the object it started on,
     // restores the stashed list when it did not, and does nothing while the slice runs.
     void  finish_pending_generate();

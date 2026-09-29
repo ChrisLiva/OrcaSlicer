@@ -143,7 +143,7 @@ Plan plan_tips(const PlanInput &input, const std::vector<TipSite> &enforced);
 // straight down or no lean up to `input.max_tilt_rad` clears with the head fitting at the pin of `site`'s grade, else
 // the least lean that does, one tilt step apart, and at it the azimuth whose end stands farthest from the model. A site
 // on a birth piece off the bed holds its island as a birth tip does, so where no lean fits the head it takes the least
-// lean its neck alone clears, as the birth search does. A baked point carries no axis, so its list reads it again.
+// lean its neck alone clears, as the birth search does. A baked point that stores no axis reads it again here.
 Vec3f neck_axis(const PlanInput &input, const TipSite &site);
 
 // What the birth rule makes of a birth piece with no tip of a list the planner did not place: the piece continues the

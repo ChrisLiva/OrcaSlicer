@@ -1,12 +1,15 @@
 #include <catch2/catch_all.hpp>
 
+#include "libslic3r/AABBTreeIndirect.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/Format/STL.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Support/PresupportedConversion.hpp"
 #include "libslic3r/Support/ScaffoldSupport.hpp"
 #include "libslic3r/Support/SupportAnalysis.hpp"
 #include "libslic3r/Support/SupportComponents.hpp"
@@ -18,15 +21,18 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <map>
+#include <numeric>
 #include <optional>
 #include <set>
 #include <sstream>
 #include <string>
 
 #include <nlohmann/json.hpp>
+#include <openssl/evp.h>
 
 #include "support_validation.hpp"
 #include "test_helpers.hpp"
@@ -450,6 +456,77 @@ TriangleMesh slope_fixture(double length_mm)
         }
     column.merge(TriangleMesh(its_convex_hull(corners)));
     return column;
+}
+
+// The hull of a sphere of radius `r0` at `a` and one of `r1` at `b`, each sphere's poles on the line through both:
+// an artist tip where the radii differ, a strut piece where they match.
+TriangleMesh swept_spheres(const Vec3d &a, double r0, const Vec3d &b, double r1)
+{
+    const Eigen::Quaterniond turn = Eigen::Quaterniond::FromTwoVectors(Vec3d::UnitZ(), b - a);
+    std::vector<Vec3f>       points;
+    for (const auto &[centre, r] : { std::make_pair(a, r0), std::make_pair(b, r1) })
+        for (const Vec3f &v : its_make_sphere(r, PI / 8.).vertices)
+            points.push_back((centre + turn * v.cast<double>()).cast<float>());
+    return TriangleMesh(its_convex_hull(points));
+}
+
+// An 8-sided rod of radius `r` from `a` to `b` with flat ends: an artist trunk or brace.
+TriangleMesh artist_rod(const Vec3d &a, const Vec3d &b, double r)
+{
+    TriangleMesh rod(its_make_cylinder(r, (b - a).norm(), PI / 4.));
+    Transform3d  place = Transform3d::Identity();
+    place.translate(a);
+    place.rotate(Eigen::Quaterniond::FromTwoVectors(Vec3d::UnitZ(), b - a));
+    rod.transform(place);
+    return rod;
+}
+
+// An artist tip of contact diameter `diameter` at `site` whose wide end, 1 mm across, stands 3 mm off along `axis`.
+struct FixtureTip { Vec3d site, axis; double diameter; };
+TriangleMesh artist_tip(const FixtureTip &tip) { return swept_spheres(tip.site, tip.diameter / 2., tip.site + 3. * tip.axis, 0.5); }
+
+// A pre-supported model: a 20 x 12 x 4 mm figure slab at z 6..10, x 0..20, y 0..12, one shell, with two more figure
+// shells, an 8-sided 1 mm staff standing on its top face at (4, 8) up to z 18 and a 2 mm eye sphere set in its y 0
+// face at (10, 0, 8), both convex like an artist's primitives. Artist tips on the slab's underside each stand on a
+// 0.8 mm trunk sunk in a 3 x 3 x 0.5 mm raft pad on the plate: a 0.3 mm tip straight up at (4, 4), written twice; a
+// 0.5 mm tip straight up at (10, 6); a 0.3 mm tip at (16, 8) leaning 60 degrees toward -x; a 0.45 mm tip at (7, 9)
+// and a 0.4 mm one at (13, 3), either side of the Heavy cut. A brace joins the first two trunks at z 2. On the slab's
+// top face a 0.3 mm tip at (16, 3) stands on the figure pointing down, and under the slab a 0.2 mm micro strut, two
+// capsules and a rod, joins (2, 10) to (4, 10). Each piece is its own shell, as the artist's closed primitives are.
+const FixtureTip presupported_light { Vec3d(4., 4., 6.), -Vec3d::UnitZ(), 0.3 };
+const FixtureTip presupported_heavy { Vec3d(10., 6., 6.), -Vec3d::UnitZ(), 0.5 };
+const FixtureTip presupported_leaning { Vec3d(16., 8., 6.), Vec3d(-std::sin(PI / 3.), 0., -std::cos(PI / 3.)), 0.3 };
+const FixtureTip presupported_at_cut { Vec3d(7., 9., 6.), -Vec3d::UnitZ(), 0.45 };
+const FixtureTip presupported_under_cut { Vec3d(13., 3., 6.), -Vec3d::UnitZ(), 0.4 };
+const FixtureTip presupported_rooted { Vec3d(16., 3., 10.), Vec3d::UnitZ(), 0.3 };
+TriangleMesh presupported_staff() { return artist_rod(Vec3d(4., 8., 10.), Vec3d(4., 8., 18.), 0.5); }
+TriangleMesh presupported_eye()
+{
+    TriangleMesh eye(its_make_sphere(1., PI / 8.));
+    eye.translate(10.f, 0.f, 8.f);
+    return eye;
+}
+TriangleMesh presupported_fixture()
+{
+    TriangleMesh model = make_cube(20., 12., 4.);
+    model.translate(0.f, 0.f, 6.f);
+    model.merge(presupported_staff());
+    model.merge(presupported_eye());
+    for (const FixtureTip &tip : { presupported_light, presupported_light, presupported_heavy, presupported_leaning, presupported_at_cut,
+                                   presupported_under_cut, presupported_rooted })
+        model.merge(artist_tip(tip));
+    for (const FixtureTip &tip : { presupported_light, presupported_heavy, presupported_leaning, presupported_at_cut, presupported_under_cut }) {
+        const Vec3d wide = tip.site + 3. * tip.axis;
+        model.merge(artist_rod(Vec3d(wide.x(), wide.y(), 0.4), wide, 0.4));
+        TriangleMesh pad = make_cube(3., 3., 0.5);
+        pad.translate(float(wide.x() - 1.5), float(wide.y() - 1.5), 0.f);
+        model.merge(pad);
+    }
+    model.merge(artist_rod(Vec3d(4., 4., 2.), Vec3d(10., 6., 2.), 0.3));
+    model.merge(swept_spheres(Vec3d(2., 10., 6.), 0.1, Vec3d(2.5, 10., 5.4), 0.1));
+    model.merge(artist_rod(Vec3d(2.5, 10., 5.4), Vec3d(3.5, 10., 5.4), 0.08));
+    model.merge(swept_spheres(Vec3d(3.5, 10., 5.4), 0.1, Vec3d(4., 10., 6.), 0.1));
+    return model;
 }
 
 // A 6 x 6 x 14 mm column at x 0..6, y 0..6 carrying off its +x face a 6 x 6 mm sheet 0.1 mm thick at x 6..12,
@@ -1254,8 +1331,8 @@ TEST_CASE("A planner axis moves the wall skip's neck reading", "[ScaffoldSupport
 {
     // The rod's birth tip leans its neck away from the column, and the wall skip reads the band at the leaning neck's
     // end, so the tip stays where straight down it would stand in the band. The builder aims the head along that axis,
-    // and the head routes. A baked list keeps no axis: it reads the same lean again off the plan's input, so a point
-    // baked at the tip stays too.
+    // and the head routes. A baked point with no axis reads the same lean again off the plan's input, so a point baked
+    // at the tip stays too; one storing a straight-down axis keeps that axis, and the wall skip takes it at the band.
     Print                    print;
     Model                    model;
     const DynamicPrintConfig config = scaffold_config();
@@ -1284,6 +1361,15 @@ TEST_CASE("A planner axis moves the wall skip's neck reading", "[ScaffoldSupport
     CHECK(baked->baked);
     REQUIRE(baked->tips.size() == 1);
     CHECK(baked->tips.front().result != ScaffoldTipResult::Wall);
+
+    mo.scaffold_points = { { tip->pos, ScaffoldHeadSize::Light, false, -Vec3f::UnitZ() } };
+    REQUIRE(reapply(print, model, config) != Print::APPLY_STATUS_UNCHANGED);
+    print.process();
+    const std::shared_ptr<const ScaffoldRecord> stored = print.objects().front()->scaffold_record();
+    REQUIRE(stored != nullptr);
+    CHECK(stored->baked);
+    REQUIRE(stored->tips.size() == 1);
+    CHECK(stored->tips.front().result == ScaffoldTipResult::Wall);
 }
 
 TEST_CASE("A support blocker leaves a baked list's points as the list alone builds them", "[ScaffoldSupport]")
@@ -2719,6 +2805,190 @@ TEST_CASE("A baked list goes stale under a tilt and stays valid under a Z rotati
     CHECK(object_of(1).scaffold_record()->stale);
 }
 
+TEST_CASE("Converting a pre-supported model leaves the figure and one scaffold point per artist tip", "[ScaffoldSupport]")
+{
+    // The instance turned about Z or not: the points come back in the raw-mesh frame the fixture was built in, and an
+    // axis is clamped to the head tilt cap in the world, where the builder reads it.
+    const double turn = GENERATE(0., PI / 6.);
+    Print        print;
+    Model        model;
+    init_print({ presupported_fixture() }, print, model, scaffold_config());
+    ModelObject   &mo       = *model.objects.front();
+    ModelInstance &instance = *mo.instances.front();
+    instance.set_rotation(Vec3d(0., 0., turn));
+    // A second instance shares the mesh: no bed drop may take its lift either.
+    ModelInstance &second = *mo.add_instance(instance);
+    second.set_offset(instance.get_offset() + Vec3d(40., 0., 0.));
+    mo.ensure_on_bed();
+    const Vec3d world_before = mo.instance_bounding_box(0).min;
+    REQUIRE_THAT(world_before.z(), WithinAbs(0., 1e-6));
+
+    const PresupportedConversion::Summary summary = PresupportedConversion::convert(mo, 0);
+    CHECK(summary.refusal == PresupportedConversion::Refusal::None);
+    CHECK(summary.tips_converted == 6);
+    CHECK(summary.duplicates_removed == 1);
+    CHECK(summary.axes_clamped == 2);
+    CHECK(summary.micro_struts_dropped == 1);
+    CHECK(summary.tips_rooted_on_figure == 1);
+
+    // The figure alone is left, its three shells, where the artist posed it, and no bed drop takes its lift.
+    REQUIRE(mo.volumes.size() == 1);
+    CHECK(mo.volumes.front()->mesh().facets_count() == 12 + presupported_staff().facets_count() + presupported_eye().facets_count());
+    const BoundingBoxf3 raw = mo.raw_mesh_bounding_box();
+    for (int c = 0; c < 3; ++c) {
+        CHECK_THAT(raw.min[c], WithinAbs(Vec3d(0., -1., 6.)[c], 1e-5));
+        CHECK_THAT(raw.max[c], WithinAbs(Vec3d(20., 12., 18.)[c], 1e-5));
+    }
+    for (size_t i = 0; i < mo.instances.size(); ++i) {
+        CHECK_FALSE(mo.instances[i]->auto_drop);
+        CHECK_THAT(mo.instance_bounding_box(i).min.z(), WithinAbs(6., 1e-5));
+    }
+    mo.ensure_on_bed();
+    for (size_t i = 0; i < mo.instances.size(); ++i)
+        CHECK_THAT(mo.instance_bounding_box(i).min.z(), WithinAbs(6., 1e-5));
+
+    // The list: every point enforced, at its tip's contact site, aimed from the site toward the tip's wide end, a lean
+    // past 45 degrees moved onto the cap with its azimuth kept and the rooted tip's straight-up axis leaning toward
+    // the world's +x, Heavy from a 0.45 mm contact.
+    CHECK(mo.scaffold_points_status == ScaffoldPointsStatus::UserModified);
+    CHECK(mo.scaffold_points_pose.isApprox(instance.get_matrix().linear()));
+    CHECK(mo.scaffold_points_mesh_box.min.isApprox(raw.min));
+    CHECK(mo.scaffold_points_mesh_box.max.isApprox(raw.max));
+    const double cap      = std::sin(PI / 4.);
+    const Vec3d  up_leans = instance.get_matrix().linear().inverse() * Vec3d(cap, 0., -cap);
+    const struct { FixtureTip tip; Vec3d axis; ScaffoldHeadSize size; } expected[] = {
+        { presupported_light, -Vec3d::UnitZ(), ScaffoldHeadSize::Light },
+        { presupported_heavy, -Vec3d::UnitZ(), ScaffoldHeadSize::Heavy },
+        { presupported_leaning, Vec3d(-cap, 0., -cap), ScaffoldHeadSize::Light },
+        { presupported_at_cut, -Vec3d::UnitZ(), ScaffoldHeadSize::Heavy },
+        { presupported_under_cut, -Vec3d::UnitZ(), ScaffoldHeadSize::Light },
+        { presupported_rooted, up_leans, ScaffoldHeadSize::Light },
+    };
+    REQUIRE(mo.scaffold_points.size() == std::size(expected));
+    for (const auto &e : expected) {
+        const auto point = std::find_if(mo.scaffold_points.begin(), mo.scaffold_points.end(),
+                                        [&e](const ScaffoldPoint &p) { return (p.pos.cast<double>() - e.tip.site).norm() < 1e-3; });
+        INFO("tip at (" << e.tip.site.x() << ", " << e.tip.site.y() << ", " << e.tip.site.z() << ")");
+        REQUIRE(point != mo.scaffold_points.end());
+        CHECK(point->enforced);
+        CHECK(point->size == e.size);
+        for (int c = 0; c < 3; ++c)
+            CHECK_THAT(point->axis[c], WithinAbs(e.axis[c], 1e-4));
+    }
+}
+
+TEST_CASE("Converting a model with no separable artist tip leaves it unchanged and says why", "[ScaffoldSupport]")
+{
+    using PresupportedConversion::Refusal;
+    const std::string kind = GENERATE(as<std::string>{}, "plain", "welded", "tipless", "two parts");
+    Model        model;
+    ModelObject &mo = *model.add_object();
+    TriangleMesh figure = make_cube(20., 12., 4.);
+    figure.translate(0.f, 0.f, 6.f);
+    Refusal refusal = Refusal::NoSupports;
+    if (kind == "plain")
+        mo.add_volume(figure);
+    else if (kind == "welded") {
+        // A tip sharing the slab's surface makes one shell with it, which no split separates.
+        std::vector<Vec3f> points = figure.its.vertices;
+        append(points, artist_tip(presupported_light).its.vertices);
+        mo.add_volume(TriangleMesh(its_convex_hull(points)));
+    } else if (kind == "tipless") {
+        // A trunk on a raft pad under the slab, with no tip on it.
+        TriangleMesh pad = make_cube(3., 3., 0.5);
+        pad.translate(2.5f, 2.5f, 0.f);
+        figure.merge(pad);
+        figure.merge(artist_rod(Vec3d(4., 4., 0.4), Vec3d(4., 4., 6.), 0.4));
+        mo.add_volume(figure);
+        refusal = Refusal::NoArtistTips;
+    } else {
+        mo.add_volume(presupported_fixture());
+        mo.add_volume(make_cube(2., 2., 2.));
+        refusal = Refusal::SeveralParts;
+    }
+    mo.add_instance();
+    // A list the user placed before, which a refusal must keep.
+    const ScaffoldPoints placed = { { Vec3f(5.f, 5.f, 6.f), ScaffoldHeadSize::Heavy, true } };
+    mo.scaffold_points          = placed;
+    mo.scaffold_points_status   = ScaffoldPointsStatus::UserModified;
+    mo.scaffold_points_mesh_box = mo.raw_mesh_bounding_box();
+    const size_t   facets    = mo.volumes.front()->mesh().facets_count();
+    const ObjectID volume_id = mo.volumes.front()->id();
+
+    DYNAMIC_SECTION(kind) {
+        size_t                                changes = 0;
+        const PresupportedConversion::Summary summary = PresupportedConversion::convert(mo, 0, [&changes]() { ++ changes; });
+        CHECK(summary.refusal == refusal);
+        CHECK(summary.tips_converted == 0);
+        CHECK(changes == 0);
+        CHECK(mo.volumes.front()->mesh().facets_count() == facets);
+        CHECK(mo.volumes.front()->id() == volume_id);
+        CHECK(mo.scaffold_points_status == ScaffoldPointsStatus::UserModified);
+        CHECK(mo.scaffold_points == placed);
+        CHECK(mo.instances.front()->auto_drop);
+    }
+}
+
+TEST_CASE("A converted pre-supported model slices its list and aims each head along its point's axis", "[ScaffoldSupport]")
+{
+    // The instance turned a quarter about Z or not: the builder reads each stored axis through the instance's turn.
+    const double             turn = GENERATE(0., PI / 2.);
+    Print                    print;
+    Model                    model;
+    const DynamicPrintConfig config = scaffold_config();
+    init_print({ presupported_fixture() }, print, model, config);
+    ModelObject &mo = *model.objects.front();
+    mo.instances.front()->set_rotation(Vec3d(0., 0., turn));
+    REQUIRE(PresupportedConversion::convert(mo, 0).refusal == PresupportedConversion::Refusal::None);
+    REQUIRE(reapply(print, model, config) != Print::APPLY_STATUS_UNCHANGED);
+    REQUIRE_NOTHROW(print.process());
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    const std::shared_ptr<const ScaffoldRecord> record = object.scaffold_record();
+    REQUIRE(record != nullptr);
+    CHECK(record->baked);
+    CHECK_FALSE(record->stale);
+    REQUIRE(record->tips.size() == mo.scaffold_points.size());
+
+    // The lifted figure's pad prints on the bed.
+    const auto layers = object.support_layers();
+    REQUIRE(layers.size() > 0);
+    CHECK_THAT(layers.front()->print_z, WithinAbs(0.2, EPSILON));
+
+    const auto result_at = [&](const FixtureTip &tip) {
+        const auto found = std::find_if(record->tips.begin(), record->tips.end(),
+                                        [&tip](const ScaffoldRecord::Tip &t) { return (t.pos.cast<double>() - tip.site).norm() < 1e-3; });
+        REQUIRE(found != record->tips.end());
+        INFO("tip at (" << tip.site.x() << ", " << tip.site.y() << ", " << tip.site.z() << ") reads "
+                        << Catch::StringMaker<ScaffoldTipResult>::convert(found->result));
+        return found->result;
+    };
+    CHECK(result_at(presupported_light) == ScaffoldTipResult::Routed);
+    CHECK(result_at(presupported_heavy) == ScaffoldTipResult::Routed);
+    CHECK(result_at(presupported_leaning) == ScaffoldTipResult::Routed);
+    CHECK(result_at(presupported_at_cut) == ScaffoldTipResult::Routed);
+    CHECK(result_at(presupported_under_cut) == ScaffoldTipResult::Routed);
+    // The tip rooted on the slab's top face points down onto it, where no head fits.
+    CHECK(result_at(presupported_rooted) != ScaffoldTipResult::Routed);
+
+    // 1.2 mm under the leaning tip, clamped to 45 degrees toward the fixture's -x, its head holds the point 1.2 mm
+    // along the fixture's -x, turned with the instance, and not the point straight under the site, where a head along
+    // the mesh normal would stand.
+    const Vec3d  site  = object.trafo_centered() * presupported_leaning.site;
+    const Vec3d  along = object.trafo_centered().linear() * Vec3d(-1.2, 0., 0.);
+    const double z     = site.z() - 1.2;
+    const auto   layer = std::find_if(layers.begin(), layers.end(), [z](const SupportLayer *l) { return l->print_z - l->height <= z && z < l->print_z; });
+    REQUIRE(layer != layers.end());
+    // A head prints as a ring, so each piece's outer contour is what it holds.
+    const ExPolygons head    = footprint(**layer);
+    const auto       encloses = [&head](const Point &p) {
+        return std::any_of(head.begin(), head.end(), [&p](const ExPolygon &piece) { return piece.contour.contains(p); });
+    };
+    INFO("support at z " << (*layer)->print_z << ": " << head.size() << " pieces");
+    CHECK(encloses(Point::new_scale(site.x() + along.x(), site.y() + along.y())));
+    CHECK_FALSE(encloses(Point::new_scale(site.x(), site.y())));
+}
+
 // Hidden ([.]): four full Print::process() passes over a 993k-facet miniature at 0.06 mm layers, minutes in
 // total, and the model lives outside the repo under $ORCA_MINIATURE_CORPUS (docs/miniature_support_validation.md).
 // It gates the style on plate 3 of the corpus against a tree-slim slice measured in the same run.
@@ -2989,4 +3259,159 @@ TEST_CASE("A list Generate copies from corpus plate 1's auto slice routes what t
     CHECK(report.islands_under_held == auto_report.islands_under_held);
     CHECK(baked->bare_islands.size() == record->bare_islands.size());
     CHECK_THAT(report.support_volume_mm3, Catch::Matchers::WithinRel(auto_report.support_volume_mm3, 2e-4));
+}
+
+namespace {
+
+// The lowercase hex sha256 of the file at `path`.
+std::string sha256_of(const std::filesystem::path &path)
+{
+    std::ifstream in(path, std::ios::binary);
+    REQUIRE(in.good());
+    EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr);
+    std::vector<char> buffer(1 << 20);
+    while (in) {
+        in.read(buffer.data(), std::streamsize(buffer.size()));
+        EVP_DigestUpdate(ctx, buffer.data(), size_t(in.gcount()));
+    }
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int  length = 0;
+    EVP_DigestFinal_ex(ctx, digest, &length);
+    EVP_MD_CTX_free(ctx);
+    std::ostringstream hex;
+    for (unsigned int i = 0; i < length; ++ i)
+        hex << std::hex << std::setw(2) << std::setfill('0') << int(digest[i]);
+    return hex.str();
+}
+
+// The distances from a sample of `mesh`'s vertices to `reference` once a rigid transform fits the one onto the other:
+// principal axes align them, the proper rotation of the four sign choices that lands closest kept, then closest-point
+// iterations refine the fit. Sorted ascending.
+std::vector<double> rigid_fit_distances(const indexed_triangle_set &mesh, const indexed_triangle_set &reference)
+{
+    const AABBTreeIndirect::Tree3f tree = AABBTreeIndirect::build_aabb_tree_over_indexed_triangle_set(reference.vertices, reference.indices);
+    const size_t                   step = std::max<size_t>(1, mesh.vertices.size() / 20000);
+    Eigen::Matrix3Xd               sample(3, (mesh.vertices.size() + step - 1) / step);
+    for (size_t i = 0, k = 0; i < mesh.vertices.size(); i += step, ++ k)
+        sample.col(Eigen::Index(k)) = mesh.vertices[i].cast<double>();
+    const auto frame = [](const std::vector<Vec3f> &vertices) {
+        Vec3d c = Vec3d::Zero();
+        for (const Vec3f &v : vertices)
+            c += v.cast<double>();
+        c /= double(vertices.size());
+        Matrix3d cov = Matrix3d::Zero();
+        for (const Vec3f &v : vertices)
+            cov += (v.cast<double>() - c) * (v.cast<double>() - c).transpose();
+        Matrix3d axes = Eigen::SelfAdjointEigenSolver<Matrix3d>(cov).eigenvectors();
+        if (axes.determinant() < 0.)
+            axes.col(0) = -axes.col(0);
+        return std::make_pair(c, axes);
+    };
+    const auto closest = [&](const Eigen::Matrix3Xd &points, Eigen::Matrix3Xd &hits, std::vector<double> &distances) {
+        hits.resize(3, points.cols());
+        distances.assign(size_t(points.cols()), 0.);
+        for (Eigen::Index k = 0; k < points.cols(); ++ k) {
+            size_t      face;
+            Vec3d       hit;
+            const Vec3d p = points.col(k);
+            distances[size_t(k)] = std::sqrt(AABBTreeIndirect::squared_distance_to_indexed_triangle_set(reference.vertices, reference.indices, tree, p, face, hit));
+            hits.col(k)          = hit;
+        }
+    };
+    const auto [c_mesh, a_mesh] = frame(mesh.vertices);
+    const auto [c_ref, a_ref]   = frame(reference.vertices);
+    Transform3d         best    = Transform3d::Identity();
+    double              best_d  = std::numeric_limits<double>::infinity();
+    Eigen::Matrix3Xd    hits;
+    std::vector<double> distances;
+    for (const Vec3d flip : { Vec3d(1., 1., 1.), Vec3d(-1., -1., 1.), Vec3d(-1., 1., -1.), Vec3d(1., -1., -1.) }) {
+        Transform3d fit = Transform3d::Identity();
+        fit.linear()      = a_ref * flip.asDiagonal() * a_mesh.transpose();
+        fit.translation() = c_ref - fit.linear() * c_mesh;
+        closest(fit * sample, hits, distances);
+        const double mean = std::accumulate(distances.begin(), distances.end(), 0.) / double(distances.size());
+        if (mean < best_d) {
+            best_d = mean;
+            best   = fit;
+        }
+    }
+    for (int iteration = 0; iteration < 30; ++ iteration) {
+        const Eigen::Matrix3Xd moved = best * sample;
+        closest(moved, hits, distances);
+        best = Transform3d(Eigen::umeyama(moved, hits, false)) * best;
+    }
+    closest(best * sample, hits, distances);
+    std::sort(distances.begin(), distances.end());
+    return distances;
+}
+
+} // namespace
+
+// Hidden ([.]): three pre-supported miniatures of 25 to 86 MB and their unsupported files, seconds to load each,
+// live outside the repo under $ORCA_MINIATURE_CORPUS/resin_examples. The counts are what an independent analysis of
+// the meshes measured: its distinct tips, the duplicates the files repeat, the axes past 45 degrees (less two Ratmen
+// axes the artist set on the cap, which that analysis read at 45.00001 degrees), the 0.5 mm
+// contacts, the tips on a support standing on the figure and the tipless supports off the plate touching the figure
+// twice or more. Each file's hash is checked first, so a changed corpus reads as a changed corpus.
+TEST_CASE("Converting the reference pre-supported miniatures keeps each artist tip and the figure alone", "[ScaffoldSupport][.]")
+{
+    const char *env = std::getenv("ORCA_MINIATURE_CORPUS");
+    if (env == nullptr || *env == '\0') {
+        std::cout << "corpus dir not set" << std::endl;
+        return;
+    }
+    const std::filesystem::path dir = std::filesystem::path(env) / "resin_examples";
+    struct Pair
+    {
+        std::string supported, supported_sha256, bare, bare_sha256;
+        size_t      tips, duplicates, clamped, heavy, rooted, struts;
+    };
+    const Pair pairs[] = {
+        { "STL_10_Dark Elves 1_Supported.stl", "5afa2901bb68d6f84026f69f33d73ebfa1abc8e2f201adde05d47eb8cb15721e", "10_Dark Elves 1.stl",
+          "16eb732d9eebecca3756247c3542eca0087524a3d4bb875e25d356df35b48749", 117, 2, 18, 32, 5, 14 },
+        { "STL_10_Dark Elves 2_Supported.stl", "b90d3731eaae9d4fb217d487029f750b0572da29b62f0a39bfef4cbc4705dd01", "10_Dark Elves 2.stl",
+          "0266162a464e73c50978f117fb07a18f74a3c0b780da0174e1ebc64b283848a6", 90, 0, 12, 34, 0, 22 },
+        { "STL_AOFQ_Ratmen_Cleric_supported.stl", "dbd69b9d023185bc98e6ecb50e646a6b967fd7c4229baf4d0f0b5ebae4f66496", "AOFQ_Ratmen_Cleric.stl",
+          "385f89bdbf730398da13fe2ebf58f973ad92fffd0f506efb94cc7ef6c5e47756", 214, 1, 73, 25, 0, 17 },
+    };
+    for (const Pair &pair : pairs) {
+        DYNAMIC_SECTION(pair.supported) {
+            REQUIRE(sha256_of(dir / pair.supported) == pair.supported_sha256);
+            REQUIRE(sha256_of(dir / pair.bare) == pair.bare_sha256);
+            Model supported, bare;
+            REQUIRE(load_stl((dir / pair.supported).string().c_str(), &supported));
+            REQUIRE(load_stl((dir / pair.bare).string().c_str(), &bare));
+            supported.add_default_instances();
+            ModelObject &mo = *supported.objects.front();
+
+            const auto                            start   = std::chrono::steady_clock::now();
+            const PresupportedConversion::Summary summary = PresupportedConversion::convert(mo, 0);
+            const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            std::cout << pair.supported << ": " << summary.tips_converted << " tips, " << summary.duplicates_removed << " duplicates, "
+                      << summary.axes_clamped << " clamped, " << summary.tips_rooted_on_figure << " rooted, " << summary.micro_struts_dropped
+                      << " micro struts in " << seconds << " s" << std::endl;
+            REQUIRE(summary.refusal == PresupportedConversion::Refusal::None);
+            CHECK(summary.tips_converted == pair.tips);
+            CHECK(summary.duplicates_removed == pair.duplicates);
+            CHECK(summary.axes_clamped == pair.clamped);
+            CHECK(summary.tips_rooted_on_figure == pair.rooted);
+            CHECK(summary.micro_struts_dropped == pair.struts);
+            CHECK(size_t(std::count_if(mo.scaffold_points.begin(), mo.scaffold_points.end(),
+                                       [](const ScaffoldPoint &p) { return p.size == ScaffoldHeadSize::Heavy; })) == pair.heavy);
+            CHECK(seconds < 10.);
+
+            // The figure is the unsupported file rigidly re-posed: after a fit, nearly every vertex of each lies on the
+            // other, so the conversion neither kept a support nor dropped a part of the figure, and the few faces the
+            // two files hold apart lie within a tenth of a millimetre.
+            const indexed_triangle_set figure = mo.raw_mesh().its, reference = bare.objects.front()->raw_mesh().its;
+            for (const bool reverse : { false, true }) {
+                const std::vector<double> d = reverse ? rigid_fit_distances(reference, figure) : rigid_fit_distances(figure, reference);
+                INFO((reverse ? "unsupported onto figure" : "figure onto unsupported") << ": median " << d[d.size() / 2]
+                     << " mm, 99th percentile " << d[d.size() * 99 / 100] << " mm, max " << d.back() << " mm");
+                CHECK(d[d.size() * 99 / 100] < 1e-3);
+                CHECK(d.back() < 0.1);
+            }
+        }
+    }
 }

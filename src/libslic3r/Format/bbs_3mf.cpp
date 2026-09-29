@@ -3151,7 +3151,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
         const std::string header = "scaffold_points_format_version=";
         std::string       version_text;
         int               version = -1;
-        if (!value_of(lines.front(), header, version_text) || !parse(version_text, version) || version != scaffold_points_format_version) {
+        // Version 1 adds each point's approach axis; a version-0 point reads a zero axis.
+        if (!value_of(lines.front(), header, version_text) || !parse(version_text, version) || version < 0 ||
+            version > scaffold_points_format_version) {
             BOOST_LOG_TRIVIAL(error) << __FUNCTION__ << ": no scaffold point list loaded, unknown header \"" << lines.front() << "\"";
             return;
         }
@@ -3182,21 +3184,25 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
             if (fields[4].empty())
                 return true;
             boost::split(numbers, fields[4], boost::is_any_of(" "), boost::token_compress_off);
-            if (numbers.size() % 5 != 0)
+            const size_t stride = version >= 1 ? 8 : 5;
+            if (numbers.size() % stride != 0)
                 return false;
-            for (size_t i = 0; i < numbers.size(); i += 5) {
-                Vec3f pos;
+            for (size_t i = 0; i < numbers.size(); i += stride) {
+                Vec3f pos, axis = Vec3f::Zero();
                 int   size = 0, enforced = 0;
                 if (!parse(numbers[i], pos.x()) || !parse(numbers[i + 1], pos.y()) || !parse(numbers[i + 2], pos.z()) ||
-                    !parse(numbers[i + 3], size) || !parse(numbers[i + 4], enforced))
+                    !parse(numbers[i + 3], size) || !parse(numbers[i + 4], enforced) ||
+                    (stride == 8 && (!parse(numbers[i + 5], axis.x()) || !parse(numbers[i + 6], axis.y()) || !parse(numbers[i + 7], axis.z()))))
                     return false;
-                if (!pos.allFinite() || (size != 0 && size != 1) || (enforced != 0 && enforced != 1)) {
+                if (!pos.allFinite() || !axis.allFinite() || (size != 0 && size != 1) || (enforced != 0 && enforced != 1)) {
+                    std::string point = numbers[i];
+                    for (size_t k = i + 1; k < i + stride; ++k)
+                        point += " " + numbers[k];
                     BOOST_LOG_TRIVIAL(warning) << "_extract_scaffold_points_from_archive: object " << object_id << " drops scaffold point "
-                                               << i / 5 << ", \"" << numbers[i] << " " << numbers[i + 1] << " " << numbers[i + 2] << " "
-                                               << numbers[i + 3] << " " << numbers[i + 4] << "\"";
+                                               << i / stride << ", \"" << point << "\"";
                     continue;
                 }
-                data.points.push_back({ pos, ScaffoldHeadSize(size), enforced == 1 });
+                data.points.push_back({ pos, ScaffoldHeadSize(size), enforced == 1, axis });
             }
             return true;
         };
@@ -7985,8 +7991,9 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
 
             const ScaffoldPoints& points = object->scaffold_points;
             for (size_t i = 0; i < points.size(); ++i) {
-                snprintf(buffer, sizeof(buffer), (i == 0 ? "%.9g %.9g %.9g %d %d" : " %.9g %.9g %.9g %d %d"), double(points[i].pos.x()),
-                         double(points[i].pos.y()), double(points[i].pos.z()), int(points[i].size), int(points[i].enforced));
+                snprintf(buffer, sizeof(buffer), (i == 0 ? "%.9g %.9g %.9g %d %d %.9g %.9g %.9g" : " %.9g %.9g %.9g %d %d %.9g %.9g %.9g"),
+                         double(points[i].pos.x()), double(points[i].pos.y()), double(points[i].pos.z()), int(points[i].size),
+                         int(points[i].enforced), double(points[i].axis.x()), double(points[i].axis.y()), double(points[i].axis.z()));
                 out += buffer;
             }
             out += "\n";

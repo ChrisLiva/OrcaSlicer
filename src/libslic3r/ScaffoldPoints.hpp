@@ -10,10 +10,13 @@ struct ScaffoldPoint {
     Vec3f            pos = Vec3f::Zero();                 // object raw-mesh frame (ModelObject::raw_mesh())
     ScaffoldHeadSize size = ScaffoldHeadSize::Light;
     bool             enforced = false;
+    // The approach axis in the raw-mesh frame: the direction from `pos` along the neck toward the pillar, straight down
+    // (0, 0, -1) for a head under an overhang, as the builder's head axes run. Zero lets the builder aim the head.
+    Vec3f            axis = Vec3f::Zero();
 
-    bool operator==(const ScaffoldPoint &o) const { return pos == o.pos && size == o.size && enforced == o.enforced; }
+    bool operator==(const ScaffoldPoint &o) const { return pos == o.pos && size == o.size && enforced == o.enforced && axis == o.axis; }
     bool operator!=(const ScaffoldPoint &o) const { return !(*this == o); }
-    template<class Archive> void serialize(Archive &ar) { ar(pos, size, enforced); }
+    template<class Archive> void serialize(Archive &ar) { ar(pos, size, enforced, axis); }
 };
 
 using ScaffoldPoints = std::vector<ScaffoldPoint>;
