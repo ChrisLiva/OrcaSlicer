@@ -1120,8 +1120,14 @@ a scan of every face would build.
   attempt reads only the mesh and would fail the same way. A head whose own
   retries reach no ground still reaches a pillar a neighbour stood, and a head
   routed before its neighbour stood that pillar reaches it on the second pass.
+  Every branch bridge the retries and the second pass lay keeps the full
+  safety distance from the model, a head the filter narrowed to the fallback
+  radius included, since the scaffold's safety distance is its xy distance and
+  the seam clips base within it, and a 0.22 mm head's bridge at the builder's
+  scaled clearance, 0.18 mm, would print broken. The routing loop's first
+  pillar search, which runs before any retry, keeps the scaled clearance.
   SLA printing leaves the field off. On corpus plate 3 upright the scaffold
-  routes 201 of 220 tips with it against 195 without it, and the three
+  routes 200 of 220 tips with it against 195 without it, and the three
   under-held islands stay under-held.
 - Model anchors. `SupportTreeConfig::allow_model_anchors`, default true, gates
   the last-resort route of a head to the model body. The scaffold sets it
@@ -1335,7 +1341,17 @@ along a retry axis into a pillar standing through a hole in the shelf. Without
 the flag the last two are dropped. Two nubs mirrored about that neighbour,
 both ahead of it in the points' order, reach the second pass together, and
 with one bridge allowed on the neighbour's pillar the nub earlier in the order
-takes it in every build while the other stays unrouted.
+takes it in every build while the other stays unrouted. "A thin retry's branch
+bridge keeps the full safety distance from the model" stands a post 0.33 mm off
+the nub's bridge, past the 0.18 mm the scaled clearance keeps and inside the
+full 0.5 mm, and the nub lays no bridge in either order. "A narrowed head's
+branch bridge keeps the full safety distance from the model" hangs a tube
+around an island point under a roof, so the filter narrows its head to 0.22 mm
+and its walks over a holed shelf stand no pillar, and a neighbour leaning along
+its axis stands a pillar in the hole after the island head's turn: the thin
+head's bridge out through a gate in the tube passes the gate's wall 0.23 mm
+off, and the head lays none, neither from its own pose on the second pass nor
+from a retry axis.
 
 `tests/fff_print/test_scaffold_plan.cpp` holds the `[ScaffoldPlan]` cases,
 which call `prepare_plan` and `plan_tips` on fixtures sliced without support,
@@ -1489,7 +1505,7 @@ tree-slim slice's; the upright pose also requires at most three under-held
 islands, all born at z 15.4 with birth tips the builder cannot route, one of
 them leaning its neck 41.4 degrees. The stored pose places 76 tips and routes
 all 76, eight of its births leaning their necks 15.5 to 41.4 degrees, and the
-upright pose places 220 and routes 201 on every run, since the builder routes
+upright pose places 220 and routes 200 on every run, since the builder routes
 in order and isolates its searches.
 
 The hidden case "A list Generate copies from corpus plate 1's auto slice

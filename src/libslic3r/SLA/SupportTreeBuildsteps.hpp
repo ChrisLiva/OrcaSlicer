@@ -354,7 +354,10 @@ class SupportTreeBuildsteps {
     bool connect_along_axes(Head &head, bool try_ground);
 
     // safety_d reaches connect_to_nearpillar, the safety distance scaled by
-    // the head's radius if omitted.
+    // the head's radius if omitted. Under branch_off_retry the retries and the
+    // pass routing_to_model makes over the heads its ordered routing left
+    // unrouted pass the full safety distance, so every branch bridge that pass
+    // lays keeps it, from a head the filter narrowed as from a retry's pose.
     bool search_pillar_and_connect(const Head& source, double safety_d);
     bool search_pillar_and_connect(const Head& source)
     {

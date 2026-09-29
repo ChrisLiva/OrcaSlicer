@@ -244,6 +244,37 @@ indexed_triangle_set holed_shelf_mesh()
     return its;
 }
 
+// A 24x24x1 roof at x -12..12, y -12..12, z 8..9 over a 40x40x4.7 shelf at
+// x -20..20, y -20..20, z 0..4.7 with a 3 mm square hole centred at (2.1, 0),
+// and hanging from the roof at z 5.5..8 a tube around the origin, its walls
+// 0.8 to 1.4 mm off it, with a 1.1 mm gate at |y| < 0.55 through its +x wall.
+// A point under the roof at the origin fits a 0.22 head inside the tube and no
+// 0.6 head. Each walk from the thin head's junction that finds a clear drop
+// into the hole ends over 4.4 mm, 20 thin radii, above the ground, where a
+// thin pillar must widen first, and no widening fits the hole from there. A
+// point over the hole whose axis leans 45 degrees toward +x faces the shelf
+// and walks back over the hole to stand a 0.6 pillar, which the thin head at
+// the origin reaches with a bridge out through the gate.
+indexed_triangle_set gated_tube_mesh()
+{
+    const double c = 2.1, h = 1.5, top = 4.7;
+    indexed_triangle_set its = box(24., 24., 1., -12.f, -12.f, 8.f).its;
+    its_merge(its, box(40., 20. - h, top, -20.f, -20.f, 0.f).its);
+    its_merge(its, box(40., 20. - h, top, -20.f, float(h), 0.f).its);
+    its_merge(its, box(20. + c - h, 2. * h, top, -20.f, float(-h), 0.f).its);
+    its_merge(its, box(20. - c - h, 2. * h, top, float(c + h), float(-h), 0.f).its);
+    its_merge(its, box(0.6, 2.8, 2.5, -1.4f, -1.4f, 5.5f).its);
+    its_merge(its, box(1.6, 0.6, 2.5, -0.8f, 0.8f, 5.5f).its);
+    its_merge(its, box(1.6, 0.6, 2.5, -0.8f, -1.4f, 5.5f).its);
+    its_merge(its, box(0.6, 0.85, 2.5, 0.8f, 0.55f, 5.5f).its);
+    its_merge(its, box(0.6, 0.85, 2.5, 0.8f, -1.4f, 5.5f).its);
+
+    return its;
+}
+
+const sla::SupportPoints GATED_TUBE_POINTS = {sla::SupportPoint(Vec3f(0.f, 0.f, 8.f), 0.2f, true),
+                                              sla::SupportPoint(Vec3f(2.1f, 0.f, 8.f), 0.2f)};
+
 // A 30x3x1 ledge at x 0..30, y 0..3, z 10..11 over a 40x7.5x4.5 block at
 // x -5..35, y -5..2.5, z 0..4.5, with a 40x6x5.5 wall on the block at
 // x -5..35, y -5..1, z 4.5..10 up to the ledge. `comb_points` puts 30 points
@@ -695,6 +726,47 @@ TEST_CASE("A thin retry's branch bridge keeps the full safety distance from the 
     CHECK(branched.bridges().size() == 0);
     CHECK(nub->bridge_id < 0);
     CHECK_FALSE(nub->is_valid());
+}
+
+TEST_CASE("A narrowed head's branch bridge keeps the full safety distance from the model", "[SLASupportGeneration]") {
+    // The tube narrows the island point's head to 0.22 and its walks stand no pillar, so it reaches the second pass
+    // unrouted. The donor, leaning along its axis, faces the shelf and stands its pillar after the island head's turn.
+    // Branching off from its own pose in the second pass or from a retry axis, the thin head's bridge into that pillar
+    // passes the gate's -y wall 0.23 mm off: past the 0.18 mm the safety distance scaled by the thin head's radius
+    // keeps, inside the full 0.5 mm a caller cuts support by, so the head lays no bridge.
+    indexed_triangle_set mesh = gated_tube_mesh();
+    const auto build = [&mesh](bool branch) {
+        sla::SupportTreeConfig cfg;
+        cfg.object_elevation_mm     = 0.;
+        cfg.head_back_radius_mm     = 0.6;
+        cfg.head_fallback_radius_mm = 0.22;
+        cfg.allow_model_anchors     = false;
+        cfg.route_in_order          = true;
+        cfg.retry_thin_head         = true;
+        cfg.island_axis_retry       = true;
+        cfg.branch_off_retry        = branch;
+        sla::SupportTreeBuilder builder;
+        sla::SupportableMesh    sm{mesh, GATED_TUBE_POINTS, cfg};
+        sm.head_axes = {Vec3f::Zero(), leaning_axis(45.)};
+        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(builder, sm));
+        return builder;
+    };
+
+    const sla::SupportTreeBuilder plain = build(false);
+    const sla::Head *plain_island = head_at(plain, GATED_TUBE_POINTS[0].pos);
+    REQUIRE(plain_island != nullptr);
+    CHECK_FALSE(plain_island->is_valid());
+    CHECK_THAT(plain_island->r_back_mm, Catch::Matchers::WithinAbs(0.22, 1e-9));
+
+    const sla::SupportTreeBuilder branched = build(true);
+    const sla::Head *island = head_at(branched, GATED_TUBE_POINTS[0].pos);
+    const sla::Head *donor  = head_at(branched, GATED_TUBE_POINTS[1].pos);
+    REQUIRE(island != nullptr);
+    REQUIRE(donor != nullptr);
+    CHECK(donor->is_valid());
+    CHECK(branched.pillars().size() == 1);
+    CHECK(branched.bridges().size() == 1);
+    CHECK_FALSE(island->is_valid());
 }
 
 TEST_CASE("Heads the ordered loop leaves unrouted take a pillar's last bridge slot in the points' order", "[SLASupportGeneration]") {

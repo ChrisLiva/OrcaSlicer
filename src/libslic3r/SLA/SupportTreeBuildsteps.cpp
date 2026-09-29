@@ -1185,7 +1185,7 @@ void SupportTreeBuildsteps::routing_to_model()
         tbb::this_task_arena::isolate([&] {
             head.id        = idx;
             head.pillar_id = head.bridge_id = SupportTreeNode::ID_UNSET;
-            if (search_pillar_and_connect(head)) return;
+            if (search_pillar_and_connect(head, m_cfg.safety_distance_mm)) return;
             if (m_cfg.retry_thin_head && connect_thin_to_ground(head, false)) return;
             if (m_cfg.island_axis_retry && m_support_pts[idx].is_new_island &&
                 connect_along_axes(head, false)) return;
