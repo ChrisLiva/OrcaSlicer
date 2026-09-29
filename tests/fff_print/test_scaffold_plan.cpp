@@ -79,8 +79,8 @@ struct Sliced
     Plan plan() const { return plan_tips(input, {}); }
     // A tip's xy in the fixture frame.
     Vec2d at(const PlannedTip &tip) const { return unscale(tip.site.position) - shift; }
-    // How far from straight down the builder aims a head at `tip`: the normal it reads off the mesh within one head
-    // radius, one toolpath width, of the tip.
+    // How far from straight down the builder aims a head at `tip`: the normal `sla::normals` reads at the tip at one head
+    // radius, one toolpath width.
     double from_down_deg(const PlannedTip &tip) const
     {
         const Vec2d   xy = unscale(tip.site.position);

@@ -128,20 +128,21 @@ alone and on the re-run, assertion not captured. Capture the failing assertion b
 failed its `split.stability.unsupported_paths > 0` leg once under `ctest -j5` (read `0 > 0`), then passed 12 of 12
 runs alone, 30 of 30 runs five at a time and the full gate re-run (2026-09-10, no raft, analysis requested); re-run
 once before reading a lone failure there as a regression.
-The hidden `[ScaffoldSupport][.]` case "Scaffold support over corpus plate 3 in two poses" fails its upright
-`floating_pieces_removed == 0` leg at `2 == 0` in about 2 of 5 runs of one binary: the SLA builder's routing on the
-upright pose varies between runs, and only the variant reading `routed 1373 / dropped 286` leaves two cage pieces of
-1.85 mm2 at z 2.84 and 2.96 near (10.4, -12.4), which the floating pass removes, while `1375 / 284` reads 0
-(2026-09-24). Once painted enforcers fused beside walls (6514376583), one of about ten upright runs read 18,
-unclassified and not seen again after `cbf397a7a5` fixed an enforced-neck miss (2026-09-25). Re-run the case once
-before reading a non-zero upright count as a regression.
+The hidden `[ScaffoldSupport][.]` case "Scaffold support over corpus plate 3 in two poses" reads one result on every
+run of one binary: `tree_config` sets `route_in_order`, so the SLA builder routes the heads in the points' order, and
+`SupportTreeBuildsteps` runs each head search and each route under `tbb::this_task_arena::isolate`. Three runs of one
+Release binary each read stored `tips placed 76 / routed 76 / dropped 0`, 726.552 mm3, and upright
+`tips placed 220 / routed 195 / dropped 25`, 3 islands under-held, 1104.32 mm3, with `floating_pieces_removed` 0 in both
+poses (2026-09-28). On an unchanged corpus hash a non-zero `floating_pieces_removed` or a changed placed, routed or
+dropped count is a regression; only the process times vary between runs.
 The corpus `elf_test.3mf` carries no painted enforcers since its intentional rewrite at 14:02 on 2026-09-25 (sha256
 `201c5418…`). The hidden case pins that hash in its manifest but never checks it, so a corpus rewrite reads as a code
 regression. Hash the corpus with `shasum -a 256` before reading a hidden-case failure (2026-09-26).
 The legacy tree's own floating pass is not idle on the corpus: a tree-slim slice of plate 3 strips 123 printed
 pieces in the stored pose and 97 upright, every one a base shard of 0.002 to 0.59 mm2 (a temporary role log in
 `remove_floating_toolpaths`, 2026-09-24), so an oracle expecting `floating_pieces_removed == 0` from a legacy style
-fails on unchanged code; classify removed pieces by role before reading a count.
+fails on unchanged code; classify removed pieces by role before reading a count. The same case's tree-slim slices read
+134 stored and 104 upright on each of three runs on 2026-09-28, unclassified.
 `SupportAnalysis::Report::missing_anchor_ids` lists every seed whose region never reached printed material through
 that seed, so the seeds `MiniatureSupport::select_contacts` decimates by design are in it: plate 3 of `elf_test.3mf`
 reads 1638 `missing_critical_anchors` in the harness row while the slice log's `Support contact layout for` line

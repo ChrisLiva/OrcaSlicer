@@ -49,9 +49,11 @@ panel shows the angle under Scaffold as well as under the organic style.
 
 Under Scaffold three settings the style depends on read fixed, and the
 settings panel greys their fields out. The constructor of `TreeSupport` forces
-two of them: `support_miniature_contacts` reads on, because the scaffold places
-one tip per contact the miniature selection keeps, and `support_top_z_distance`
-reads zero, because a tip fuses to the model rather than printing under a gap.
+two of them: `support_miniature_contacts` reads on, because miniature contacts
+put the pass on the measured path, `m_analyze`, the only one that runs the
+floating pass and the support analysis whose report carries the scaffold's
+counters, and `support_top_z_distance` reads zero, because a tip fuses to the
+model rather than printing under a gap.
 `remove_floating_toolpaths` applies the third: it roots support on the plate
 alone under `m_scaffold || support_on_build_plate_only`, because a pillar never
 stands on the model. Auto-tilt names the style as its own generator and refuses
@@ -467,12 +469,14 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
        slower than that is no frontier. Among equals the head goes nearest the
        due cell that hangs farthest, then lowest in y, then x. It stands only
        where it is eligible, not within the reach of a head already on the
-       layer, and where the builder's normal, `sla::normals` averaged within
-       the head's radius, stands within 60 degrees of straight down: the
-       builder tilts a head at most 45 degrees, so such a head meets its face
-       within 15 degrees of the normal, where a rim head beside a steep wall
-       would be aimed into the wall. Every underside head takes the small
-       disc.
+       layer, and where the builder's normal stands within 60 degrees of
+       straight down: the builder tilts a head at most 45 degrees, so such a
+       head meets its face within 15 degrees of the normal, where a rim head
+       beside a steep wall would be aimed into the wall. That normal is
+       `sla::normals` read at the head's radius, one toolpath width: the
+       normal of the face nearest the point, or, where that nearest point lies
+       within the radius of a vertex or an edge, the average of the faces
+       sharing it. Every underside head takes the small disc.
      - The termination guard. A due cell a head covered in 2-D and left due
        hangs across a gap from it, and hangs, so no later head stands for it
        on the strength of that cover.
@@ -540,8 +544,9 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    as the seam and the wall skip build it, the layer's slices grown by the xy
    distance with miter joins, which reach up to three times the distance out
    from a sharp corner. A tip on the model's edge, as every stability tip is,
-   stands where the lattice's rounding decides, so without the exact band the
-   wall skip removed tips the planner had counted on. The neck's shaft also
+   stands where the lattice's rounding decides, so the planner reads the exact
+   band the wall skip reads, and the skip keeps the tips the planner counts
+   on. The neck's shaft also
    crosses no material at the middle of each slab between its end and the
    tip, so a thin shelf the end has passed still turns the neck. Straight
    down, the run of material right under the tip is the tip's own face to the
@@ -630,9 +635,10 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    placed nor dropped.
 5. Grading. A tip's head fuses to the model with a disc of the width its
    grade names: the planner's for every tip it placed, four support lines on
-   a birth that carries its part and two on any other, the size's for a
-   baked point, and two lines for an enforced tip, which asks for none. The
-   head's pin radius is half that width.
+   a birth whose island carries its part more than 2 mm on a section that
+   fuses the wider disc, as step 1 states, and two on any other, the size's
+   for a baked point, and two lines for an enforced tip, which asks for none.
+   The head's pin radius is half that width.
 6. The build. The draw hands the tips and the object mesh, in the frame the
    object's slices use, the one `place_tips` built or on a baked list one of
    its own, to `sla::SupportTreeBuildsteps::execute` with the
@@ -789,8 +795,9 @@ the builder cannot route or cuts.
 
 The returned `Output` carries one `LayerAreas` per planned layer (base,
 interface and exempt heads), the number of
-leading layers that are pad, the five tip and pillar counts, the bare
-islands, and the
+leading layers that are pad, the seven counts `tips_placed`, `tips_routed`,
+`tips_dropped`, `islands_under_held`, `pillars_unbraced`, `islands_slender`
+and `underside_unmet_mm2`, the bare islands, and the
 milliseconds spent in the island map, in every build with the pad, and in the
 slicing with the neck checks, which
 `TreeSupport` writes into its profiler as `STAGE_ISLAND_JOINS`,
@@ -798,10 +805,11 @@ slicing with the neck checks, which
 
 ## Builder changes
 
-The SLA builder takes twelve additions. Each defaults to the behaviour SLA
-printing had before, except the corrector cap, whose change the SLA suite
-tolerates, and the isolated searches and the face lookup, which run on every
-path.
+The SLA builder takes twelve additions. SLA printing runs each at its
+default, where it leaves the output of the SLA path as it is, except the
+corrector cap, which the SLA suite tolerates, and the isolated searches and the
+face lookup, which run on every path and build what a search running alone and
+a scan of every face would build.
 
 - Face lookup. `sla::normals` averages, for a point within its `eps` of a
   mesh vertex or edge, the normals of the faces using that vertex or edge.
@@ -863,7 +871,8 @@ path.
   <id> clears the model on <n> of <m> retry axes and routes along none` at
   debug level, an axis counted once whichever head size clears it. SLA points
   carry the flag from the support point generator, so the field, not the
-  flag, keeps the SLA path as it was.
+  flag, gates the retry, and SLA printing, which leaves the field off, runs
+  none.
   The retries' own tests keep the full safety distance from the model
   whatever the head's radius: the thin retry's scan down, and the axis
   retry's pinhead test, walk and scans down. The builder otherwise scales a
@@ -875,19 +884,16 @@ path.
   other route. The seam clips base within
   the xy distance of the model on every layer, so a thin route passing nearer
   prints broken and the neck check cuts its head. On corpus plate 1's figure
-  in its reference pose, an island born at z 35.2 routed thin along a 45
-  degree axis at the scaled clearance; its bridge passed within the band of
-  the next lock, the clip left nothing printed at z 33.4 and the head was
-  cut. At the full distance none of the axes its head clears routes it, and
-  the island is reported instead.
+  in its reference pose, an island born at z 35.2 clears retry axes with its
+  head, none of them routes it at the full distance, and the slice names the
+  island as bare.
 - Model anchors. `SupportTreeConfig::allow_model_anchors`, default true, gates
   the last-resort route of a head to the model body. The scaffold sets it
   false, so a head that reaches neither a pillar nor the ground is
   invalidated and counted as unrouted instead of standing on the figure.
 - Runtime safety distance. `SupportTreeConfig::safety_distance_mm`, default
   0.5, is the clearance the head and pillar collision checks keep from the
-  model; it used to be a compile-time constant. The scaffold passes the
-  object's support xy distance.
+  model. The scaffold passes the object's support xy distance.
 - The cosine cap. The zero-elevation corrector bridge that walks a pillar out
   of the pad gap caps its length at the height it can descend divided by the
   cosine of the bridge slope, the length at which the walk reaches the

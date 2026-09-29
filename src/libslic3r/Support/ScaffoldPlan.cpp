@@ -696,9 +696,10 @@ private:
     bool eligible(size_t l, const Point &p) const { return m_necks.clear(l, p, straight_down); }
 
     // Whether the builder aims a head at `p` on the bottom of slab `l` within the face cap of straight down: it aims the
-    // head along `sla::normals` at the point, the faces' normal averaged within the head's radius, one toolpath width.
-    // The cap holds its own angle: on a square edge where a 45 degree face meets an upright one the average reads the
-    // cap exactly, and float rounding must not decide it.
+    // head along `sla::normals` at the point, read at the head's radius, one toolpath width: the normal of the face
+    // nearest the point, or where that nearest point lies within the radius of a vertex or an edge, the average of the
+    // faces sharing it. The cap holds its own angle: on a square edge where a 45 degree face meets an upright one the
+    // average reads the cap exactly, and float rounding must not decide it.
     bool faces_down(size_t l, const Point &p) const
     {
         if (m_in.mesh == nullptr)
