@@ -1173,11 +1173,16 @@ void TreeSupport::detect_overhangs(bool check_support_necessity/* = false*/)
         }
     }
 
-    auto enforcers = m_object->slice_support_enforcers();
-    auto blockers  = m_object->slice_support_blockers();
+    // A slice built from a baked scaffold list ignores paint and blockers, for the contacts that bound its planned layers
+    // as for its tips.
+    std::vector<Polygons> enforcers, blockers;
     m_vertical_enforcer_points.clear();
-    m_object->project_and_append_custom_facets(false, EnforcerBlockerType::ENFORCER, enforcers, &m_vertical_enforcer_points);
-    m_object->project_and_append_custom_facets(false, EnforcerBlockerType::BLOCKER, blockers);
+    if (! m_baked) {
+        enforcers = m_object->slice_support_enforcers();
+        blockers  = m_object->slice_support_blockers();
+        m_object->project_and_append_custom_facets(false, EnforcerBlockerType::ENFORCER, enforcers, &m_vertical_enforcer_points);
+        m_object->project_and_append_custom_facets(false, EnforcerBlockerType::BLOCKER, blockers);
+    }
 
     if (is_auto(stype) && config_remove_small_overhangs) {
         // remove small overhangs
@@ -1911,24 +1916,12 @@ void TreeSupport::generate()
 
     profiler.stage_start(STAGE_total);
 
-    // Generate overhang areas
-    profiler.stage_start(STAGE_DETECT_OVERHANGS);
-    m_object->print()->set_status(55, _u8L("Generating support"));
-    detect_overhangs();
-    profiler.stage_finish(STAGE_DETECT_OVERHANGS);
-
-    // A pass measures itself when an analysis was asked for or the miniature contact mode is on, which
-    // thins its contacts against the same required regions the measurement reads. Only such a pass
-    // pays for the regions and the risk field.
-    m_analyze = m_analysis_requested || miniature_contacts;
-    m_object->set_support_analysis(nullptr);
-    m_object->set_emitted_support(nullptr);
-    m_object->set_scaffold_record(nullptr);
-    // A scaffold object holding a baked list builds its tips from the list, so it places no contact, and the regions,
-    // the risk field and the seeds the contact pass reads go unbuilt. A list goes stale, and the pass places auto
-    // contacts, under a pose of the first model instance that tilts, Z-mirrors or scales the one it was baked in, or
-    // once the raw mesh moved from the box stamped with the list. The pose is read off the instance matrix rather than
-    // trafo(), which carries the filament's shrinkage compensation.
+    // A scaffold object holding a baked list builds its tips from the list, so the regions, the risk field and the seeds
+    // the contact pass reads go unbuilt, its contacts only bound the planned layers, and the overhangs they come from
+    // read no paint and no blocker. A list goes stale, and the pass places auto contacts, under a pose of the first model
+    // instance that tilts, Z-mirrors or scales the one it was baked in, or once the raw mesh moved from the box stamped
+    // with the list. The pose is read off the instance matrix rather than trafo(), which carries the filament's shrinkage
+    // compensation.
     const ModelObject &model_object = *m_object->model_object();
     const bool         has_list     = m_scaffold && model_object.scaffold_points_status != ScaffoldPointsStatus::NoPoints;
     bool               stale        = false;
@@ -1942,6 +1935,21 @@ void TreeSupport::generate()
         stale = ! valid;
     }
     const bool baked = has_list && ! stale;
+    m_baked          = baked;
+
+    // Generate overhang areas
+    profiler.stage_start(STAGE_DETECT_OVERHANGS);
+    m_object->print()->set_status(55, _u8L("Generating support"));
+    detect_overhangs();
+    profiler.stage_finish(STAGE_DETECT_OVERHANGS);
+
+    // A pass measures itself when an analysis was asked for or the miniature contact mode is on, which
+    // thins its contacts against the same required regions the measurement reads. Only such a pass
+    // pays for the regions and the risk field.
+    m_analyze = m_analysis_requested || miniature_contacts;
+    m_object->set_support_analysis(nullptr);
+    m_object->set_emitted_support(nullptr);
+    m_object->set_scaffold_record(nullptr);
     if (m_analyze && ! baked)
         build_required_regions();
     // The thinning distance the contact pass runs under, and the distance the measurement carries a
@@ -1963,12 +1971,14 @@ void TreeSupport::generate()
     // auto tmp= diff_ex(offset_ex(m_machine_border, scale_(100)), m_machine_border);
     // if (!tmp.empty()) m_ts_data->m_machine_border = tmp[0];
 
-    if (! baked) {
-        profiler.stage_start(STAGE_GENERATE_CONTACT_NODES);
-        m_object->print()->set_status(56, _u8L("Support: generate contact points"));
-        generate_contact_points();
-        profiler.stage_finish(STAGE_GENERATE_CONTACT_NODES);
-    }
+    // A baked slice places the contacts too, though no tip comes from them: `plan_layer_heights` bounds the support layers
+    // at the contact layers as well as at the tips, and `draw` slices the cage and its neck check cuts heads on those
+    // layers, so a list Generate copied routes what its auto slice routed only on the layers that slice planned. Its
+    // overhangs read no paint and no blocker, so paint changes none of those layers while the list is in use.
+    profiler.stage_start(STAGE_GENERATE_CONTACT_NODES);
+    m_object->print()->set_status(56, _u8L("Support: generate contact points"));
+    generate_contact_points();
+    profiler.stage_finish(STAGE_GENERATE_CONTACT_NODES);
 
     // Before anything thins or routes the contacts: the seeds are what this pass placed, and the ids
     // they get are what every node below them carries from here on.

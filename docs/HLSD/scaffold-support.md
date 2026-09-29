@@ -74,8 +74,9 @@ front half runs as it does for the slim style with miniature contacts on,
 `detect_overhangs`, the contact seeds and the risk field, except that the
 contact selection does not run: the scaffold sets
 `m_problem.contact_min_distance_mm` to 0. The contacts only carry the
-enforcers' requests to the planner. A slice from a valid baked list runs
-`detect_overhangs` and none of the others.
+enforcers' requests to the planner and bound the planned layers. A slice from
+a valid baked list runs `detect_overhangs`, reading no paint and no blocker,
+and `generate_contact_points`, for those bounds, and none of the others.
 
 Before `plan_layer_heights`, under Scaffold, the generator fills a
 `ScaffoldSupport::Params` from the object config (toolpath width, pillar
@@ -177,20 +178,37 @@ object back to a valid pose makes the next slice build from the list again.
 
 ### The baked pass
 
-A baked slice skips every stage that places or thins contacts:
-`build_required_regions`, the risk field, `generate_contact_points`,
-`build_contact_seeds`, and `select_contacts` with its erase loop, so no
-contact a painted enforcer asks for reaches the list, and `baked_tips` reads no
-blocker. Painted enforcers and blockers therefore change nothing while a list
-is in use, and the tool says so. `detect_overhangs`, the support layers, the
-preview cache and the `Params` fill still run, and the generator calls
-`ScaffoldSupport::baked_tips` in place of `place_tips`.
+A baked slice skips every stage that measures or thins contacts:
+`build_required_regions`, the risk field, `build_contact_seeds`, and
+`select_contacts` with its erase loop. It still runs `generate_contact_points`,
+since `plan_layer_heights` bounds the support layers at the contact layers as
+well as at the tips' tops, and `draw` slices the cage and cuts heads at the
+neck check on those layers: a copy of corpus plate 1 planned on the tips'
+tops alone loses the birth tip at print z 42.08 to the neck check, where its
+auto slice routes it. The pass costs 4 ms on plate 1. `TreeSupport::m_baked`
+makes `detect_overhangs` read no enforcer, no blocker and no vertical enforcer
+point for such a slice, so no paint moves its contacts. No contact becomes a
+tip, and `baked_tips` reads no blocker. Painted enforcers and blockers
+therefore change neither the tips nor the planned layers while a list is in
+use, and the tool says so. A list copied from an unpainted auto slice plans
+that slice's layers, less those only its unrouted tips topped. One copied from
+a painted slice also plans other layers wherever the paint added or removed a
+contact layer. The support layers, the preview cache and the `Params` fill
+run as well, and the generator calls `ScaffoldSupport::baked_tips` in place of
+`place_tips`.
 
 `baked_tips` maps each point through `trafo_centered()` into the frame the
-builder uses and adds the object's print z offset. It snaps the point's z to
-the bottom of the object layer holding it, the first layer whose top lies
-above the point or the top layer when none does, and files it on the layer
-under that one, where a contact under an overhang is filed. The list, in the
+builder uses and adds the object's print z offset. It rounds the point's x and
+y to the nearest scaled unit: the list keeps float positions in the raw-mesh
+frame, whose error stays within half a unit per raw axis up to 16 mm from the
+raw origin, so on an instance with no turn about Z or a turn in 90 degree
+steps a copied tip there stands at its auto site to the unit. Any other turn
+mixes both raw axes' error into each frame axis, which can pass half a unit.
+The builder's routing turns on single units: a copy of the shelf fixture
+standing one unit off its auto tips prints 5 % more support. It snaps the
+point's z to the bottom of the object layer holding it, the first layer whose
+top lies above the point or the top layer when none does, and files it on the
+layer under that one, where a contact under an overhang is filed. The list, in the
 model and in the 3MF file, stores no head axis, so `baked_tips` builds the plan
 input `place_tips` builds, with no blocker, on the object mesh it builds and
 hands to `draw`, and gives each point that is not enforced the axis the
@@ -214,20 +232,18 @@ the auto path on those sites:
   holders, and `draw` counts it under-held once none of them routes.
   It marks every point under a mid-air island as holding it, so the builder
   retries that point's head along leaning axes as it retries an auto slice's
-  island holders. A list Generate copied does not route every tip the auto
-  slice routed: on corpus plate 1 the builder cuts the head of the birth tip
-  at print z 42.08 at the neck check, where the auto slice routes it, so the
-  copy routes 89 of its 90 points and counts four islands under-held where the
-  auto slice counts three.
+  island holders. A list Generate copied routes what the auto slice routed:
+  on corpus plate 1 the copy routes its 90 points and counts the auto slice's
+  three islands under-held.
 - The alias merge runs unchanged, so a point within `sla::D_SP` of another
   merges into it.
 
 Each site carries its point's index as `TipSite::source` and its size's disc
 width as `TipSite::grade_mm`, which `tip_grades` keeps as it keeps the
-planner's grade on an auto slice. From `plan_layer_heights` on, a baked slice runs as
-an auto one: the tips' z values top planned layers, `draw` builds and checks
-the heads, and the measurement reads the printed footprints with no seed and
-the scaffold's coverage override.
+planner's grade on an auto slice. From `plan_layer_heights` on, a baked slice
+runs as an auto one: the contacts and the tips' z values bound planned layers,
+`draw` builds and checks the heads, and the measurement reads the printed
+footprints with no seed and the scaffold's coverage override.
 
 ### The record
 
@@ -1259,8 +1275,8 @@ the neck keeps its lean and takes the next azimuth whose head fits, lifted
 taller ones tipped, the far nub held once the list holds its underside head,
 and of two nubs meeting in mid-air one tipped and the other hanging from it.
 
-Two `[ScaffoldSupport]` cases cover the baked list on the shelf fixture. The
-first bakes an auto slice's routed tips and slices from them with no contact
+Four `[ScaffoldSupport]` cases cover the baked list. The first, on the shelf
+fixture, bakes an auto slice's routed tips and slices from them with no contact
 seed and at least 98 % of the points routed. It adds points by hand that read
 `Routed`, `Filtered` on the top face, `Merged` beside an alias and `Wall`
 inside the column, where no neck leaning up to 45 degrees clears the band, and
@@ -1271,7 +1287,16 @@ slice placed, that a copy sharing the source's meshes prints its own list, and
 that on the seeded-islands fixture the auto slice names as many bare islands as
 it counts under-held while an empty list names each island the planner's rule
 would tip.
-The second slices two instances of one object as two PrintObjects and checks
+The second slices the shelf and a plank whose underside falls at 45 degrees
+from a column, where every auto tip routes and the contacts bound support
+layers no tip tops, and slices each again from the list Generate copies: the
+support layers stand at the auto slice's heights, every point routes, the
+under-held count is the auto slice's and the support volume matches within
+0.01 %.
+The third bakes the plank's list and adds a support blocker volume over its
+underside: the support layers, each point's result and the support volume stay
+as they were.
+The fourth slices two instances of one object as two PrintObjects and checks
 that a quarter turn about Z keeps the list while a 30 degree tilt leaves it
 stale with the warning, and that an instance scale and a part moved inside the
 object make it stale. "Scaffold points survive a 3MF round trip and
@@ -1294,6 +1319,13 @@ them leaning its neck 41.4 degrees. The stored pose places 76 tips and routes
 all 76, eight of its births leaning their necks 15.5 to 41.4 degrees, and the
 upright pose places 220 and routes 195 on every run, since the builder routes
 in order and isolates its searches.
+
+The hidden case "A list Generate copies from corpus plate 1's auto slice
+routes what the auto slice routed" slices plate 1, bakes its 90 routed tips
+and slices again, and requires every point to route, the auto slice's three
+under-held islands and bare islands, and a support volume within 0.02 % of the
+auto slice's: the copy reads 1296.51 against 1296.61 mm3, since the planned
+layers the auto slice's five unrouted tips topped are not in the list.
 
 The hidden case "Need-driven tips hold corpus plate 1's hand and sword with
 few contacts" slices plate 1 and requires of the tips its record holds at most

@@ -962,7 +962,11 @@ Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const P
     if (object.layer_count() == 0)
         return tips;
     // A point stands where a contact would: on the bottom of the object layer holding it, the first whose top is above
-    // it, and `obj_layer_nr` one under that layer, the layer a contact under its overhang is filed on.
+    // it, and `obj_layer_nr` one under that layer, the layer a contact under its overhang is filed on. Its xy rounds to
+    // the nearest scaled unit: the list keeps floats, whose error under 16 mm from the raw origin stays within half a
+    // unit per raw axis, so a copied tip there stands at its auto site to the unit, where the builder's routing turns on
+    // single units, on an instance with no turn about Z or a turn in 90 degree steps. Any other turn mixes both raw
+    // axes' error into each frame axis, which can pass half a unit.
     std::vector<TipSite> sites;
     const Transform3d   &trafo = object.trafo_centered();
     for (size_t i = 0; i < points.size(); ++ i) {
@@ -972,7 +976,8 @@ Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const P
                                            [](double z, const Layer *layer) { return z < layer->print_z; });
         if (it == object.layers().end())
             -- it;
-        TipSite site { Point::new_scale(p.x(), p.y()), (*it)->bottom_z(), int(it - object.layers().begin()) - 1 };
+        const Point xy(scale_(p.x()), scale_(p.y()));
+        TipSite     site { xy, (*it)->bottom_z(), int(it - object.layers().begin()) - 1 };
         site.enforced = points[i].enforced;
         site.grade_mm = (points[i].size == ScaffoldHeadSize::Heavy ? 4. : 2.) * params.toolpath_width_mm;
         site.source   = int(i);

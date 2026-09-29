@@ -71,7 +71,7 @@ ScaffoldPoint point_of(const PrintObject &object, const Params &params, const Ti
 // as it ignores paint; wall skip (enforced exempt), the islands the list leaves unheld counted by the planner's rule
 // with no tip given, a point holding an island only on its birth piece, each island a point holds listed with its
 // holders, each point under a mid-air island marked `holds_island`, alias merge, which hands a merged holder's place
-// to its keeper.
+// to its keeper. Each point's xy rounds to the nearest scaled unit.
 Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const Params &params, double threshold_rad);
 // Whether a list baked under the linear part `pose` still holds under `linear`: the change between them keeps lengths
 // and keeps the Z axis, as a turn about Z or a mirror in X or Y does, and a tilt, a Z mirror or a scale does not.
