@@ -150,11 +150,14 @@ Vec3f neck_axis(const PlanInput &input, const TipSite &site);
 // slab below as an overhang does, it is debris, it is a nub held at its merge, or it needs a neck, which the tip at
 // `site` has, `site.axis` included, or which none clears. A nub is held as the plan's merge holds it: by a tip on its
 // own part, or by the tips or the bed holding a part it lies within the hang of. Any other nub needs a neck as any
-// birth does, and one that gets it with the full head fitting holds its part for the nubs meeting it after it.
+// birth does, and one that gets it with the full head fitting holds its part for the nubs meeting it after it. A nub's
+// `holders` are the list's tips on the parts holding it, its own or those it hangs from, as a plan's hung island lists
+// the tips anchoring them, and `rooted` is whether the bed holds one of those parts. A part held only by the tip the rule
+// stands under a nub of it lists no tip.
 enum class BirthHold : uint8_t { Overhang, Debris, Nub, Tip, NoNeck };
-struct BirthRead { BirthHold hold = BirthHold::NoNeck; TipSite site; };
+struct BirthRead { BirthHold hold = BirthHold::NoNeck; TipSite site; std::vector<size_t> holders; bool rooted = false; };
 // `pieces` index `input.components.pieces`, each one a birth piece; the reads follow their order. `tips` are the list's
-// tips, which hold the parts they stand on.
+// tips, which hold the parts they stand on, and a nub's `holders` index them.
 std::vector<BirthRead> read_births(const PlanInput &input, const std::vector<size_t> &pieces, const std::vector<TipSite> &tips);
 } // namespace ScaffoldSupport
 } // namespace Slic3r

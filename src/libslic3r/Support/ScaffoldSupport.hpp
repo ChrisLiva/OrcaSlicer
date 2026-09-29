@@ -38,9 +38,10 @@ struct Output { std::vector<LayerAreas> layers;   // one entry per planned layer
                 std::vector<double>            grades;    // each tip's disc width in mm, indexed like `Tips::sites`
                 std::vector<Vec3d>             bare_islands;   // where an island prints with no tip holding it
               };
-// An island a baked list's points hold: its birth point, x and y in mm and print z, and the sites on its birth piece,
-// indexing `Tips::sites`. `draw` counts it under-held and names it at its birth point where no holder reads `Routed`,
-// as `unheld_after_routing` reads a plan's island.
+// An island a baked list's points hold: its birth point, x and y in mm and print z, and its holders, indexing
+// `Tips::sites`: the sites on its birth piece, or for a nub the bed does not hold at its merge, the sites on the parts
+// holding it there. `draw` counts it under-held and names it at its birth point where no holder reads `Routed`, as
+// `unheld_after_routing` reads a plan's island.
 struct HeldIsland { Vec3d birth; std::vector<size_t> holders; };
 // The tips `draw` builds heads for, the plan they came from and how long it took, with the islands the placement leaves
 // unheld: their count, and where each prints with no tip holding it, x and y in mm and print z. A baked list has no
@@ -69,9 +70,9 @@ ScaffoldPoint point_of(const PrintObject &object, const Params &params, const Ti
 // to the bottom of the object layer holding it; each point not enforced leaning its neck as the planner would there,
 // read off the plan input `threshold_rad` and the object's mesh build with no blocker, since a list ignores blockers
 // as it ignores paint; wall skip (enforced exempt), the islands the list leaves unheld counted by the planner's rule
-// with no tip given, a point holding an island only on its birth piece, each island a point holds listed with its
-// holders, each point under a mid-air island marked `holds_island`, alias merge, which hands a merged holder's place
-// to its keeper. Each point's xy rounds to the nearest scaled unit.
+// with no tip given, a point holding an island only on its birth piece or, for a nub, on the parts it hangs from, each
+// island the points hold listed with its holders, each point under a mid-air island marked `holds_island`, alias merge,
+// which hands a merged holder's place to its keeper. Each point's xy rounds to the nearest scaled unit.
 Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const Params &params, double threshold_rad);
 // Whether a list baked under the linear part `pose` still holds under `linear`: the change between them keeps lengths
 // and keeps the Z axis, as a turn about Z or a mirror in X or Y does, and a tilt, a Z mirror or a scale does not.

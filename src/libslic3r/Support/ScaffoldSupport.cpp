@@ -128,9 +128,11 @@ Vec3d birth_point(const SupportAnalysis::Piece &piece)
 // on that piece and stands no tip higher on the part in for it. Each island a tip holds goes to `held` at its birth
 // point with the indices of the tips on its birth piece, since it prints unheld once none of them routes, as a plan's
 // island does once its holders all fail. An island with no tip on its birth piece is read by the birth rule,
-// `read_births`: one continuing the slab below, debris, or a nub the list's tips or the bed hold at its merge needs
-// none. Any other prints unheld, named at the tip the rule would stand under it, or, where no neck clears, at its
-// birth point.
+// `read_births`: one continuing the slab below or debris needs none, and so does a nub the bed holds at its merge. A nub
+// the list's tips hold there goes to `held` with those tips, as a plan's hung island lists them. A nub held there only
+// by the tip the rule would stand under a nub of its holding part, which the list lacks, and any other island print
+// unheld, named at the tip the rule would stand under the island, or, for a nub or where no neck clears, at its birth
+// point.
 std::vector<Vec3d> unheld_islands(const PlanInput &input, std::vector<TipSite> &tips, std::vector<HeldIsland> &held)
 {
     using namespace SupportAnalysis;
@@ -157,15 +159,20 @@ std::vector<Vec3d> unheld_islands(const PlanInput &input, std::vector<TipSite> &
         }
     const std::vector<BirthRead> reads = read_births(input, births, tips);
     for (size_t i = 0; i < births.size(); ++ i) {
-        if (reads[i].hold == BirthHold::Tip) {
-            const Vec2d xy = unscale(reads[i].site.position);
-            bare.emplace_back(xy.x(), xy.y(), reads[i].site.print_z);
-        } else if (reads[i].hold == BirthHold::NoNeck)
+        const BirthRead &read = reads[i];
+        if (read.hold == BirthHold::Nub && ! read.rooted && ! read.holders.empty()) {
+            held.push_back({ birth_point(map.components.pieces[births[i]]), read.holders });
+            continue;
+        }
+        if (read.hold == BirthHold::Tip) {
+            const Vec2d xy = unscale(read.site.position);
+            bare.emplace_back(xy.x(), xy.y(), read.site.print_z);
+        } else if (read.hold == BirthHold::NoNeck || (read.hold == BirthHold::Nub && ! read.rooted))
             bare.push_back(birth_point(map.components.pieces[births[i]]));
         else
             continue;
         BOOST_LOG_TRIVIAL(debug) << "scaffold island at (" << bare.back().x() << ", " << bare.back().y() << ", " << bare.back().z()
-                                 << ") unheld: " << (reads[i].hold == BirthHold::Tip ? "no point" : "no neck");
+                                 << ") unheld: " << (read.hold == BirthHold::NoNeck ? "no neck" : "no point");
     }
     return bare;
 }

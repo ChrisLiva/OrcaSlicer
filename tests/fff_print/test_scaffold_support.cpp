@@ -552,11 +552,56 @@ TriangleMesh overhung_slab_fixture()
     return base;
 }
 
+// The overhung slab with a 2.5 x 4 x 2 mm ledge off the slab's +x end at x 25.5..28, y 4..8, z 7..9, and under the ledge
+// a 0.6 x 0.6 x 0.07 mm nub 0.2 mm off the slab's +x face, at x 26.2..26.8, y 5.7..6.3, from z 6.93. At 0.05 mm layers
+// the nub prints one layer, z 6.95..7, before the ledge takes it into the slab's part, and all of it lies within its hang
+// of the slab under that layer: it hangs from whatever holds the slab.
+TriangleMesh overhung_nub_fixture()
+{
+    TriangleMesh mesh  = overhung_slab_fixture();
+    TriangleMesh ledge = make_cube(2.5, 4., 2.);
+    ledge.translate(25.5f, 4.f, 7.f);
+    TriangleMesh nub = make_cube(0.6, 0.6, 0.07);
+    nub.translate(26.2f, 5.7f, 6.93f);
+    mesh.merge(ledge);
+    mesh.merge(nub);
+    return mesh;
+}
+
 // A `sx` x `sy` x `sz` mm box with its lowest corner at (x, y, z).
 TriangleMesh box(double x, double y, double z, double sx, double sy, double sz)
 {
     TriangleMesh mesh = make_cube(sx, sy, sz);
     mesh.translate(float(x), float(y), float(z));
+    return mesh;
+}
+
+// The overhung slab's base, column and bar with the slab split at x 19.5..20.5 into two slabs at z 6..8.5, one over the
+// base and one past its edge, that a block at x 14..26, z 8.5..9 joins before the bar takes their part into the column's
+// at z 9. Two 0.6 x 0.6 x 0.07 mm nubs at y 5.7..6.3 each stand 0.2 mm off a face under a ledge at y 4..8 that takes it
+// in one 0.05 mm layer up: one at x 26.2..26.8 from z 8.73, off the block's +x face, under a ledge at x 26..27.5,
+// z 8.8..9, where it hangs from the two slabs' part, and one at x 28.2..28.8 from z 9.43, off the bar's +x end, under a
+// ledge at x 28..30.5, z 9.5..10, where it hangs from the part the bed roots.
+TriangleMesh joined_nubs_fixture()
+{
+    TriangleMesh mesh = make_cube(20., 12., 4.);
+    for (const TriangleMesh &part : { box(0., 5., 4., 2., 2., 6.), box(0., 3., 9., 28., 6., 1.), box(14., 4., 6., 5.5, 4., 2.5),
+                                      box(20.5, 4., 6., 5.5, 4., 2.5), box(14., 4., 8.5, 12., 4., 0.5), box(26., 4., 8.8, 1.5, 4., 0.2),
+                                      box(26.2, 5.7, 8.73, 0.6, 0.6, 0.07), box(28., 4., 9.5, 2.5, 4., 0.5),
+                                      box(28.2, 5.7, 9.43, 0.6, 0.6, 0.07) })
+        mesh.merge(part);
+    return mesh;
+}
+
+// A 4 x 4 x 10 mm column carrying a 12 x 10 x 2 mm slab at z 8..10, and under the slab two 0.6 x 0.6 x 0.07 mm nubs at
+// x 7..7.6 and 7.9..8.5, y 6..6.6, from z 5, which a strand at x 7..8.5 from z 5.07 joins one 0.05 mm layer up and
+// carries into the slab: they meet only each other.
+TriangleMesh paired_nubs_fixture()
+{
+    TriangleMesh mesh = make_cube(4., 4., 10.);
+    for (const TriangleMesh &part : { box(0., 0., 8., 12., 10., 2.), box(7., 6., 5., 0.6, 0.6, 0.07), box(7.9, 6., 5., 0.6, 0.6, 0.07),
+                                      box(7., 6., 5.07, 1.5, 0.6, 2.93) })
+        mesh.merge(part);
     return mesh;
 }
 
@@ -624,6 +669,14 @@ ScaffoldSupport::TipSite site_under(const PrintObject &object, const Vec2d &at, 
         ++ over;
     REQUIRE(over < object.layer_count());
     return { p, object.layers()[over]->bottom_z(), int(over) - 1 };
+}
+
+// Whether a bare island of `bare` stands at `site`, within a lattice cell's rounding of the birth's deepest point.
+bool bare_at(const std::vector<Vec3d> &bare, const ScaffoldSupport::TipSite &site)
+{
+    return std::any_of(bare.begin(), bare.end(), [&site](const Vec3d &p) {
+        return (p.head<2>() - unscale(site.position)).norm() <= 0.3 && std::abs(p.z() - site.print_z) <= 1e-6;
+    });
 }
 
 // `draw` on the object's own layers as the planned layers, each clipped by its slices and those grown by the 0.35 mm
@@ -1411,17 +1464,11 @@ TEST_CASE("A baked list holds an island by the planner's rule and names every is
     const ScaffoldSupport::TipSite rod   = site_under(object, Vec2d(12., 6.), 4.5);
     REQUIRE_THAT(block.print_z, WithinAbs(6., 1e-6));
     REQUIRE_THAT(rod.print_z, WithinAbs(4.6, 1e-6));
-    // Whether a bare island stands at `site`, within a lattice cell's rounding of the birth's deepest point.
-    const auto at = [](const std::vector<Vec3d> &bare, const ScaffoldSupport::TipSite &site) {
-        return std::any_of(bare.begin(), bare.end(), [&site](const Vec3d &p) {
-            return (p.head<2>() - unscale(site.position)).norm() <= 0.3 && std::abs(p.z() - site.print_z) <= 1e-6;
-        });
-    };
 
     const ScaffoldSupport::Tips placed = ScaffoldSupport::place_tips(object, {}, draw.params, threshold, {});
     CHECK(placed.islands_under_held == 1);
     CHECK(placed.bare_islands.size() == 1);
-    CHECK(at(placed.bare_islands, rod));
+    CHECK(bare_at(placed.bare_islands, rod));
 
     const ScaffoldPoints        one  = { ScaffoldSupport::point_of(object, draw.params, block, 2. * draw.params.toolpath_width_mm) };
     const ScaffoldSupport::Tips held = ScaffoldSupport::baked_tips(object, one, draw.params, threshold);
@@ -1429,7 +1476,7 @@ TEST_CASE("A baked list holds an island by the planner's rule and names every is
     CHECK(held.sites.front().holds_island);
     CHECK(held.islands_under_held == 1);
     CHECK(held.bare_islands.size() == 1);
-    CHECK(at(held.bare_islands, rod));
+    CHECK(bare_at(held.bare_islands, rod));
 
     // A point under the rod necks into the base: a copied one is wall-skipped and leaves the rod unheld, while one
     // placed with the tool is enforced, stays and holds it.
@@ -1438,7 +1485,7 @@ TEST_CASE("A baked list holds an island by the planner's rule and names every is
     CHECK(skipped.wall_skipped == std::vector<int>{ 1 });
     CHECK(skipped.islands_under_held == 1);
     CHECK(skipped.bare_islands.size() == 1);
-    CHECK(at(skipped.bare_islands, rod));
+    CHECK(bare_at(skipped.bare_islands, rod));
     pair.back().enforced = true;
     const ScaffoldSupport::Tips enforced = ScaffoldSupport::baked_tips(object, pair, draw.params, threshold);
     CHECK(enforced.wall_skipped.empty());
@@ -1449,8 +1496,8 @@ TEST_CASE("A baked list holds an island by the planner's rule and names every is
     const ScaffoldSupport::Tips empty = ScaffoldSupport::baked_tips(object, {}, draw.params, threshold);
     CHECK(empty.islands_under_held == 2);
     CHECK(empty.bare_islands.size() == 2);
-    CHECK(at(empty.bare_islands, block));
-    CHECK(at(empty.bare_islands, rod));
+    CHECK(bare_at(empty.bare_islands, block));
+    CHECK(bare_at(empty.bare_islands, rod));
 
     // A list Generate copied from the auto slice counts and names what the auto slice does.
     ScaffoldPoints copied;
@@ -1460,7 +1507,7 @@ TEST_CASE("A baked list holds an island by the planner's rule and names every is
     CHECK(baked.sites.size() == placed.sites.size());
     CHECK(baked.islands_under_held == placed.islands_under_held);
     CHECK(baked.bare_islands.size() == placed.bare_islands.size());
-    CHECK(at(baked.bare_islands, rod));
+    CHECK(bare_at(baked.bare_islands, rod));
 }
 
 TEST_CASE("A baked point holds an island only on its birth piece", "[ScaffoldSupport]")
@@ -1580,6 +1627,156 @@ TEST_CASE("A baked island whose points on its birth piece all fail to route read
     CHECK(still_dropped.results.back() == ScaffoldTipResult::Routed);
     CHECK(still_dropped.counts.islands_under_held == 1);
     CHECK(still_dropped.bare_islands.size() == 1);
+}
+
+TEST_CASE("A baked nub counts under-held once the points on the part it hangs from all fail to route", "[ScaffoldSupport]")
+{
+    // At 0.05 mm layers the slab is born at z 6 and the nub at z 6.95, and the nub merges into the slab's part at z 7 with
+    // no point on its own birth piece. The plan hangs it from the slab's tips, so it prints unheld once they all fail. A
+    // list reads it the same way: a point on the slab holds the slab and the nub, and when that point has no route both
+    // print with no tip holding them and are named at their birth points. With no point nothing holds the slab at the
+    // nub's merge, so the nub needs the tip the rule stands under it, which the list lacks, and counts with the slab.
+    Print print;
+    Model model;
+    init_print({ overhung_nub_fixture() }, print, model,
+               fixture_config({ { "enable_support", "0" }, { "layer_height", "0.05" }, { "initial_layer_print_height", "0.05" },
+                                { "layer_change_gcode", "G92 E0" } }));
+    print.process();
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    const DrawOnLayers draw(object);
+    const double       threshold = M_PI / 6.;
+    const ScaffoldSupport::TipSite over   = site_under(object, Vec2d(16., 6.), 5.);
+    const ScaffoldSupport::TipSite beyond = site_under(object, Vec2d(24., 6.), 5.);
+    const ScaffoldSupport::TipSite nub    = site_under(object, Vec2d(26.5, 6.), 6.5);
+    REQUIRE_THAT(over.print_z, WithinAbs(6., 1e-6));
+    REQUIRE_THAT(beyond.print_z, WithinAbs(6., 1e-6));
+    REQUIRE_THAT(nub.print_z, WithinAbs(6.95, 1e-6));
+    const auto point = [&](const ScaffoldSupport::TipSite &site) {
+        return ScaffoldSupport::point_of(object, draw.params, site, 2. * draw.params.toolpath_width_mm);
+    };
+
+    const ScaffoldSupport::Tips placed = ScaffoldSupport::place_tips(object, {}, draw.params, threshold, {});
+    const auto hung = std::find_if(placed.plan.islands.begin(), placed.plan.islands.end(), [](const ScaffoldSupport::Island &island) {
+        return std::abs(island.birth.z() - 6.95) < 1e-6;
+    });
+    REQUIRE(hung != placed.plan.islands.end());
+    CHECK(hung->reason == ScaffoldSupport::IslandReason::Hung);
+    CHECK_FALSE(hung->rooted);
+    CHECK_FALSE(hung->holders.empty());
+
+    const ScaffoldSupport::Tips held = ScaffoldSupport::baked_tips(object, { point(beyond) }, draw.params, threshold);
+    REQUIRE(held.sites.size() == 1);
+    CHECK(held.islands_under_held == 0);
+    REQUIRE(held.held_islands.size() == 2);
+    for (const ScaffoldSupport::HeldIsland &island : held.held_islands)
+        CHECK(island.holders == std::vector<size_t>{ 0 });
+    const ScaffoldSupport::Output routed = draw(object, held);
+    REQUIRE(routed.results.size() == 1);
+    CHECK(routed.results.front() == ScaffoldTipResult::Routed);
+    CHECK(routed.counts.islands_under_held == 0);
+    CHECK(routed.bare_islands.empty());
+
+    const ScaffoldSupport::Tips stranded = ScaffoldSupport::baked_tips(object, { point(over) }, draw.params, threshold);
+    REQUIRE(stranded.sites.size() == 1);
+    CHECK(stranded.islands_under_held == 0);
+    CHECK(stranded.held_islands.size() == 2);
+    const ScaffoldSupport::Output dropped = draw(object, stranded);
+    REQUIRE(dropped.results.size() == 1);
+    CHECK(dropped.results.front() != ScaffoldTipResult::Routed);
+    CHECK(dropped.counts.islands_under_held == 2);
+    CHECK(dropped.bare_islands.size() == 2);
+    CHECK(bare_at(dropped.bare_islands, nub));
+
+    const ScaffoldSupport::Tips empty = ScaffoldSupport::baked_tips(object, {}, draw.params, threshold);
+    CHECK(empty.islands_under_held == 2);
+    CHECK(empty.bare_islands.size() == 2);
+    CHECK(bare_at(empty.bare_islands, nub));
+}
+
+TEST_CASE("A baked nub hanging from a part the bed roots counts nothing once the points on that part fail to route", "[ScaffoldSupport]")
+{
+    // At 0.05 mm layers both slabs are born at z 6 and joined at z 8.5, the first nub is born at z 8.75 and hangs from
+    // their part at z 8.8, and the second is born at z 9.45 and hangs at z 9.5 from the part the bar joined them into
+    // with the column the bed roots. A point under the slab over the base has no route: once it drops, that slab and the
+    // first nub, which it holds, print with no tip holding them, as does the second slab, which has no point. The second
+    // nub needs no point, since the bed holds its part.
+    Print print;
+    Model model;
+    init_print({ joined_nubs_fixture() }, print, model,
+               fixture_config({ { "enable_support", "0" }, { "layer_height", "0.05" }, { "initial_layer_print_height", "0.05" },
+                                { "layer_change_gcode", "G92 E0" } }));
+    print.process();
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    const DrawOnLayers draw(object);
+    const double       threshold = M_PI / 6.;
+    const ScaffoldSupport::TipSite over   = site_under(object, Vec2d(16., 6.), 5.);
+    const ScaffoldSupport::TipSite first  = site_under(object, Vec2d(26.5, 6.), 8.6);
+    const ScaffoldSupport::TipSite second = site_under(object, Vec2d(28.5, 6.), 9.3);
+    REQUIRE_THAT(over.print_z, WithinAbs(6., 1e-6));
+    REQUIRE_THAT(first.print_z, WithinAbs(8.75, 1e-6));
+    REQUIRE_THAT(second.print_z, WithinAbs(9.45, 1e-6));
+    const auto island_at = [](const ScaffoldSupport::Plan &plan, double z) {
+        return std::find_if(plan.islands.begin(), plan.islands.end(),
+                            [z](const ScaffoldSupport::Island &island) { return std::abs(island.birth.z() - z) < 1e-6; });
+    };
+
+    const ScaffoldSupport::Tips placed      = ScaffoldSupport::place_tips(object, {}, draw.params, threshold, {});
+    const auto                  first_plan  = island_at(placed.plan, 8.75);
+    const auto                  second_plan = island_at(placed.plan, 9.45);
+    REQUIRE(first_plan != placed.plan.islands.end());
+    REQUIRE(second_plan != placed.plan.islands.end());
+    CHECK(first_plan->reason == ScaffoldSupport::IslandReason::Hung);
+    CHECK_FALSE(first_plan->rooted);
+    CHECK(second_plan->reason == ScaffoldSupport::IslandReason::Hung);
+    CHECK(second_plan->rooted);
+
+    const ScaffoldPoints        list     = { ScaffoldSupport::point_of(object, draw.params, over, 2. * draw.params.toolpath_width_mm) };
+    const ScaffoldSupport::Tips stranded = ScaffoldSupport::baked_tips(object, list, draw.params, threshold);
+    REQUIRE(stranded.sites.size() == 1);
+    CHECK(stranded.islands_under_held == 1);
+    CHECK(stranded.held_islands.size() == 2);
+    const ScaffoldSupport::Output dropped = draw(object, stranded);
+    REQUIRE(dropped.results.size() == 1);
+    CHECK(dropped.results.front() != ScaffoldTipResult::Routed);
+    CHECK(dropped.counts.islands_under_held == 3);
+    CHECK(dropped.bare_islands.size() == 3);
+    CHECK(bare_at(dropped.bare_islands, first));
+    CHECK_FALSE(bare_at(dropped.bare_islands, second));
+}
+
+TEST_CASE("A baked list with no point counts both of two nubs that meet only each other", "[ScaffoldSupport]")
+{
+    // At 0.05 mm layers both nubs are born at z 5 and meet at z 5.05. The plan tips one and hangs the other from it. A
+    // list with no point lacks that tip, so the one the rule tips is under-held, named at the tip the rule stands under
+    // it, and the other, whose part only that tip would hold, is under-held too, named at its birth point.
+    Print print;
+    Model model;
+    init_print({ paired_nubs_fixture() }, print, model,
+               fixture_config({ { "enable_support", "0" }, { "layer_height", "0.05" }, { "initial_layer_print_height", "0.05" },
+                                { "layer_change_gcode", "G92 E0" } }));
+    print.process();
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    const DrawOnLayers draw(object);
+    const double       threshold = M_PI / 6.;
+
+    const ScaffoldSupport::Tips placed = ScaffoldSupport::place_tips(object, {}, draw.params, threshold, {});
+    CHECK(placed.islands_under_held == 0);
+    CHECK(std::count_if(placed.plan.islands.begin(), placed.plan.islands.end(), [](const ScaffoldSupport::Island &island) {
+              return island.reason == ScaffoldSupport::IslandReason::Hung && std::abs(island.birth.z() - 5.) < 1e-6;
+          }) == 1);
+
+    const ScaffoldSupport::Tips empty = ScaffoldSupport::baked_tips(object, {}, draw.params, threshold);
+    CHECK(empty.islands_under_held == 2);
+    CHECK(empty.bare_islands.size() == 2);
+    for (const Vec2d &nub : { Vec2d(7.3, 6.3), Vec2d(8.2, 6.3) }) {
+        const ScaffoldSupport::TipSite site = site_under(object, nub, 4.5);
+        INFO("nub at (" << nub.x() << ", " << nub.y() << ")");
+        REQUIRE_THAT(site.print_z, WithinAbs(5., 1e-6));
+        CHECK(bare_at(empty.bare_islands, site));
+    }
 }
 
 TEST_CASE("A head whose neck bottoms in the xy band is dropped while one whose neck clears it keeps its head and no ring floats",

@@ -1411,7 +1411,8 @@ TEST_CASE("A baked point off a birth piece takes no lean whose head meets the mo
 TEST_CASE("A list's tipless nub hangs only where the planner would hang it", "[ScaffoldPlan]")
 {
     // A baked list reads each tipless birth by the planner's rule, so a nub hangs only from a part the list's tips or
-    // the bed hold within its hang. Under the nub fixture's slab at 0.05 mm layers A hangs from the column the bed roots,
+    // the bed hold within its hang, and lists the tips it hangs from as the plan's hung island does, with whether the bed
+    // holds one of those parts. Under the nub fixture's slab at 0.05 mm layers A hangs from the column the bed roots,
     // while B stands too far off and C stands free too long: both need their tip.
     {
         Sliced       s(nubs_under_slab(), 0.05);
@@ -1421,21 +1422,32 @@ TEST_CASE("A list's tipless nub hangs only where the planner would hang it", "[S
         REQUIRE(c != size_t(-1));
         const std::vector<BirthRead> reads = read_births(s.input, { a, b, c }, {});
         CHECK(reads[0].hold == BirthHold::Nub);
+        CHECK(reads[0].rooted);
+        CHECK(reads[0].holders.empty());
         CHECK(reads[1].hold == BirthHold::Tip);
         CHECK(reads[2].hold == BirthHold::Tip);
     }
-    // The far nub of the underside head case needs its tip until the list holds the head its own layer places.
+    // The far nub of the underside head case needs its tip until the list holds the head its own layer places, which then
+    // holds it as the plan's island lists it.
     {
         Sliced s(merged({ box(0, 0, 0, 4, 4, 10), box(0, 0, 8, 12, 10, 2), box(5.05, 1.69, 7.93, 0.82, 0.82, 0.07) }), 0.05);
-        const size_t nub = birth_piece(s, BoundingBoxf3(Vec3d(4.9, 1.5, 7.8), Vec3d(6.0, 2.7, 7.99)));
+        const BoundingBoxf3 box_nub(Vec3d(4.9, 1.5, 7.8), Vec3d(6.0, 2.7, 7.99));
+        const size_t        nub = birth_piece(s, box_nub);
         REQUIRE(nub != size_t(-1));
+        const Plan           plan = s.plan();
         std::vector<TipSite> list;
-        for (const PlannedTip &tip : s.plan().tips)
+        for (const PlannedTip &tip : plan.tips)
             list.push_back(tip.site);
         CHECK(read_births(s.input, { nub }, {}).front().hold == BirthHold::Tip);
-        CHECK(read_births(s.input, { nub }, list).front().hold == BirthHold::Nub);
+        const BirthRead read = read_births(s.input, { nub }, list).front();
+        CHECK(read.hold == BirthHold::Nub);
+        CHECK_FALSE(read.rooted);
+        const std::vector<const Island *> found = islands_in(s, plan, box_nub);
+        REQUIRE(found.size() == 1);
+        CHECK(read.holders == found.front()->holders);
     }
     // Of two nubs meeting only each other the first needs its tip and the second hangs from it, as the plan places one.
+    // The list holds neither part, so the hung nub lists no tip and no bed holds it.
     {
         Sliced s(merged({ box(0, 0, 0, 4, 4, 10), box(0, 0, 8, 12, 10, 2), box(7, 6, 5, 0.6, 0.6, 0.07), box(7.9, 6, 5, 0.6, 0.6, 0.07),
                           box(7, 6, 5.07, 1.5, 0.6, 2.93) }),
@@ -1449,5 +1461,53 @@ TEST_CASE("A list's tipless nub hangs only where the planner would hang it", "[S
         const size_t hung   = size_t(std::count_if(reads.begin(), reads.end(), [](const BirthRead &r) { return r.hold == BirthHold::Nub; }));
         CHECK(tipped == 1);
         CHECK(hung == 1);
+        for (const BirthRead &read : reads)
+            if (read.hold == BirthHold::Nub) {
+                CHECK(read.holders.empty());
+                CHECK_FALSE(read.rooted);
+            }
     }
+}
+
+TEST_CASE("A list's nub hanging from joined parts lists the tips on each and reads the bed under either", "[ScaffoldPlan]")
+{
+    // A 20 x 12 x 4 base carries a 2 x 2 column to a 28 x 6 x 1 bar at z 9..10, and two slabs at x 14..19.5 and
+    // 20.5..26, y 4..8, are born at z 6 in mid-air, joined at z 8.5 by a block at x 14..26 and taken into the column's
+    // part, which the bed roots, by the bar at z 9. At 0.05 mm layers a 0.6 mm nub 0.2 mm off the block's +x face hangs
+    // from the two slabs' part at z 8.8, and one 0.2 mm off the bar's +x end hangs from the bed's part at z 9.5, each
+    // taken in by a ledge. With the plan's tips as the list, each nub lists the tips the plan's hung island lists, those
+    // under both slabs among them, and only the second reads the bed under its part.
+    Sliced s(merged({ box(0, 0, 0, 20, 12, 4), box(0, 5, 4, 2, 2, 6), box(0, 3, 9, 28, 6, 1), box(14, 4, 6, 5.5, 4, 2.5),
+                      box(20.5, 4, 6, 5.5, 4, 2.5), box(14, 4, 8.5, 12, 4, 0.5), box(26, 4, 8.8, 1.5, 4, 0.2),
+                      box(26.2, 5.7, 8.73, 0.6, 0.6, 0.07), box(28, 4, 9.5, 2.5, 4, 0.5), box(28.2, 5.7, 9.43, 0.6, 0.6, 0.07) }),
+             0.05);
+    const BoundingBoxf3 box_first(Vec3d(26, 5.5, 8.7), Vec3d(27, 6.5, 8.79)), box_second(Vec3d(28, 5.5, 9.4), Vec3d(29, 6.5, 9.49));
+    const BoundingBoxf3 near_slab(Vec3d(14, 4, 5.9), Vec3d(19.5, 8, 6.1)), far_slab(Vec3d(20.5, 4, 5.9), Vec3d(26, 8, 6.1));
+    const size_t        first = birth_piece(s, box_first), second = birth_piece(s, box_second);
+    REQUIRE(first != size_t(-1));
+    REQUIRE(second != size_t(-1));
+    const Plan           plan = s.plan();
+    std::vector<TipSite> list;
+    for (const PlannedTip &tip : plan.tips)
+        list.push_back(tip.site);
+    const std::vector<const Island *> first_plan = islands_in(s, plan, box_first), second_plan = islands_in(s, plan, box_second);
+    REQUIRE(first_plan.size() == 1);
+    REQUIRE(second_plan.size() == 1);
+    const auto sorted = [](std::vector<size_t> tips) {
+        std::sort(tips.begin(), tips.end());
+        return tips;
+    };
+    const auto under = [&](const std::vector<size_t> &holders, const BoundingBoxf3 &slab) {
+        return std::any_of(holders.begin(), holders.end(), [&](size_t t) { return inside(s, plan.tips[t], slab); });
+    };
+
+    const std::vector<BirthRead> reads = read_births(s.input, { first, second }, list);
+    CHECK(reads[0].hold == BirthHold::Nub);
+    CHECK_FALSE(reads[0].rooted);
+    CHECK(sorted(reads[0].holders) == sorted(first_plan.front()->holders));
+    CHECK(under(reads[0].holders, near_slab));
+    CHECK(under(reads[0].holders, far_slab));
+    CHECK(reads[1].hold == BirthHold::Nub);
+    CHECK(reads[1].rooted);
+    CHECK(sorted(reads[1].holders) == sorted(second_plan.front()->holders));
 }

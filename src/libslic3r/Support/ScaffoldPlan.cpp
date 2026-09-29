@@ -1750,18 +1750,21 @@ std::vector<BirthRead> read_births(const PlanInput &input, const std::vector<siz
     // The nubs settle at their merges bottom up as the plan's `settle` settles them, a part held where the bed roots it
     // or one of `tips` stands on it under the merge slab. A nub the rule tips holds its part for the nubs after it, as
     // the tip the plan would place there would, unless that tip's full head does not fit, which the plan anchors nowhere.
-    std::vector<char> tipped(all.size(), 0), held(all.size(), 0);   // per piece, and per root
-    for (const TipSite &site : tips)
-        if (const int l = site.obj_layer_nr + 1; l >= 0 && size_t(l) < input.slabs.size())
-            if (const size_t q = piece_at(input, size_t(l), site.position); q != size_t(-1))
-                tipped[q] = 1;
+    std::vector<std::vector<size_t>> on_piece(all.size());   // per piece: the tips standing on it
+    for (size_t t = 0; t < tips.size(); ++ t)
+        if (const int l = tips[t].obj_layer_nr + 1; l >= 0 && size_t(l) < input.slabs.size())
+            if (const size_t q = piece_at(input, size_t(l), tips[t].position); q != size_t(-1))
+                on_piece[q].push_back(t);
+    // Per root: whether a tip, the bed or the rule's tip holds its part, whether the bed does, and the tips on it.
+    std::vector<char>                held(all.size(), 0), rooted(all.size(), 0);
+    std::vector<std::vector<size_t>> points(all.size());
     DisjointSets                      sets(all.size());
     const std::function<bool(size_t)> holds = [&held](size_t r) { return held[r] != 0; };
     for (size_t s = 0; s < input.slabs.size(); ++ s) {
         for (size_t q = ranges[s].first; q < ranges[s].second; ++ q) {
             const SupportAnalysis::Piece &piece = all[q];
             if (piece.below.empty()) {
-                held[q] = piece.bottom_z <= input.slabs.front().bottom_z + EPSILON;
+                held[q] = rooted[q] = piece.bottom_z <= input.slabs.front().bottom_z + EPSILON;
                 continue;
             }
             std::vector<size_t> roots;
@@ -1782,25 +1785,36 @@ std::vector<BirthRead> read_births(const PlanInput &input, const std::vector<siz
                     std::vector<size_t> holding;
                     if (held[r]) {
                         out[i].hold = BirthHold::Nub;
+                        holding     = { r };
                     } else if (const Polygons under = footing(input, sets, q, r, all[p].polygon, hang, holds, holding);
                                ! under.empty() && within(all[p].polygon, under, hang)) {
                         out[i].hold = BirthHold::Nub;
                     } else {
                         held[r] = tip(i);
+                        continue;
+                    }
+                    for (const size_t rb : holding) {
+                        append(out[i].holders, points[rb]);
+                        out[i].rooted = out[i].rooted || rooted[rb];
                     }
                 }
             }
             const size_t root = roots.front();
             for (size_t k = 1; k < roots.size(); ++ k) {
-                held[root] = held[root] || held[roots[k]];
+                held[root]   = held[root] || held[roots[k]];
+                rooted[root] = rooted[root] || rooted[roots[k]];
+                append(points[root], std::move(points[roots[k]]));
                 sets.join(root, roots[k]);
             }
             sets.join(root, q);
         }
         // A tip on this slab holds its part from the next merge on, as the plan places a slab's tips after its merges.
         for (size_t q = ranges[s].first; q < ranges[s].second; ++ q)
-            if (tipped[q])
-                held[sets.find(q)] = 1;
+            if (! on_piece[q].empty()) {
+                const size_t r = sets.find(q);
+                held[r]        = 1;
+                append(points[r], on_piece[q]);
+            }
     }
     return out;
 }
