@@ -67,6 +67,15 @@ struct LayerGrid
     }
 };
 
+// The builder's full head: the back's radius, the length the filter tests the head clear over, from the tip's point,
+// where the pin meets the model, to the far side of the back sphere, and the clearance it keeps from the model, as the
+// builder's config sets them. A leaning neck is accepted only where this head, at the tip's pin, clears the mesh along
+// its axis, so the builder keeps the axis and the full head; a zero length tests no head.
+struct HeadShape
+{
+    double back_mm = 0., length_mm = 0., safety_mm = 0.;
+};
+
 // What the planner reads of a slice, built once per slice.
 struct PlanInput
 {
@@ -82,9 +91,10 @@ struct PlanInput
     std::vector<double>                self_support_mm;    // one per object layer: the step the layer below carries
     double toolpath_width_mm = 0., xy_distance_mm = 0., neck_depth_mm = 0.;
     double bridge_mm         = 0.;        // the longest line an underside bridges between held ends, 0 for none
-    const ObjectMesh *mesh   = nullptr;   // the faces a head meets; with none the planner reads no face
+    const ObjectMesh *mesh   = nullptr;   // the faces a head meets; with none the planner reads no face and fits no head
     double z_offset_mm       = 0.;        // print z minus mesh z, the object's lift
     double max_tilt_rad      = max_head_tilt_rad;   // how far a birth's or stability tip's neck may lean, 0 for straight down only
+    HeadShape head;                       // the head a leaning neck must fit, which `prepare_plan` leaves to its caller
 };
 // `bridge_mm` is `max_bridge_length`, `threshold_rad` the overhang detector's threshold angle and `blockers` the support
 // blockers per object layer, as TreeSupport gathers them. `mesh` is the object's, which the plan reads through the
@@ -128,8 +138,9 @@ struct Plan
 Plan plan_tips(const PlanInput &input, const std::vector<TipSite> &enforced);
 
 // The axis a neck from `site` leans along by the planner's search, `site` the only spot tried: zero where it clears
-// straight down or no lean up to `input.max_tilt_rad` clears, else the least lean that clears, one tilt step apart, and
-// at it the azimuth whose end stands farthest from the model. A baked point carries no axis, so its list reads it again.
+// straight down or no lean up to `input.max_tilt_rad` clears with the head fitting at the pin of `site`'s grade, else
+// the least lean that does, one tilt step apart, and at it the azimuth whose end stands farthest from the model. A baked
+// point carries no axis, so its list reads it again.
 Vec3f neck_axis(const PlanInput &input, const TipSite &site);
 
 // What the birth rule makes of a birth piece with no tip of a list the planner did not place: the piece continues the

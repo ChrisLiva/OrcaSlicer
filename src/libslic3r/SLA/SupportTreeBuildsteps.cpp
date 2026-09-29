@@ -177,20 +177,21 @@ bool SupportTreeBuildsteps::execute(SupportTreeBuilder &   builder,
     return pc == ABORT;
 }
 
-IndexedMesh::hit_result SupportTreeBuildsteps::pinhead_mesh_intersect(
-    const Vec3d &s,
-    const Vec3d &dir,
-    double       r_pin,
-    double       r_back,
-    double       width,
-    double       sd)
+IndexedMesh::hit_result pinhead_mesh_intersect(
+    const IndexedMesh &mesh,
+    const Vec3d       &s,
+    const Vec3d       &dir,
+    double             r_pin,
+    double             r_back,
+    double             width,
+    double             sd)
 {
     static const size_t SAMPLES = 8;
 
     // Move away slightly from the touching point to avoid raycasting on the
     // inner surface of the mesh.
 
-    auto& m = m_mesh;
+    auto& m = mesh;
     using HitResult = IndexedMesh::hit_result;
 
     // Hit results

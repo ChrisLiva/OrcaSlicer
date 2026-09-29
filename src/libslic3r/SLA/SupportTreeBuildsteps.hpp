@@ -116,6 +116,17 @@ inline Vec3d dirv(const Vec3d& startp, const Vec3d& endp) {
     return (endp - startp).normalized();
 }
 
+// SupportTreeBuildsteps::pinhead_mesh_intersect on any mesh, so a caller that
+// hands the builder a head axis can put the head to the test the filter puts
+// it to first: the head clears along `dir` where the distance exceeds `width`.
+IndexedMesh::hit_result pinhead_mesh_intersect(const IndexedMesh &mesh,
+                                               const Vec3d &s,
+                                               const Vec3d &dir,
+                                               double r_pin,
+                                               double r_back,
+                                               double width,
+                                               double safety_d);
+
 class PillarIndex {
     PointIndex m_index;
     using Mutex = ccr::BlockingMutex;
@@ -246,7 +257,11 @@ class SupportTreeBuildsteps {
         double r_pin,
         double r_back,
         double width,
-        double safety_d);
+        double safety_d)
+    {
+        return sla::pinhead_mesh_intersect(m_mesh, s, dir, r_pin, r_back,
+                                           width, safety_d);
+    }
 
     IndexedMesh::hit_result pinhead_mesh_intersect(
         const Vec3d& s,

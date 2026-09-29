@@ -12,6 +12,7 @@
 #include "Model.hpp"
 #include "Print.hpp"
 #include "DisjointSets.hpp"
+#include "../SLA/SupportTreeBuildsteps.hpp"
 #include <boost/log/trivial.hpp>
 #include <tbb/blocked_range.h>
 #include <tbb/parallel_for.h>
@@ -266,6 +267,32 @@ Polygons footing(const PlanInput &in, DisjointSets &sets, size_t q, size_t own, 
     return out;
 }
 
+// The disc a birth tip at `p` under piece `piece` of slab `l` fuses with. The heavy one, four lines across, goes where the
+// island carries its part higher than `heavy_birth_mm` and the model the pin reaches, the slabs within one toolpath width
+// over the tip, fills at least twice as many cells of the heavy disc as of the small one; the small one, two lines
+// across, goes everywhere else, where the heavy disc would add scar and no hold.
+double birth_grade(const PlanInput &in, const Births &births, size_t l, size_t piece, const Point &p)
+{
+    const double w = in.toolpath_width_mm;
+    if (births.carry_mm[piece] <= heavy_birth_mm)
+        return 2. * w;
+    const auto [cx, cy] = cell_of(in, p);
+    const int  r        = int(std::ceil(2. * w / in.cell_mm)) + 1;
+    size_t     small = 0, heavy = 0;
+    for (int dy = -r; dy <= r; ++ dy)
+        for (int dx = -r; dx <= r; ++ dx) {
+            const double d = (centre_of(in, cx + dx, cy + dy) - p).cast<double>().norm() * SCALING_FACTOR;
+            if (d > 2. * w)
+                continue;
+            bool filled = false;
+            for (size_t k = l; k < in.slabs.size() && in.slabs[k].bottom_z < in.slabs[l].bottom_z + w && ! filled; ++ k)
+                filled = in.material[k].at(cx + dx, cy + dy) != 0;
+            heavy += filled;
+            small += filled && d <= w;
+        }
+    return heavy >= 2 * std::max<size_t>(small, 1) ? 4. * w : 2. * w;
+}
+
 const Vec3d straight_down(0., 0., -1.);
 
 // The neck a head hangs from a tip by, read on the plan's lattice: one neck depth from a point on the bottom of a slab
@@ -322,12 +349,31 @@ public:
         return true;
     }
 
+    // Whether the builder keeps the full head of a tip at `p` on the bottom of slab `l` whose pin is `pin_mm` in radius
+    // along `axis`: the builder's own pinhead test, `sla::pinhead_mesh_intersect`, reads the head clear of the object's
+    // mesh over its length at the point, axis and pin the builder reads, each a float. Where the head meets the model
+    // along a handed axis, the filter searches another pose or falls back to a thin head, whose rings the neck check cuts
+    // where they float. The filter also refuses a full head whose back reaches under the pad's top, which is left to the
+    // builder: a tip that low stands on a post or a thin head by the pad. With no mesh or no head every axis fits.
+    bool head_fits(size_t l, const Point &p, const Vec3d &axis, double pin_mm) const
+    {
+        const HeadShape &head = m_in.head;
+        if (m_in.mesh == nullptr || head.length_mm <= 0.)
+            return true;
+        const Vec2d xy = unscale(p);
+        const Vec3d at = Vec3f(float(xy.x()), float(xy.y()), float(m_in.slabs[l].bottom_z - m_in.z_offset_mm)).cast<double>();
+        return sla::pinhead_mesh_intersect(m_in.mesh->aabb, at, axis.cast<float>().cast<double>().normalized(), double(float(pin_mm)),
+                                           head.back_mm, head.length_mm, head.safety_mm)
+                   .distance() > head.length_mm;
+    }
+
     // Where a tip stands under birth piece `piece` of slab `l`, whose deepest point is `deepest`, and the axis its neck
-    // takes, zero for straight down. The candidates are `deepest` and then the piece's cells, nearest it first. The first
-    // candidate whose neck clears straight down wins; failing that, the least lean, in tilt steps up to the cap, at
-    // which a candidate clears, at the first such candidate along the azimuth whose end stands farthest from the model.
-    // None where no candidate clears.
-    std::optional<std::pair<Point, Vec3f>> search(size_t l, size_t piece, const Point &deepest) const
+    // takes, zero for straight down; `pin_mm` gives the pin radius of a tip at a candidate. The candidates are `deepest`
+    // and then the piece's cells, nearest it first. The first candidate whose neck clears straight down wins; failing
+    // that, the least lean, in tilt steps up to the cap, at which a candidate's neck clears and its head fits, at the
+    // first such candidate along the azimuth whose end stands farthest from the model. None where no candidate clears.
+    std::optional<std::pair<Point, Vec3f>> search(size_t l, size_t piece, const Point &deepest,
+                                                  const std::function<double(const Point &)> &pin_mm) const
     {
         if (clear(l, deepest, straight_down))
             return std::make_pair(deepest, Vec3f::Zero().eval());
@@ -343,28 +389,33 @@ public:
         for (auto it = candidates.begin() + 1; it != candidates.end(); ++ it)
             if (clear(l, *it, straight_down))
                 return std::make_pair(*it, Vec3f::Zero().eval());
+        std::vector<double> pins(candidates.size(), -1.);
         for (const double tilt : tilts())
-            for (const Point &c : candidates)
-                if (const std::optional<Vec3d> axis = lean(l, c, tilt))
-                    return std::make_pair(c, axis->cast<float>().eval());
+            for (size_t i = 0; i < candidates.size(); ++ i) {
+                if (pins[i] < 0.)
+                    pins[i] = pin_mm(candidates[i]);
+                if (const std::optional<Vec3d> axis = lean(l, candidates[i], tilt, pins[i]))
+                    return std::make_pair(candidates[i], axis->cast<float>().eval());
+            }
         return std::nullopt;
     }
 
     // The least lean past straight down, in tilt steps up to the cap, at which a neck from `p` on the bottom of slab `l`
-    // clears, along the azimuth whose end stands farthest from the model; none where no lean clears.
-    std::optional<Vec3f> leaning(size_t l, const Point &p) const
+    // clears and the head of a pin `pin_mm` in radius fits, along the azimuth whose end stands farthest from the model;
+    // none where no lean does.
+    std::optional<Vec3f> leaning(size_t l, const Point &p, double pin_mm) const
     {
         for (const double tilt : tilts())
-            if (const std::optional<Vec3d> axis = lean(l, p, tilt))
+            if (const std::optional<Vec3d> axis = lean(l, p, tilt, pin_mm))
                 return axis->cast<float>().eval();
         return std::nullopt;
     }
 
     // The axis a neck from `p` on the bottom of slab `l` takes by the same rule, `p` the only candidate: zero where it
-    // clears straight down or no lean clears.
-    Vec3f axis_at(size_t l, const Point &p) const
+    // clears straight down or no lean does.
+    Vec3f axis_at(size_t l, const Point &p, double pin_mm) const
     {
-        return clear(l, p, straight_down) ? Vec3f::Zero() : leaning(l, p).value_or(Vec3f::Zero());
+        return clear(l, p, straight_down) ? Vec3f::Zero() : leaning(l, p, pin_mm).value_or(Vec3f::Zero());
     }
 
 private:
@@ -393,26 +444,27 @@ private:
         out.push_back(m_in.max_tilt_rad);
         return out;
     }
-    // Among the azimuths at lean `tilt`, one cell apart at the neck's end, the clearing axis whose end stands farthest
-    // from the material of the slab it ends on, the first on a tie; none where no azimuth clears.
-    std::optional<Vec3d> lean(size_t l, const Point &p, double tilt) const
+    // Among the azimuths at lean `tilt`, one cell apart at the neck's end, the axis whose neck clears and along which the
+    // head of a pin `pin_mm` in radius fits, the one whose end stands farthest from the material of the slab it ends on,
+    // the first on a tie; none where no azimuth does. The head test casts rays, so it runs on the clearing axes in that
+    // order and stops at the first that fits.
+    std::optional<Vec3d> lean(size_t l, const Point &p, double tilt, double pin_mm) const
     {
         const double depth = m_in.neck_depth_mm;
         const int    n     = std::max(1, int(std::ceil(2. * M_PI * depth * std::sin(tilt) / m_in.cell_mm)));
         const size_t k     = end_slab(m_in.slabs[l].bottom_z - depth * std::cos(tilt));
-        std::optional<Vec3d> best;
-        double               most = -1.;
+        std::vector<std::pair<double, Vec3d>> clearing;   // (room at the end, axis)
         for (int j = 0; j < n; ++ j) {
             const double phi  = 2. * M_PI * double(j) / double(n);
             const Vec3d  axis(std::sin(tilt) * std::cos(phi), std::sin(tilt) * std::sin(phi), -std::cos(tilt));
-            if (! clear(l, p, axis))
-                continue;
-            if (const double r = room(k, along(p, axis, depth)); r > most) {
-                most = r;
-                best = axis;
-            }
+            if (clear(l, p, axis))
+                clearing.emplace_back(room(k, along(p, axis, depth)), axis);
         }
-        return best;
+        std::stable_sort(clearing.begin(), clearing.end(), [](const auto &a, const auto &b) { return a.first > b.first; });
+        for (const auto &[r, axis] : clearing)
+            if (head_fits(l, p, axis, pin_mm))
+                return axis;
+        return std::nullopt;
     }
     // How far `e` stands from the nearest material cell of slab `k`, up to one neck depth.
     double room(size_t k, const Point &e) const
@@ -684,9 +736,10 @@ private:
                 island.reason = IslandReason::Hung;
                 continue;
             }
-            if (const std::optional<std::pair<Point, Vec3f>> spot = m_necks.search(birth.slab, birth.piece, birth.deepest)) {
+            if (const std::optional<std::pair<Point, Vec3f>> spot =
+                    m_necks.search(birth.slab, birth.piece, birth.deepest, birth_pin(birth.slab, birth.piece))) {
                 BOOST_LOG_TRIVIAL(debug) << "scaffold island at " << z << " joins nothing held near it: tip";
-                TipSite site = site_at(birth.slab, spot->first, birth_grade(birth.slab, birth.piece, spot->first));
+                TipSite site = site_at(birth.slab, spot->first, birth_grade(m_in, m_births, birth.slab, birth.piece, spot->first));
                 site.axis    = spot->second;
                 const size_t tip = place(site, TipNeed::Birth, nullptr);
                 const auto [x, y] = cell_of(site.position);
@@ -769,30 +822,10 @@ private:
         return site;
     }
 
-    // The disc a birth tip at `p` under piece `piece` of slab `l` fuses with. The heavy one, four lines across, goes
-    // where the island carries its part higher than `heavy_birth_mm` and the model the pin reaches, the slabs within one
-    // toolpath width over the tip, fills at least twice as many cells of the heavy disc as of the small one; the small
-    // one, two lines across, goes everywhere else, where the heavy disc would add scar and no hold.
-    double birth_grade(size_t l, size_t piece, const Point &p) const
+    // The pin radius of a birth tip at `p` under piece `piece` of slab `l`, half its `birth_grade`.
+    std::function<double(const Point &)> birth_pin(size_t l, size_t piece) const
     {
-        const double w = m_in.toolpath_width_mm;
-        if (m_births.carry_mm[piece] <= heavy_birth_mm)
-            return 2. * w;
-        const auto [cx, cy] = cell_of(p);
-        const int  r        = int(std::ceil(2. * w / m_in.cell_mm)) + 1;
-        size_t     small = 0, heavy = 0;
-        for (int dy = -r; dy <= r; ++ dy)
-            for (int dx = -r; dx <= r; ++ dx) {
-                const double d = (centre(cx + dx, cy + dy) - p).cast<double>().norm() * SCALING_FACTOR;
-                if (d > 2. * w)
-                    continue;
-                bool filled = false;
-                for (size_t k = l; k < m_in.slabs.size() && m_in.slabs[k].bottom_z < m_in.slabs[l].bottom_z + w && ! filled; ++ k)
-                    filled = m_in.material[k].at(cx + dx, cy + dy) != 0;
-                heavy += filled;
-                small += filled && d <= w;
-            }
-        return heavy >= 2 * std::max<size_t>(small, 1) ? 4. * w : 2. * w;
+        return [this, l, piece](const Point &p) { return 0.5 * birth_grade(m_in, m_births, l, piece, p); };
     }
 
     // Dijkstra through the layer's material, from whatever the heap holds, over the 16 moves of a king and a knight: a
@@ -1353,7 +1386,7 @@ private:
                 hang(p);
                 continue;
             }
-            const std::optional<std::pair<Point, Vec3f>> spot = m_necks.search(l, p, deepest);
+            const std::optional<std::pair<Point, Vec3f>> spot = m_necks.search(l, p, deepest, birth_pin(l, p));
             if (! spot) {
                 BOOST_LOG_TRIVIAL(debug) << "scaffold island at " << piece.bottom_z << ": no neck";
                 island.reason = IslandReason::NoNeck;
@@ -1361,7 +1394,7 @@ private:
                 accept(p);
                 continue;
             }
-            TipSite site = site_at(l, spot->first, birth_grade(l, p, spot->first));
+            TipSite site = site_at(l, spot->first, birth_grade(m_in, m_births, l, p, spot->first));
             site.axis    = spot->second;
             if (! site.axis.isZero())
                 BOOST_LOG_TRIVIAL(debug) << "scaffold island at " << piece.bottom_z << " leans its neck "
@@ -1462,7 +1495,8 @@ private:
     void stability(size_t l)
     {
         const auto [first, last] = m_in.components.slab_range[l];
-        const double top = m_in.slabs[l].print_z;
+        const double top   = m_in.slabs[l].print_z;
+        const double grade = 2. * m_in.toolpath_width_mm;   // the small disc a stability tip fuses with
         for (size_t p = first; p < last; ++ p) {
             if (top - m_rearm_z[p] <= stability_retry_mm + EPSILON)
                 continue;
@@ -1538,10 +1572,10 @@ private:
                 return c.corner->ok != 0;
             });
             if (spot == candidates.end())
-                spot = std::find_if(candidates.begin(), candidates.end(), [this](const Candidate &c) {
+                spot = std::find_if(candidates.begin(), candidates.end(), [this, grade](const Candidate &c) {
                     if (c.corner->leans < 0) {
                         const std::optional<Vec3f> axis =
-                            faces_down(c.slab, c.corner->p) ? m_necks.leaning(c.slab, c.corner->p) : std::nullopt;
+                            faces_down(c.slab, c.corner->p) ? m_necks.leaning(c.slab, c.corner->p, 0.5 * grade) : std::nullopt;
                         c.corner->leans = axis.has_value();
                         c.corner->axis  = axis.value_or(Vec3f::Zero());
                     }
@@ -1556,7 +1590,7 @@ private:
                 m_rearm_z[p] = top;
                 continue;
             }
-            TipSite site = site_at(spot->slab, spot->corner->p, 2. * m_in.toolpath_width_mm);
+            TipSite site = site_at(spot->slab, spot->corner->p, grade);
             site.axis    = spot->corner->axis;
             place(site, TipNeed::Stability, nullptr);
             BOOST_LOG_TRIVIAL(debug) << "scaffold stability tip at " << m_in.slabs[spot->slab].bottom_z << " for the section at " << top
@@ -1632,7 +1666,9 @@ Vec3f neck_axis(const PlanInput &input, const TipSite &site)
     const int l = site.obj_layer_nr + 1;
     if (input.slabs.empty() || input.cell <= 0 || l < 0 || size_t(l) >= input.slabs.size())
         return Vec3f::Zero();
-    return Necks(input).axis_at(size_t(l), site.position);
+    // The pin `draw` gives the tip: half its grade, or of the small disc where it has none.
+    const double pin_mm = 0.5 * (site.grade_mm > 0. ? site.grade_mm : 2. * input.toolpath_width_mm);
+    return Necks(input).axis_at(size_t(l), site.position, pin_mm);
 }
 
 std::vector<BirthRead> read_births(const PlanInput &input, const std::vector<size_t> &pieces, const std::vector<TipSite> &tips)
@@ -1651,7 +1687,8 @@ std::vector<BirthRead> read_births(const PlanInput &input, const std::vector<siz
     // The tip the neck search stands under birth `i`, if any clears.
     const auto tip = [&](size_t i) {
         const size_t p = pieces[i], l = slab_of(p);
-        if (const auto spot = necks.search(l, p, inscribed_point(all[p].polygon))) {
+        const auto pin = [&](const Point &c) { return 0.5 * birth_grade(input, births, l, p, c); };
+        if (const auto spot = necks.search(l, p, inscribed_point(all[p].polygon), pin)) {
             out[i].hold      = BirthHold::Tip;
             out[i].site      = { spot->first, input.slabs[l].bottom_z, int(l) - 1 };
             out[i].site.axis = spot->second;

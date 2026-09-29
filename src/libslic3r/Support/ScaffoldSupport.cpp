@@ -78,12 +78,16 @@ TipSite site_of(const SupportNode &node) { return { node.position, node.print_z,
 // How far a tip's neck runs from the tip along its axis, where the planner and the wall skip read its end.
 double neck_depth_mm(const Params &params) { return head_width_mm + params.toolpath_width_mm; }
 
-// The plan input `prepare_plan` builds for `object` at the widths, distances and neck depth of `params`.
+// The plan input `prepare_plan` builds for `object` at the widths, distances and neck depth of `params`, with the full
+// head `tree_config` gives the builder.
 PlanInput plan_input(const PrintObject &object, const Params &params, double threshold_rad, const std::vector<Polygons> &blockers,
-                     const ObjectMesh *mesh = nullptr)
+                     const ObjectMesh *mesh)
 {
-    return prepare_plan(object, params.toolpath_width_mm, params.xy_distance_mm, neck_depth_mm(params), params.max_bridge_length_mm,
-                        threshold_rad, blockers, mesh);
+    PlanInput                    input = prepare_plan(object, params.toolpath_width_mm, params.xy_distance_mm, neck_depth_mm(params),
+                                                      params.max_bridge_length_mm, threshold_rad, blockers, mesh);
+    const sla::SupportTreeConfig cfg   = tree_config(params);
+    input.head                         = { cfg.head_back_radius_mm, cfg.head_fullwidth(), cfg.safety_distance_mm };
+    return input;
 }
 
 // The model piece over `tip`, on the overhang's own layer, one above the node's; npos where none holds it.
@@ -957,9 +961,11 @@ Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const P
         sites.push_back(site);
     }
 
-    // A point keeps no axis, so each one not enforced leans its neck as the planner would lean it at that spot. A list
-    // ignores support blockers as it ignores paint, so the plan input reads none.
-    const PlanInput input = plan_input(object, params, threshold_rad, {});
+    // A point keeps no axis, so each one not enforced leans its neck as the planner would lean it at that spot, its head
+    // fitted on the object's mesh as the planner fits it. A list ignores support blockers as it ignores paint, so the
+    // plan input reads none.
+    tips.mesh             = std::make_shared<const ObjectMesh>(object);
+    const PlanInput input = plan_input(object, params, threshold_rad, {}, tips.mesh.get());
     for (TipSite &site : sites)
         if (! site.enforced)
             site.axis = neck_axis(input, site);

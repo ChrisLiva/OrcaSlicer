@@ -2407,7 +2407,7 @@ TEST_CASE("Scaffold support over corpus plate 3 in two poses", "[ScaffoldSupport
             REQUIRE(scaffold.metrics.support_volume_mm3 <= 2.5 * slim.metrics.support_volume_mm3);
         }
         // Upright the plan holds every island, and the builder leaves the birth tips of three islands born at z 15.4
-        // unrouted, one of them leaning its neck 15.5 degrees off the wall beside it, so those three print with no tip
+        // unrouted, one of them leaning its neck 41.4 degrees off the wall beside it, so those three print with no tip
         // holding them.
         if (pose == "upright") {
             INFO("islands under-held " << scaffold.metrics.islands_under_held);
@@ -2454,10 +2454,11 @@ TEST_CASE("Need-driven tips hold corpus plate 1's hand and sword with few contac
     const SupportAnalysis::Report &report = *po.support_analysis();
     CHECK(report.floating_pieces_removed == 0);
 
-    // The plan holds every island, and the builder leaves four birth tips unrouted or cut: two of islands born at
-    // z 35.2 whose necks drop straight and two of islands born at z 40.4 and 42.7 whose necks lean off a wall, so those
-    // four print with no tip holding them and the record names each.
-    CHECK(report.islands_under_held <= 4);
+    // Three islands print with no tip holding them, and the record names each: two born at z 35.2 whose birth tips drop
+    // their necks straight and do not route, and one born at z 40.4 beside a wall, where no neck leaning up to 45 degrees
+    // both clears the band and fits the builder's full head. The island born at z 42.7 beside it leans its birth tip's
+    // neck 41.4 degrees, where the head fits, and routes.
+    CHECK(report.islands_under_held <= 3);
     CHECK(record->bare_islands.size() == report.islands_under_held);
 
     // The sword hangs point-down from the raised hand: its blade stands free from z 1.04 and widens from its point to

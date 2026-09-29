@@ -5,6 +5,7 @@
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/SLA/IndexedMesh.hpp"
+#include "libslic3r/SLA/SupportTreeBuildsteps.hpp"
 #include "libslic3r/Support/ScaffoldPlan.hpp"
 #include <algorithm>
 #include <memory>
@@ -18,6 +19,11 @@ using namespace Slic3r::ScaffoldSupport;
 namespace {
 
 constexpr double width_mm = 0.42, xy_mm = 0.35, neck_mm = 1. + width_mm;
+// The builder's full head at a 1.2 mm pillar, as `tree_config` sets it: a 0.6 mm back, one head width plus the back's
+// diameter plus the pin's diameter less its penetration long, the pin's radius and the penetration each one toolpath
+// width, and the xy distance clear of the model.
+constexpr double back_mm = 0.6;
+const HeadShape  full_head { back_mm, neck_mm + 2. * back_mm, xy_mm };
 
 // `points` as a convex solid.
 TriangleMesh hull(const std::vector<Vec3d> &points)
@@ -43,10 +49,10 @@ TriangleMesh merged(std::initializer_list<TriangleMesh> parts)
     return out;
 }
 
-// Slices `mesh` at `layer_mm`, 0.1 mm unless a case asks for another, with no support, so the plan reads plain object
-// layers, and plans on the object's mesh with the config's 10 mm `max_bridge_length`, as `place_tips` does. A fixture
-// coordinate maps into the sliced frame by the offset between the mesh's bounding box and the layers' extents; every
-// fixture touches z 0.
+// Slices `mesh` at `layer_mm`, 0.1 mm unless a case asks for another, with no support and `raft_layers` raft layers, none
+// unless a case asks for them, so the plan reads plain object layers, and plans on the object's mesh with the config's
+// 10 mm `max_bridge_length` and the full head, as `place_tips` does. A fixture coordinate maps into the sliced frame by
+// the offset between the mesh's bounding box and the layers' extents; every fixture touches z 0.
 struct Sliced
 {
     Print                       print;
@@ -55,12 +61,13 @@ struct Sliced
     PlanInput                   input;
     Vec2d                       shift = Vec2d::Zero();   // sliced frame minus fixture frame, mm
 
-    Sliced(const TriangleMesh &fixture, double layer_mm = 0.1)
+    Sliced(const TriangleMesh &fixture, double layer_mm = 0.1, int raft_layers = 0)
     {
         TriangleMesh      copy   = fixture;
         const std::string height = std::to_string(layer_mm);
         init_print({ std::move(copy) }, print, model, fixture_config({ { "enable_support", "0" }, { "layer_height", height },
                                                                         { "initial_layer_print_height", height },
+                                                                        { "raft_layers", std::to_string(raft_layers) },
                                                                         { "layer_change_gcode", "G92 E0" } }));
         print.process();
         const PrintObject &object = *print.objects().front();
@@ -74,6 +81,7 @@ struct Sliced
         mesh  = std::make_unique<ObjectMesh>(object);
         input = prepare_plan(object, width_mm, xy_mm, neck_mm, object.config().max_bridge_length.value, Geometry::deg2rad(21.), {},
                              mesh.get());
+        input.head = full_head;
     }
 
     Plan plan() const { return plan_tips(input, {}); }
@@ -87,6 +95,17 @@ struct Sliced
         sla::PointSet p(1, 3);
         p.row(0) = Vec3d(xy.x(), xy.y(), tip.site.print_z - input.z_offset_mm);
         return Geometry::rad2deg(std::acos(std::clamp(-sla::normals(p, mesh->aabb, width_mm)(0, 2), -1., 1.)));
+    }
+    // How far the builder's pinhead test at `tip` reads the full head clear of the model along `axis`, the tip's own
+    // where none is given, at the pin its grade gives it: the head fits where this passes the head's length.
+    double head_room(const PlannedTip &tip, const Vec3f &axis = Vec3f::Zero()) const
+    {
+        const Vec2d xy  = unscale(tip.site.position);
+        const Vec3d at  = Vec3f(float(xy.x()), float(xy.y()), float(tip.site.print_z - input.z_offset_mm)).cast<double>();
+        const Vec3f dir = axis.isZero() ? tip.site.axis : axis;
+        return sla::pinhead_mesh_intersect(mesh->aabb, at, dir.cast<double>().normalized(), 0.5 * tip.site.grade_mm, full_head.back_mm,
+                                           full_head.length_mm, full_head.safety_mm)
+            .distance();
     }
 };
 
@@ -1008,19 +1027,81 @@ TEST_CASE("A birth whose straight neck crosses a thin shelf leans past the shelf
     CHECK(upright.islands_unheld == 1);
 }
 
-TEST_CASE("A leaning neck takes the azimuth whose end stands farthest from the model", "[ScaffoldPlan]")
+TEST_CASE("A leaning neck whose end clears a wall the full head meets moves to the nearest spot the head fits", "[ScaffoldPlan]")
 {
-    // A lattice built by hand, 0.21 mm cells and 0.1 mm slabs, so every cell a neck reads is known exactly. The tip
-    // stands at the centre of cell (0, 0) on the bottom of slab 40, z 4, over a one-cell plate on slab 34, whose middle
-    // lies 0.55 mm under it, and beside a wall three cells thick from cell x 6 on, 1.26 mm off, on every slab under the
-    // tip. Straight down and at the first lean, 8.5 degrees, the shaft stays in the plate's cell; at 17 degrees it
-    // leaves it at every azimuth, and every end stands clear of the wall. The end leaning toward the wall stands 0.85 mm
-    // from it and one leaning away beyond the neck depth, so the lean points away from the wall.
+    // A bar 0.8 mm wide, x 7..7.8 and y 2..7, hangs to z 4 from the slab of a 4 x 4 column standing on the bed, over the
+    // thin shelf's 0.3 mm shelf at z 3..3.3, which runs under the whole bar to x 8.2. As over the thin shelf, no neck
+    // straight down clears, and one from the bar's edge leaning 42.5 degrees along +x clears the shelf. A wall 1.2 mm
+    // wide across the bar's middle, x 9..10.4 and y 3.9..5.1, stands on the bed to z 2.3, where such a neck from the
+    // middle of the edge ends 0.65 mm over it and clears it, while the builder's head, 2.62 mm long with a 0.6 mm back,
+    // meets it. Read by the neck alone the tip stands there, and the builder's pinhead test finds its head meeting the
+    // wall. With the head fitted the tip moves along the edge to the nearest spot where the head clears the wall, at the
+    // same lean: one cell nearer the middle the head still meets it. On a raft the plan's slabs stand the raft's height
+    // over the mesh, and the head is tested at the mesh's z, so the tip stands where it stands without one.
+    const int raft = GENERATE(0, 2);
+    CAPTURE(raft);
+    const double        wall_top = 2.3;
+    Sliced              s(merged({ box(0, 0, 0, 4, 4, 10), box(0, 0, 8, 12, 10, 2), box(4, 1.5, 3, 4.2, 6, 0.3), box(7, 2, 4, 0.8, 5, 4),
+                                   box(9, 3.9, 0, 1.4, 1.2, wall_top) }),
+                          0.1, raft);
+    const double        lift = s.input.z_offset_mm;
+    if (raft > 0)
+        CHECK(lift > 0.);
+    const BoundingBoxf3 bar(Vec3d(6.8, 1.8, 3.9 + lift), Vec3d(8., 7.2, 4.1 + lift));
+    const auto          birth_tip = [&](const Plan &plan) {
+        REQUIRE(count_in(s, plan, bar, { TipNeed::Birth }) == 1);
+        return *std::find_if(plan.tips.begin(), plan.tips.end(),
+                             [&](const PlannedTip &t) { return t.need == TipNeed::Birth && inside(s, t, bar); });
+    };
+    const auto describe = [&](const PlannedTip &tip) {
+        std::ostringstream out;
+        out << "(" << s.at(tip).x() << ", " << s.at(tip).y() << ", " << tip.site.print_z << ") leaning " << lean_deg(tip.site.axis)
+            << " degrees along (" << tip.site.axis.x() << ", " << tip.site.axis.y() << ", " << tip.site.axis.z() << "), head room "
+            << s.head_room(tip) << " of " << full_head.length_mm << " mm";
+        return out.str();
+    };
+
+    s.input.head          = HeadShape{};
+    const PlannedTip bare = birth_tip(s.plan());
+    INFO("read by the neck alone: " << describe(bare));
+    CHECK_FALSE(bare.site.axis.isZero());
+    CHECK(std::abs(s.at(bare).y() - 4.5) <= 0.6);
+    CHECK(bare.site.print_z + neck_mm * bare.site.axis.z() > wall_top + lift);
+    CHECK(s.head_room(bare) <= full_head.length_mm);
+
+    s.input.head          = full_head;
+    const Plan       plan = s.plan();
+    const PlannedTip tip  = birth_tip(plan);
+    INFO("with the head fitted: " << describe(tip));
+    CHECK_FALSE(tip.site.axis.isZero());
+    CHECK(lean_deg(tip.site.axis) <= 45. + 1e-6);
+    CHECK(s.head_room(tip) > full_head.length_mm);
+    CHECK(std::abs(s.at(tip).y() - 4.5) > std::abs(s.at(bare).y() - 4.5));
+    CHECK(plan.islands_unheld == 0);
+    // One cell nearer the bar's middle along the edge, the head at the same lean still meets the wall.
+    PlannedTip nearer = tip;
+    nearer.site.position.y() += s.at(tip).y() < 4.5 ? s.input.cell : -s.input.cell;
+    INFO("one cell nearer the middle: head room " << s.head_room(nearer));
+    CHECK(s.head_room(nearer) <= full_head.length_mm);
+    // A baked list reads the same axis at the tip, the head fitted at the pin of its grade.
+    CHECK_THAT(double((neck_axis(s.input, tip.site) - tip.site.axis).norm()), Catch::Matchers::WithinAbs(0., 1e-6));
+}
+
+namespace {
+// A lattice built by hand, 0.21 mm cells and 0.1 mm slabs from z 0, so every cell a neck reads is known exactly, with no
+// mesh and no head. `lattice_tip` stands at the centre of cell (0, 0) on the bottom of slab 40, z 4, over a one-cell
+// plate on slab 34, whose middle lies 0.55 mm under it, and beside a wall three cells thick from cell x 6 on, 1.26 mm
+// off, on every slab under the tip. Straight down and at the first lean, 8.5 degrees, the shaft stays in the plate's
+// cell; at 17 degrees it leaves it at every azimuth, and every end stands clear of the wall. The end leaning toward the
+// wall stands 0.85 mm from it and one leaning away beyond the neck depth.
+PlanInput lattice_by_hand()
+{
     PlanInput in;
-    in.cell           = scaled<coord_t>(0.21);
-    in.cell_mm        = unscale<double>(in.cell);
-    in.neck_depth_mm  = neck_mm;
-    in.xy_distance_mm = xy_mm;
+    in.cell              = scaled<coord_t>(0.21);
+    in.cell_mm           = unscale<double>(in.cell);
+    in.neck_depth_mm     = neck_mm;
+    in.xy_distance_mm    = xy_mm;
+    in.toolpath_width_mm = width_mm;
     const auto grid = [](int x0, int y0, int w, int h) {
         LayerGrid g;
         g.x0 = x0, g.y0 = y0, g.w = w, g.h = h;
@@ -1044,13 +1125,73 @@ TEST_CASE("A leaning neck takes the azimuth whose end stands farthest from the m
         for (int x = 6; x <= 8; ++ x)
             plate.cells[size_t(y + 10) * size_t(plate.w) + size_t(x)] = 1;
     plate.cells[size_t(10) * size_t(plate.w)] = 1;
+    return in;
+}
+const TipSite lattice_tip { Point(scaled<coord_t>(0.21) / 2, scaled<coord_t>(0.21) / 2), 4., 39 };
+} // namespace
 
-    const TipSite site { Point(in.cell / 2, in.cell / 2), 4., 39 };
-    const Vec3f   axis = neck_axis(in, site);
+TEST_CASE("A leaning neck takes the azimuth whose end stands farthest from the model", "[ScaffoldPlan]")
+{
+    // On the hand-built lattice the neck leans at the least lean that leaves the plate's cell, and at it away from the
+    // wall, where its end stands farthest from it.
+    const PlanInput in   = lattice_by_hand();
+    const Vec3f     axis = neck_axis(in, lattice_tip);
     INFO("axis (" << axis.x() << ", " << axis.y() << ", " << axis.z() << ") leaning " << lean_deg(axis) << " degrees");
     CHECK_THAT(lean_deg(axis), Catch::Matchers::WithinAbs(Geometry::rad2deg(2. * std::asin(in.cell_mm / neck_mm)), 1e-3));
     // More than half the lean points away from the wall: an end leaning toward it, or across it, stands nearer.
     CHECK(axis.x() < -0.5f * std::sin(float(Geometry::deg2rad(lean_deg(axis)))));
+}
+
+TEST_CASE("A leaning neck whose head meets the model at the farthest-standing azimuth takes another azimuth at the same lean", "[ScaffoldPlan]")
+{
+    // The hand-built lattice's tip, read against a mesh the lattice does not hold: a block 6 mm wide, x -3..3 and
+    // y 1.2..3.2, standing on the bed to z 3.9, 0.1 mm under the tip and 1.1 mm off it on the +y side. A thin wall at
+    // y -3.2..-3 keeps the mesh's bounding box centred on the origin, so the sliced frame keeps the fixture's
+    // coordinates, and stands 2 mm off the heads the case reads. At 17 degrees the ends leaning away from the lattice's
+    // wall tie on the most room, and the first of them, 138 degrees round from +x, leans its head into the block, as
+    // does the next at 166 degrees; the one at 193 degrees clears it. The neck keeps its 17 degree lean and takes an
+    // azimuth whose head fits, where a neck that tried only the farthest-standing azimuth would lean further or not at
+    // all. Lifted 3 mm, as a raft lifts the slabs over the mesh, the head is still tested at the mesh's z, where the
+    // block stands in its way; at z 7 it would pass over the block.
+    Sliced s(merged({ box(-3, 1.2, 0, 6, 2, 3.9), box(-3, -3.2, 0, 6, 0.2, 3.9) }));
+    const BoundingBoxf3 frame = s.mesh->mesh.bounding_box();
+    REQUIRE_THAT(frame.center().x(), Catch::Matchers::WithinAbs(0., 1e-6));
+    REQUIRE_THAT(frame.center().y(), Catch::Matchers::WithinAbs(0., 1e-6));
+    PlanInput  in = lattice_by_hand();
+    PlannedTip tip { lattice_tip, TipNeed::Birth };
+    tip.site.grade_mm = 2. * width_mm;   // the small disc `neck_axis` gives a site with no grade
+    const auto describe = [&](const Vec3f &axis) {
+        std::ostringstream out;
+        out << "(" << axis.x() << ", " << axis.y() << ", " << axis.z() << ") leaning " << lean_deg(axis) << " degrees at "
+            << Geometry::rad2deg(std::atan2(double(axis.y()), double(axis.x()))) << ", head room " << s.head_room(tip, axis) << " of "
+            << full_head.length_mm << " mm";
+        return out.str();
+    };
+
+    const Vec3f bare = neck_axis(in, tip.site);
+    INFO("read by the neck alone: " << describe(bare));
+    REQUIRE_FALSE(bare.isZero());
+    CHECK(s.head_room(tip, bare) <= full_head.length_mm);
+
+    in.mesh          = s.mesh.get();
+    in.head          = full_head;
+    const Vec3f axis = neck_axis(in, tip.site);
+    INFO("with the head fitted: " << describe(axis));
+    REQUIRE_FALSE(axis.isZero());
+    CHECK_THAT(lean_deg(axis), Catch::Matchers::WithinAbs(lean_deg(bare), 1e-3));
+    CHECK(double((axis - bare).norm()) > 0.1);
+    CHECK(s.head_room(tip, axis) > full_head.length_mm);
+
+    const double lift = 3.;
+    PlanInput    lifted = in;
+    for (SupportAnalysis::Slab &slab : lifted.slabs) {
+        slab.bottom_z += lift;
+        slab.print_z += lift;
+    }
+    lifted.z_offset_mm = lift;
+    const Vec3f raised = neck_axis(lifted, tip.site);
+    INFO("lifted: " << describe(raised));
+    CHECK_THAT(double((raised - axis).norm()), Catch::Matchers::WithinAbs(0., 1e-6));
 }
 
 namespace {
