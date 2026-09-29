@@ -1060,6 +1060,11 @@ bool SupportTreeBuildsteps::connect_thin_to_ground(Head &head)
     const Head before = head;
     head.r_back_mm = m_cfg.head_fallback_radius_mm;
     head.width_mm  = 0.;
+    // A thin head whose straight drop meets the model may still bridge into a
+    // pillar another head stood.
+    if (m_cfg.branch_off_retry && search_pillar_and_connect(head))
+        return true;
+
     const Vec3d hjp = head.junction_point();
     if (std::isinf(bridge_mesh_distance(hjp, DOWN, head.r_back_mm, m_cfg.safety_distance_mm)) &&
         create_ground_pillar(hjp, head.dir, head.r_back_mm, head.id))

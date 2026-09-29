@@ -141,6 +141,24 @@ indexed_triangle_set parked_lip_mesh()
 const sla::SupportPoints PARKED_LIP_POINTS = {sla::SupportPoint(Vec3f(0.f, 4.45f, 4.2f), 0.2f),
                                               sla::SupportPoint(Vec3f(0.f, 6.45f, 5.4f), 0.2f)};
 
+// slot_fin_mesh with a 0.6x0.6x0.5 nub under the fin at x -0.3..0.3,
+// y -0.3..0.3, z 3.7..4.2 and a 1.6x2x0.4 floor in the slot at x -0.8..0.8,
+// y -1..1, z 0..0.4. A point under the nub at (0, 0, 3.7) takes a 0.6 head
+// that meets the blocks, and retried thin its straight drop meets the floor;
+// a point under the fin at (0, 2.2, 4.2) retries thin down the open slot and
+// stands a 0.22 pillar the thin head at the nub reaches with a bridge.
+indexed_triangle_set floored_slot_mesh()
+{
+    indexed_triangle_set its = slot_fin_mesh();
+    its_merge(its, box(0.6, 0.6, 0.5, -0.3f, -0.3f, 3.7f).its);
+    its_merge(its, box(1.6, 2., 0.4, -0.8f, -1.f, 0.f).its);
+
+    return its;
+}
+
+const sla::SupportPoint FLOORED_SLOT_NUB(Vec3f(0.f, 0.f, 3.7f), 0.2f);
+const sla::SupportPoint FLOORED_SLOT_OPEN(Vec3f(0.f, 2.2f, 4.2f), 0.2f);
+
 // A 22x40x3 shelf at x -20..2, y -20..20, z 0..3 and a 6x6x1 lip at
 // x -5..1, y -3..3, z 7.4..8.4. A point under the lip at (0, 0, 7.4) takes a
 // head straight down whose junction hangs 3 mm over the shelf, 2 mm in from
@@ -516,6 +534,45 @@ TEST_CASE("A pillar the pillar search passes over for its radius keeps no bridge
     CHECK(branched.bridgecount(branched.pillars().front()) == 0);
     CHECK_FALSE(lip->is_valid());
     CHECK(fin->is_valid());
+}
+
+TEST_CASE("A head whose thin retry cannot drop straight down branches into a pillar another head stood", "[SLASupportGeneration]") {
+    // The open point's head retries thin and stands a 0.22 pillar down the slot. The nub's 0.6 head meets the blocks,
+    // and retried thin its straight drop meets the floor in the slot; branching off, the thin head bridges into the
+    // open point's pillar instead.
+    indexed_triangle_set mesh = floored_slot_mesh();
+    const sla::SupportPoints points = {FLOORED_SLOT_OPEN, FLOORED_SLOT_NUB};
+    const auto build = [&mesh, &points](bool branch) {
+        sla::SupportTreeConfig cfg = slot_fin_config(true);
+        cfg.route_in_order   = true;
+        cfg.branch_off_retry = branch;
+        sla::SupportTreeBuilder builder;
+        sla::SupportableMesh    sm{mesh, points, cfg};
+        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(builder, sm));
+        return builder;
+    };
+
+    const sla::SupportTreeBuilder plain = build(false);
+    const sla::Head *plain_nub = head_at(plain, FLOORED_SLOT_NUB.pos);
+    REQUIRE(plain_nub != nullptr);
+    CHECK_FALSE(plain_nub->is_valid());
+    CHECK(plain.bridges().size() == 0);
+
+    const sla::SupportTreeBuilder branched = build(true);
+    const sla::Head *nub = head_at(branched, FLOORED_SLOT_NUB.pos);
+    REQUIRE(nub != nullptr);
+    CHECK(nub->is_valid());
+    CHECK_THAT(nub->r_back_mm, Catch::Matchers::WithinAbs(0.22, 1e-9));
+    CHECK(nub->bridge_id >= 0);
+    CHECK(nub->pillar_id < 0);
+    REQUIRE(branched.pillars().size() == 1);
+    REQUIRE(branched.bridges().size() == 1);
+    const sla::Pillar &pillar = branched.pillars().front();
+    const sla::Bridge &bridge = branched.bridges().front();
+    CHECK_THAT(bridge.endp.x(), Catch::Matchers::WithinAbs(pillar.endpoint().x(), 1e-6));
+    CHECK_THAT(bridge.endp.y(), Catch::Matchers::WithinAbs(pillar.endpoint().y(), 1e-6));
+    CHECK(bridge.endp.z() >= pillar.endpoint().z());
+    CHECK(bridge.endp.z() <= pillar.startpoint().z());
 }
 
 TEST_CASE("Routing the same points in order builds the same tree every run", "[SLASupportGeneration]") {
