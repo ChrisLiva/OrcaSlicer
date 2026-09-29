@@ -51,6 +51,26 @@ const sla::Head *head_at(const sla::SupportTreeBuilder &builder, const Vec3f &po
     return it == heads.end() ? nullptr : &*it;
 }
 
+// The pillars, bridges and kept heads of a built tree, for comparing builds.
+struct Tree {
+    std::vector<std::array<double, 4>> pillars;   // end x, y, z and height
+    std::vector<std::array<double, 6>> bridges;   // start and end
+    std::vector<long>                  valid;     // the heads kept
+};
+
+Tree tree_of(const sla::SupportTreeBuilder &builder)
+{
+    Tree tree;
+    for (const sla::Pillar &p : builder.pillars())
+        tree.pillars.push_back({p.endpt.x(), p.endpt.y(), p.endpt.z(), p.height});
+    for (const sla::Bridge &b : builder.bridges())
+        tree.bridges.push_back({b.startp.x(), b.startp.y(), b.startp.z(), b.endp.x(), b.endp.y(), b.endp.z()});
+    for (const sla::Head &h : builder.heads())
+        if (h.is_valid())
+            tree.valid.push_back(h.id);
+    return tree;
+}
+
 // A 40x40x4 block at x 0..40, y 0..40, z 0..4 with a 4x4x10 column at
 // x 18..22, y 0..4, z 4..14 carrying a 4x40x2 lip at x 18..22, y 0..40,
 // z 12..14. A point under the lip at (20, 20, 12) faces the block top and sits
@@ -559,9 +579,13 @@ TEST_CASE("A pillar the pillar search passes over for its radius keeps no bridge
 TEST_CASE("A head whose thin retry cannot drop straight down branches into a pillar another head stood", "[SLASupportGeneration]") {
     // The open point's head retries thin and stands a 0.22 pillar down the slot. The nub's 0.6 head meets the blocks,
     // and retried thin its straight drop meets the floor in the slot; branching off, the thin head bridges into the
-    // open point's pillar instead.
+    // open point's pillar instead. Nub first, the nub's head routes before any pillar stands, so only the second pass
+    // over the heads the ordered loop left unrouted bridges it.
     indexed_triangle_set mesh = floored_slot_mesh();
-    const sla::SupportPoints points = {FLOORED_SLOT_OPEN, FLOORED_SLOT_NUB};
+    const bool nub_first = GENERATE(false, true);
+    INFO("nub first " << nub_first);
+    const sla::SupportPoints points = nub_first ? sla::SupportPoints{FLOORED_SLOT_NUB, FLOORED_SLOT_OPEN}
+                                                : sla::SupportPoints{FLOORED_SLOT_OPEN, FLOORED_SLOT_NUB};
     const auto build = [&mesh, &points](bool branch) {
         sla::SupportTreeConfig cfg = slot_fin_config(true);
         cfg.route_in_order   = true;
@@ -593,6 +617,15 @@ TEST_CASE("A head whose thin retry cannot drop straight down branches into a pil
     CHECK_THAT(bridge.endp.y(), Catch::Matchers::WithinAbs(pillar.endpoint().y(), 1e-6));
     CHECK(bridge.endp.z() >= pillar.endpoint().z());
     CHECK(bridge.endp.z() <= pillar.startpoint().z());
+
+    const Tree first = tree_of(branched);
+    for (int run = 1; run < 10; ++run) {
+        const Tree again = tree_of(build(true));
+        INFO("run " << run);
+        CHECK(again.pillars == first.pillars);
+        CHECK(again.bridges == first.bridges);
+        CHECK(again.valid == first.valid);
+    }
 }
 
 TEST_CASE("Routing the same points in order builds the same tree every run", "[SLASupportGeneration]") {
@@ -604,25 +637,15 @@ TEST_CASE("Routing the same points in order builds the same tree every run", "[S
     sla::SupportTreeConfig cfg;
     cfg.allow_model_anchors = false;
     cfg.route_in_order      = true;
+    const bool branch = GENERATE(false, true);
+    cfg.branch_off_retry = branch;
+    INFO("branch_off_retry " << branch);
 
-    struct Tree {
-        std::vector<std::array<double, 4>> pillars;   // end x, y, z and height
-        std::vector<std::array<double, 6>> bridges;   // start and end
-        std::vector<long>                  valid;     // the heads kept
-    };
     const auto build = [&] {
         sla::SupportTreeBuilder builder;
         sla::SupportableMesh    sm{mesh, comb_points(), cfg};
         sla::SupportTreeBuildsteps::execute(builder, sm);
-        Tree tree;
-        for (const sla::Pillar &p : builder.pillars())
-            tree.pillars.push_back({p.endpt.x(), p.endpt.y(), p.endpt.z(), p.height});
-        for (const sla::Bridge &b : builder.bridges())
-            tree.bridges.push_back({b.startp.x(), b.startp.y(), b.startp.z(), b.endp.x(), b.endp.y(), b.endp.z()});
-        for (const sla::Head &h : builder.heads())
-            if (h.is_valid())
-                tree.valid.push_back(h.id);
-        return tree;
+        return tree_of(builder);
     };
 
     const Tree first = build();

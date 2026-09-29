@@ -337,9 +337,12 @@ class SupportTreeBuildsteps {
     // distance would cut a thinner route where it passes nearer, and the head
     // with it. The pillar they stand goes through create_ground_pillar, whose
     // corrector bridge off the pad's gap keeps the scaled clearance on a thin
-    // pillar up to 20 radii tall, which it does not widen first.
-    bool connect_thin_to_ground(Head &head);
-    bool connect_along_axes(Head &head);
+    // pillar up to 20 radii tall, which it does not widen first. Under
+    // branch_off_retry each retry searches the pillars from every pose it
+    // takes before its ground attempt, and try_ground false keeps only that
+    // search.
+    bool connect_thin_to_ground(Head &head, bool try_ground);
+    bool connect_along_axes(Head &head, bool try_ground);
 
     bool search_pillar_and_connect(const Head& source);
     

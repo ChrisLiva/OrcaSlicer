@@ -1053,7 +1053,7 @@ bool SupportTreeBuildsteps::search_pillar_and_connect(const Head &source)
     return nearest_id >= 0;
 }
 
-bool SupportTreeBuildsteps::connect_thin_to_ground(Head &head)
+bool SupportTreeBuildsteps::connect_thin_to_ground(Head &head, bool try_ground)
 {
     if (head.r_back_mm <= m_cfg.head_fallback_radius_mm) return false;
 
@@ -1066,7 +1066,7 @@ bool SupportTreeBuildsteps::connect_thin_to_ground(Head &head)
         return true;
 
     const Vec3d hjp = head.junction_point();
-    if (std::isinf(bridge_mesh_distance(hjp, DOWN, head.r_back_mm, m_cfg.safety_distance_mm)) &&
+    if (try_ground && std::isinf(bridge_mesh_distance(hjp, DOWN, head.r_back_mm, m_cfg.safety_distance_mm)) &&
         create_ground_pillar(hjp, head.dir, head.r_back_mm, head.id))
         return true;
 
@@ -1074,7 +1074,7 @@ bool SupportTreeBuildsteps::connect_thin_to_ground(Head &head)
     return false;
 }
 
-bool SupportTreeBuildsteps::connect_along_axes(Head &head)
+bool SupportTreeBuildsteps::connect_along_axes(Head &head, bool try_ground)
 {
     static const double tilts[] = {PI / 12., PI / 6., PI / 4.};
     const size_t azimuths = 24;
@@ -1114,7 +1114,7 @@ bool SupportTreeBuildsteps::connect_along_axes(Head &head)
                 // bridge into a pillar another head stood.
                 if (m_cfg.branch_off_retry && search_pillar_and_connect(head))
                     return true;
-                if (connect_to_ground(head, axis, m_cfg.safety_distance_mm))
+                if (try_ground && connect_to_ground(head, axis, m_cfg.safety_distance_mm))
                     return true;
             }
             cleared += clears;
@@ -1145,10 +1145,10 @@ void SupportTreeBuildsteps::routing_to_model()
         // a route to the ground.
         if (connect_to_ground(head)) { return; }
 
-        if (m_cfg.retry_thin_head && connect_thin_to_ground(head)) { return; }
+        if (m_cfg.retry_thin_head && connect_thin_to_ground(head, true)) { return; }
 
         if (m_cfg.island_axis_retry && m_support_pts[idx].is_new_island &&
-            connect_along_axes(head)) { return; }
+            connect_along_axes(head, true)) { return; }
 
         // No route to the ground, so connect to the model body as a last resort
         if (m_cfg.allow_model_anchors && connect_to_model_body(head)) { return; }
@@ -1169,6 +1169,28 @@ void SupportTreeBuildsteps::routing_to_model()
         ccr_seq::for_each(m_iheads_onmodel.begin(), m_iheads_onmodel.end(), isolated);
     else
         ccr::for_each(m_iheads_onmodel.begin(), m_iheads_onmodel.end(), isolated);
+
+    if (!m_cfg.branch_off_retry) return;
+
+    // A head the loop left unrouted may branch into a pillar a head routed
+    // after it stood. One pass in order searches the pillars from each pose
+    // the head and its retries take, with no ground route and no anchor.
+    for (const unsigned idx : m_iheads_onmodel) {
+        m_thr();
+
+        auto &head = m_builder.head(idx);
+        if (head.is_valid()) continue;
+
+        tbb::this_task_arena::isolate([&] {
+            head.id        = idx;
+            head.pillar_id = head.bridge_id = SupportTreeNode::ID_UNSET;
+            if (search_pillar_and_connect(head)) return;
+            if (m_cfg.retry_thin_head && connect_thin_to_ground(head, false)) return;
+            if (m_cfg.island_axis_retry && m_support_pts[idx].is_new_island &&
+                connect_along_axes(head, false)) return;
+            head.invalidate();
+        });
+    }
 }
 
 void SupportTreeBuildsteps::interconnect_pillars()
