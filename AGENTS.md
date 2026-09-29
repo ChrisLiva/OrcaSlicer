@@ -161,6 +161,13 @@ alone and on the re-run, assertion not captured. Capture the failing assertion b
 failed its `split.stability.unsupported_paths > 0` leg once under `ctest -j5` (read `0 > 0`), then passed 12 of 12
 runs alone, 30 of 30 runs five at a time and the full gate re-run (2026-09-10, no raft, analysis requested); re-run
 once before reading a lone failure there as a regression.
+`[ScaffoldSupport]` "A baked list goes stale under a tilt and stays valid under a Z rotation" fails its three
+instance-0 checks (`baked` read false, `stale` read true and the stale warning fired) in about 1 run in 40, five
+at a time: 2 of 80 runs with `branch_off_retry` off and 1 of 40 with it on, passing 5 of 5 lone re-runs
+(2026-09-29). Its stale verdict reads no routing output; re-run once before reading a lone failure there as a
+regression.
+`sla_print_tests` reports a different assertion total on each run of one binary (13177, 13298 and 13300 over 35
+passing cases, 2026-09-29), so gate that suite on its case count too.
 The hidden `[ScaffoldSupport][.]` case "Scaffold support over corpus plate 3 in two poses" reads one result on every
 run of one binary: `tree_config` sets `route_in_order`, so the SLA builder routes the heads in the points' order, and
 `SupportTreeBuildsteps` runs each head search and each route under `tbb::this_task_arena::isolate`. Every run reads

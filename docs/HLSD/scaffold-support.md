@@ -1107,9 +1107,11 @@ a scan of every face would build.
 - Branch-off retry. With `branch_off_retry`, default false, the thin and
   island axis retries search the pillars other heads have stood from each pose
   they take before trying the ground, and the pillar search passes over a
-  pillar thinner than the head without bridging to it. After the ordered
-  routing, every head still unrouted searches the pillars once more from its
-  own pose and the retries' poses and tries no ground route, since a ground
+  pillar thinner than the head without bridging to it. After the routing
+  loop, every head still unrouted searches the pillars once more, one head at
+  a time in the points' order followed by the cluster centroids whose ground
+  pillar failed, whether or not the loop ran in order, from its own pose and
+  the retries' poses and tries no ground route, since a ground
   attempt reads only the mesh and would fail the same way. A head whose own
   retries reach no ground still reaches a pillar a neighbour stood, and a head
   routed before its neighbour stood that pillar reaches it on the second pass.
@@ -1325,7 +1327,10 @@ it, where the search without the flag leaves one; a thin head at a nub over a
 floored slot bridges into the pillar a neighbour stood, whether it routes
 before or after that neighbour; and an island head under a roof leans out
 along a retry axis into a pillar standing through a hole in the shelf. Without
-the flag the last two are dropped.
+the flag the last two are dropped. Two nubs mirrored about that neighbour,
+both ahead of it in the points' order, reach the second pass together, and
+with one bridge allowed on the neighbour's pillar the nub earlier in the order
+takes it in every build while the other stays unrouted.
 
 `tests/fff_print/test_scaffold_plan.cpp` holds the `[ScaffoldPlan]` cases,
 which call `prepare_plan` and `plan_tips` on fixtures sliced without support,
