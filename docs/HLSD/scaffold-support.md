@@ -79,11 +79,11 @@ Before `plan_layer_heights`, under Scaffold, the generator fills a
 `ScaffoldSupport::Params` from the object config (toolpath width, pillar
 diameter, `m_ts_data->m_xy_distance`, the three scaffold keys,
 `max_bridge_length`, the interface layer count and the object's print z
-offset). It gathers the support blockers as `detect_overhangs` does,
-`slice_support_blockers` plus painted blocker facets, and calls
-`ScaffoldSupport::place_tips` with the contacts, the parameters, the detector's
-threshold angle and the blockers, or `ScaffoldSupport::baked_tips` on a valid
-baked list.
+offset). On a valid baked list it calls `ScaffoldSupport::baked_tips` with the
+list, the parameters and the detector's threshold angle. Otherwise it gathers
+the support blockers as `detect_overhangs` does, `slice_support_blockers` plus
+painted blocker facets, and calls `ScaffoldSupport::place_tips` with the
+contacts, the parameters, the threshold angle and the blockers.
 `plan_layer_heights` then takes every chosen tip's z as a layer top
 besides the contacts' own, so a tip the planner placed where no contact stands
 prints its top ring on the layer right under it, not under an air gap. Under
@@ -177,21 +177,25 @@ object back to a valid pose makes the next slice build from the list again.
 
 A baked slice skips every stage that places or thins contacts:
 `build_required_regions`, the risk field, `generate_contact_points`,
-`build_contact_seeds`, and `select_contacts` with its erase loop. Painted
-enforcers and blockers therefore change nothing while a list is in use, and
-the tool says so. `detect_overhangs`, the support layers, the preview cache
-and the `Params` fill still run, and the generator calls
+`build_contact_seeds`, and `select_contacts` with its erase loop, so no
+contact a painted enforcer asks for reaches the list, and `baked_tips` reads no
+blocker. Painted enforcers and blockers therefore change nothing while a list
+is in use, and the tool says so. `detect_overhangs`, the support layers, the
+preview cache and the `Params` fill still run, and the generator calls
 `ScaffoldSupport::baked_tips` in place of `place_tips`.
 
 `baked_tips` maps each point through `trafo_centered()` into the frame the
 builder uses and adds the object's print z offset. It snaps the point's z to
 the bottom of the object layer holding it, the first layer whose top lies
 above the point or the top layer when none does, and files it on the layer
-under that one, where a contact under an overhang is filed. A list keeps no
-head axis, so `baked_tips` builds the plan input `place_tips` builds, blockers
-included, and gives each point that is not enforced the axis the planner's
-neck search reads at that spot, `neck_axis`: a birth tip Generate copied leans
-its neck as the auto slice leaned it, and the 3MF format stays as it was. It
+under that one, where a contact under an overhang is filed. The list, in the
+model and in the 3MF file, stores no head axis, so `baked_tips` builds the plan
+input `place_tips` builds, with no blocker, and gives each point that is not
+enforced the axis the planner's neck search reads at that spot, `neck_axis`: a
+birth tip Generate copied leans its neck as the auto slice leaned it. The input
+reads no blocker because `Necks::clear` refuses every axis at a blocked cell: a
+point under a blocker drawn after the list was written would lose its lean,
+and the wall skip would take out a point whose neck clears only leaning. It
 then runs steps 2 to 4 of the auto path on those sites:
 
 - The wall skip calls the same `wall_skip` function `place_tips` calls, at
@@ -1026,8 +1030,9 @@ off the column face, whose necks bottom in the band, with no ring left
 floating, no bare planned layer left and base in the band only under a ring,
 a head under a sheet thinner than its pin leaving nothing floating over the
 sheet, a rod hanging beside a column whose birth tip leans its neck away from
-the column, stays through the wall skip and routes, in the auto slice and as
-a baked point, `draw` called on a lifted slab's one tip with an axis leaning
+the column, stays through the wall skip and routes, in the auto slice, as a
+baked point and as that baked point under a support blocker volume, which the
+list ignores, `draw` called on a lifted slab's one tip with an axis leaning
 45 degrees, whose head's slice 1.2 mm under the tip stands along the axis and
 not straight under the tip, `draw` called on one tip under an island lip over
 a shelf, dropped as a tip holding no island and routed along a leaning axis

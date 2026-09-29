@@ -1057,8 +1057,7 @@ ScaffoldPoint point_of(const PrintObject &object, const Params &params, const Ti
              site.enforced };
 }
 
-Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const Params &params, double threshold_rad,
-                const std::vector<Polygons> &blockers)
+Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const Params &params, double threshold_rad)
 {
     Tips tips;
     if (object.layer_count() == 0)
@@ -1081,8 +1080,9 @@ Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const P
         sites.push_back(site);
     }
 
-    // A point keeps no axis, so each one not enforced leans its neck as the planner would lean it at that spot.
-    const PlanInput input = plan_input(object, params, threshold_rad, blockers);
+    // A point keeps no axis, so each one not enforced leans its neck as the planner would lean it at that spot. A list
+    // ignores support blockers as it ignores paint, so the plan input reads none.
+    const PlanInput input = plan_input(object, params, threshold_rad, {});
     for (TipSite &site : sites)
         if (! site.enforced)
             site.axis = neck_axis(input, site);
