@@ -435,19 +435,6 @@ TriangleMesh leaning_rod_fixture()
     return column;
 }
 
-// A 40 x 12 x 1 mm slab at x 0..40, y 0..12, z 3..4 that touches nothing, and a 2 x 2 x 4 mm post at x 42..44,
-// y 0..2 that keeps the object on the plate. The slab's underside is an overhang island 12 mm wide, and 40 mm long so
-// the interior grid at a 7 mm step still lands candidates inside it.
-TriangleMesh floating_slab_fixture()
-{
-    TriangleMesh post = make_cube(2., 2., 4.);
-    post.translate(42.f, 0.f, 0.f);
-    TriangleMesh slab = make_cube(40., 12., 1.);
-    slab.translate(0.f, 0.f, 3.f);
-    post.merge(slab);
-    return post;
-}
-
 // A 6 x 6 x 14 mm column at x 0..6, y 0..6 carrying off its +x face a plank 2 mm thick whose underside falls at
 // 45 degrees from z 10 at the face, `length_mm` along x, across y 0..6. A head on the underside aims along the
 // underside's normal, down and back toward the column, so a tip under a millimetre from the face tilts its neck into

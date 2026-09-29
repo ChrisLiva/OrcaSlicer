@@ -31,6 +31,14 @@ const char *const SUPPORT_TEST_MODELS[] = {
     "extruder_idler.obj"
 };
 
+// An x by y by z box with its low corner at (dx, dy, dz).
+TriangleMesh box(double x, double y, double z, float dx, float dy, float dz)
+{
+    TriangleMesh m = make_cube(x, y, z);
+    m.translate(dx, dy, dz);
+    return m;
+}
+
 // A 40x40x4 block at x 0..40, y 0..40, z 0..4 with a 4x4x10 column at
 // x 18..22, y 0..4, z 4..14 carrying a 4x40x2 lip at x 18..22, y 0..40,
 // z 12..14. A point under the lip at (20, 20, 12) faces the block top and sits
@@ -38,12 +46,6 @@ const char *const SUPPORT_TEST_MODELS[] = {
 // neither a pillar nor the ground.
 indexed_triangle_set blocked_lip_mesh()
 {
-    auto box = [](double x, double y, double z, float dx, float dy, float dz) {
-        TriangleMesh m = make_cube(x, y, z);
-        m.translate(dx, dy, dz);
-        return m;
-    };
-
     indexed_triangle_set its = box(40., 40., 4., 0.f, 0.f, 0.f).its;
     its_merge(its, box(4., 4., 10., 18.f, 0.f, 4.f).its);
     its_merge(its, box(4., 40., 2., 18.f, 0.f, 12.f).its);
@@ -69,12 +71,6 @@ const sla::SupportPoints BLOCKED_LIP_POINTS = {sla::SupportPoint(Vec3f(20.f, 20.
 // one point under the slab's centre at (5, 5, 10), 0.5 mm beside the wall.
 indexed_triangle_set raised_slab_mesh(bool wall)
 {
-    auto box = [](double x, double y, double z, float dx, float dy, float dz) {
-        TriangleMesh m = make_cube(x, y, z);
-        m.translate(dx, dy, dz);
-        return m;
-    };
-
     indexed_triangle_set its = box(10., 10., 2., 0.f, 0.f, 10.f).its;
     its_merge(its, box(2., 2., 10., 0.f, 0.f, 0.f).its);
     if (wall)
@@ -93,12 +89,6 @@ const sla::SupportPoints RAISED_SLAB_POINTS = {sla::SupportPoint(Vec3f(5.f, 5.f,
 // full 0.5 mm safety distance, drops down the slot to the ground.
 indexed_triangle_set slot_fin_mesh()
 {
-    auto box = [](double x, double y, double z, float dx, float dy, float dz) {
-        TriangleMesh m = make_cube(x, y, z);
-        m.translate(dx, dy, dz);
-        return m;
-    };
-
     indexed_triangle_set its = box(9.2, 20., 1.5, -10.f, -10.f, 0.f).its;
     its_merge(its, box(9.2, 20., 1.5, 0.8f, -10.f, 0.f).its);
     its_merge(its, box(1., 10., 3.8, -0.5f, -5.f, 4.2f).its);
@@ -128,12 +118,6 @@ const sla::SupportPoints SLOT_FIN_POINTS = {sla::SupportPoint(Vec3f(0.f, 0.f, 4.
 // walk a mm higher and further out and clears it.
 indexed_triangle_set shelf_lip_mesh()
 {
-    auto box = [](double x, double y, double z, float dx, float dy, float dz) {
-        TriangleMesh m = make_cube(x, y, z);
-        m.translate(dx, dy, dz);
-        return m;
-    };
-
     indexed_triangle_set its = box(22., 40., 3., -20.f, -20.f, 0.f).its;
     its_merge(its, box(6., 6., 1., -5.f, -3.f, 7.4f).its);
 
@@ -149,12 +133,6 @@ indexed_triangle_set shelf_lip_mesh()
 // to a pillar an earlier walk stood, three bridges to a pillar at most.
 indexed_triangle_set comb_mesh()
 {
-    auto box = [](double x, double y, double z, float dx, float dy, float dz) {
-        TriangleMesh m = make_cube(x, y, z);
-        m.translate(dx, dy, dz);
-        return m;
-    };
-
     indexed_triangle_set its = box(30., 3., 1., 0.f, 0.f, 10.f).its;
     its_merge(its, box(40., 7.5, 4.5, -5.f, -5.f, 0.f).its);
     its_merge(its, box(40., 6., 5.5, -5.f, -5.f, 4.5f).its);
@@ -201,12 +179,6 @@ std::optional<sla::Head> raised_slab_head(bool wall, std::vector<Vec3f> axes)
 // is decided by the corrector cap rather than by the wall.
 indexed_triangle_set corrector_sweep_mesh(double h, double plate_x_end)
 {
-    auto box = [](double x, double y, double z, float dx, float dy, float dz) {
-        TriangleMesh m = make_cube(x, y, z);
-        m.translate(dx, dy, dz);
-        return m;
-    };
-
     indexed_triangle_set its = box(2., 40., 30., 0.f, 0.f, 0.f).its;
     its_merge(its, box(plate_x_end - 4.5, 40., 0.2, 4.5f, 0.f, 0.f).its);
     its_merge(its, box(6., 6., 2., 2.f, 17.f, float(h)).its);
@@ -220,12 +192,6 @@ indexed_triangle_set corrector_sweep_mesh(double h, double plate_x_end)
 // under the small plate and two 16 mm apart under the long one.
 indexed_triangle_set two_plates_mesh()
 {
-    auto box = [](double x, double y, double z, float dx, float dy, float dz) {
-        TriangleMesh m = make_cube(x, y, z);
-        m.translate(dx, dy, dz);
-        return m;
-    };
-
     indexed_triangle_set its = box(10., 10., 1., 0.f, 0.f, 30.f).its;
     its_merge(its, box(20., 10., 1., 30.f, 0.f, 30.f).its);
     its_merge(its, box(2., 2., 1., 60.f, 0.f, 0.f).its);

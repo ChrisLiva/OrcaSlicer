@@ -75,6 +75,17 @@ uint64_t seed_id(const SupportNode &node) { return node.source_ids.empty() ? std
 
 TipSite site_of(const SupportNode &node) { return { node.position, node.print_z, node.obj_layer_nr, seed_id(node), node.is_pinned }; }
 
+// How far a tip's neck runs from the tip along its axis, where the planner and the wall skip read its end.
+double neck_depth_mm(const Params &params) { return head_width_mm + params.toolpath_width_mm; }
+
+// The plan input `prepare_plan` builds for `object` at the widths, distances and neck depth of `params`.
+PlanInput plan_input(const PrintObject &object, const Params &params, double threshold_rad, const std::vector<Polygons> &blockers,
+                     const ObjectMesh *mesh = nullptr)
+{
+    return prepare_plan(object, params.toolpath_width_mm, params.xy_distance_mm, neck_depth_mm(params), params.max_bridge_length_mm,
+                        threshold_rad, blockers, mesh);
+}
+
 // The tips a model island needs for its unjoined height: one for a sliver, two up to 5 mm, three above. A slab z is
 // a sum of layer heights, so a band edge carries an epsilon.
 size_t hold_floor(double height_mm) { return height_mm <= 1. + EPSILON ? 1 : height_mm <= 5. + EPSILON ? 2 : 3; }
@@ -338,18 +349,17 @@ void merge_aliases(std::vector<TipSite> &tips)
     tips.resize(next);
 }
 
-// Where `tip`'s neck ends, `neck_depth_mm` from the tip along its axis, or straight down where it has none.
-Vec3d neck_end(const TipSite &tip, double neck_depth_mm)
+// Where `tip`'s neck ends, `depth_mm` from the tip along its axis, or straight down where it has none.
+Vec3d neck_end(const TipSite &tip, double depth_mm)
 {
     const Vec3d axis = tip.axis.isZero() ? Vec3d(0., 0., -1.) : Vec3d(tip.axis.cast<double>().normalized());
-    const Vec2d xy   = unscale(tip.position);
-    return Vec3d(xy.x(), xy.y(), tip.print_z) + neck_depth_mm * axis;
+    return alias_point(tip) + depth_mm * axis;
 }
 
 // The first object layer at or above the bottom of `tip`'s neck, or -1 where the neck bottoms under the first layer.
-int reference_layer(const PrintObject &object, const TipSite &tip, double neck_depth_mm)
+int reference_layer(const PrintObject &object, const TipSite &tip, double depth_mm)
 {
-    const double z = neck_end(tip, neck_depth_mm).z();
+    const double z = neck_end(tip, depth_mm).z();
     if (object.layer_count() == 0 || z <= object.get_layer(0)->bottom_z())
         return -1;
     const auto it = std::lower_bound(object.layers().begin(), object.layers().end(), z,
@@ -363,16 +373,14 @@ int reference_layer(const PrintObject &object, const TipSite &tip, double neck_d
 // neck: under a slope the head tilts along the underside's normal, and the neck check exempts a cut head whose tilted
 // neck bottoms outside the band. A neck bottoming under the first layer stands by the pad and is kept, and so is an
 // enforced tip: the enforcer asked for it there, and `clip_base` keeps its head out of the model alone. The bands of
-// the layers under `tips` and `spare` are offset up front, and the skip reads only those tips.
-std::function<bool(const TipSite &)> wall_skip(const PrintObject &object, const std::vector<TipSite> &tips,
-                                               const std::vector<TipSite> &spare, const Params &params)
+// the layers under `tips` are offset up front, and the skip reads only those tips.
+std::function<bool(const TipSite &)> wall_skip(const PrintObject &object, const std::vector<TipSite> &tips, const Params &params)
 {
-    const double     neck_depth_mm = head_width_mm + params.toolpath_width_mm;
+    const double     depth = neck_depth_mm(params);
     std::vector<int> wall_layers;
-    for (const std::vector<TipSite> *list : { &tips, &spare })
-        for (const TipSite &tip : *list)
-            if (const int l = reference_layer(object, tip, neck_depth_mm); l >= 0)
-                wall_layers.push_back(l);
+    for (const TipSite &tip : tips)
+        if (const int l = reference_layer(object, tip, depth); l >= 0)
+            wall_layers.push_back(l);
     std::sort(wall_layers.begin(), wall_layers.end());
     wall_layers.erase(std::unique(wall_layers.begin(), wall_layers.end()), wall_layers.end());
     std::vector<ExPolygons> wall_bands(wall_layers.size());
@@ -380,12 +388,12 @@ std::function<bool(const TipSite &)> wall_skip(const PrintObject &object, const 
         for (size_t i = range.begin(); i < range.end(); ++ i)
             wall_bands[i] = offset_ex(object.get_layer(wall_layers[i])->lslices, scale_(params.xy_distance_mm));
     });
-    return [&object, neck_depth_mm, wall_layers = std::move(wall_layers), wall_bands = std::move(wall_bands)](const TipSite &tip) {
-        const int l = reference_layer(object, tip, neck_depth_mm);
+    return [&object, depth, wall_layers = std::move(wall_layers), wall_bands = std::move(wall_bands)](const TipSite &tip) {
+        const int l = reference_layer(object, tip, depth);
         if (l < 0 || tip.enforced)
             return false;
         const ExPolygons &band = wall_bands[size_t(std::lower_bound(wall_layers.begin(), wall_layers.end(), l) - wall_layers.begin())];
-        const Vec3d       end  = neck_end(tip, neck_depth_mm);
+        const Vec3d       end  = neck_end(tip, depth);
         const Point       at   = Point::new_scale(end.x(), end.y());
         if (std::none_of(band.begin(), band.end(), [&at](const ExPolygon &expoly) { return expoly.contains(at); }))
             return false;
@@ -1020,8 +1028,7 @@ Tips place_tips(const PrintObject &object, const std::vector<std::vector<Support
                 enforced.push_back(site_of(*node));
     Tips tips;
     tips.mesh             = std::make_shared<const ObjectMesh>(object);
-    const PlanInput input = prepare_plan(object, params.toolpath_width_mm, params.xy_distance_mm, head_width_mm + params.toolpath_width_mm,
-                                         params.max_bridge_length_mm, threshold_rad, blockers, tips.mesh.get());
+    const PlanInput input = plan_input(object, params, threshold_rad, blockers, tips.mesh.get());
     const auto start = std::chrono::steady_clock::now();
     tips.plan               = plan_tips(input, enforced);
     tips.island_joins_ms    = ms_since(start);
@@ -1036,7 +1043,7 @@ Tips place_tips(const PrintObject &object, const std::vector<std::vector<Support
             for (const size_t tip : island.holders)
                 tips.sites[tip].holds_island = true;
     // The planner keeps its tips out of the band on its lattice; the wall skip reads the band exactly.
-    const std::function<bool(const TipSite &)> at_wall = wall_skip(object, tips.sites, {}, params);
+    const std::function<bool(const TipSite &)> at_wall = wall_skip(object, tips.sites, params);
     tips.sites.erase(std::remove_if(tips.sites.begin(), tips.sites.end(), at_wall), tips.sites.end());
     merge_aliases(tips.sites);
     return tips;
@@ -1075,12 +1082,11 @@ Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const P
     }
 
     // A point keeps no axis, so each one not enforced leans its neck as the planner would lean it at that spot.
-    const PlanInput input = prepare_plan(object, params.toolpath_width_mm, params.xy_distance_mm, head_width_mm + params.toolpath_width_mm,
-                                         params.max_bridge_length_mm, threshold_rad, blockers);
+    const PlanInput input = plan_input(object, params, threshold_rad, blockers);
     for (TipSite &site : sites)
         if (! site.enforced)
             site.axis = neck_axis(input, site);
-    const std::function<bool(const TipSite &)> at_wall = wall_skip(object, sites, {}, params);
+    const std::function<bool(const TipSite &)> at_wall = wall_skip(object, sites, params);
     sites.erase(std::remove_if(sites.begin(), sites.end(), [&](const TipSite &site) {
                     if (! at_wall(site))
                         return false;
