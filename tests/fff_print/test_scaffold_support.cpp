@@ -5,6 +5,7 @@
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Format/STL.hpp"
 #include "libslic3r/Layer.hpp"
+#include "libslic3r/MeshBoolean.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Preset.hpp"
 #include "libslic3r/Print.hpp"
@@ -506,10 +507,15 @@ TriangleMesh presupported_eye()
     eye.translate(10.f, 0.f, 8.f);
     return eye;
 }
-TriangleMesh presupported_fixture()
+TriangleMesh presupported_slab()
 {
-    TriangleMesh model = make_cube(20., 12., 4.);
-    model.translate(0.f, 0.f, 6.f);
+    TriangleMesh slab = make_cube(20., 12., 4.);
+    slab.translate(0.f, 0.f, 6.f);
+    return slab;
+}
+// The fixture around `model` in place of the slab, its trunks standing on no pad when `pads` is false.
+TriangleMesh presupported_fixture(TriangleMesh model = presupported_slab(), bool pads = true)
+{
     model.merge(presupported_staff());
     model.merge(presupported_eye());
     for (const FixtureTip &tip : { presupported_light, presupported_light, presupported_heavy, presupported_leaning, presupported_at_cut,
@@ -518,9 +524,11 @@ TriangleMesh presupported_fixture()
     for (const FixtureTip &tip : { presupported_light, presupported_heavy, presupported_leaning, presupported_at_cut, presupported_under_cut }) {
         const Vec3d wide = tip.site + 3. * tip.axis;
         model.merge(artist_rod(Vec3d(wide.x(), wide.y(), 0.4), wide, 0.4));
-        TriangleMesh pad = make_cube(3., 3., 0.5);
-        pad.translate(float(wide.x() - 1.5), float(wide.y() - 1.5), 0.f);
-        model.merge(pad);
+        if (pads) {
+            TriangleMesh pad = make_cube(3., 3., 0.5);
+            pad.translate(float(wide.x() - 1.5), float(wide.y() - 1.5), 0.f);
+            model.merge(pad);
+        }
     }
     model.merge(artist_rod(Vec3d(4., 4., 2.), Vec3d(10., 6., 2.), 0.3));
     model.merge(swept_spheres(Vec3d(2., 10., 6.), 0.1, Vec3d(2.5, 10., 5.4), 0.1));
@@ -2874,6 +2882,54 @@ TEST_CASE("Converting a pre-supported model leaves the figure and one scaffold p
         CHECK(point->size == e.size);
         for (int c = 0; c < 3; ++c)
             CHECK_THAT(point->axis[c], WithinAbs(e.axis[c], 1e-4));
+    }
+}
+
+TEST_CASE("Converting a pre-supported model strips a raft taller than a flat piece and keeps a figure that stands on a raft", "[ScaffoldSupport]")
+{
+    // "thick raft": the fixture's trunks sunk in one 2 mm raft box at x 2.5..15, y 1.5..10.5 in place of their pads,
+    // taller than a flat raft piece and lower than it is wide. "figure on raft": the slab joined to a 2 x 2 mm foot
+    // post at x 17.5..19.5, y 9.5..11.5 from z 0.5 into the slab, one non-convex shell, standing on a 3 x 3 x 0.5 mm
+    // pad of its own clear of the trunks, the fixture's pads, trunks, tips and brace kept.
+    const std::string kind   = GENERATE(as<std::string>{}, "thick raft", "figure on raft");
+    TriangleMesh      figure = presupported_slab();
+    TriangleMesh      fixture;
+    double            figure_bottom = 6.;
+    if (kind == "thick raft") {
+        fixture           = presupported_fixture(figure, false);
+        TriangleMesh raft = make_cube(12.5, 9., 2.);
+        raft.translate(2.5f, 1.5f, 0.f);
+        fixture.merge(raft);
+    } else {
+        TriangleMesh post = make_cube(2., 2., 6.5);
+        post.translate(17.5f, 9.5f, 0.5f);
+        MeshBoolean::cgal::plus(figure, post);
+        REQUIRE(its_split(figure.its).size() == 1);
+        figure_bottom = 0.5;
+        fixture       = presupported_fixture(figure);
+        TriangleMesh pad = make_cube(3., 3., 0.5);
+        pad.translate(17.f, 9.f, 0.f);
+        fixture.merge(pad);
+    }
+    CAPTURE(kind);
+    Model        model;
+    ModelObject &mo = *model.add_object();
+    mo.add_volume(fixture);
+    mo.add_instance();
+
+    const PresupportedConversion::Summary summary = PresupportedConversion::convert(mo, 0);
+    CHECK(summary.refusal == PresupportedConversion::Refusal::None);
+    CHECK(summary.tips_converted == 6);
+    // Every trunk reaches the plate through the raft; only the tip on the slab's top face stands on the figure.
+    CHECK(summary.tips_rooted_on_figure == 1);
+
+    // The figure alone is left, with its staff and eye, and neither raft piece.
+    REQUIRE(mo.volumes.size() == 1);
+    CHECK(mo.volumes.front()->mesh().facets_count() == figure.facets_count() + presupported_staff().facets_count() + presupported_eye().facets_count());
+    const BoundingBoxf3 raw = mo.raw_mesh_bounding_box();
+    for (int c = 0; c < 3; ++c) {
+        CHECK_THAT(raw.min[c], WithinAbs(Vec3d(0., -1., figure_bottom)[c], 1e-5));
+        CHECK_THAT(raw.max[c], WithinAbs(Vec3d(20., 12., 18.)[c], 1e-5));
     }
 }
 

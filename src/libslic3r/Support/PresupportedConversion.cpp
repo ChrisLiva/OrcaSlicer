@@ -72,7 +72,7 @@ struct Shell
     std::vector<Vec3d>   world; // its vertices in the instance's world frame
     BoundingBoxf3        box;
     bool                 figure    = false;
-    bool                 raft      = false; // a flat piece on the plate
+    bool                 raft      = false; // a raft piece on the plate
     bool                 primitive = false; // closed, convex and with volume, as every artist support piece is
     Planes               planes;
     End                  ends[2];
@@ -261,22 +261,27 @@ std::vector<size_t> clusters(const std::vector<Shell> &shells, const std::vector
     return root;
 }
 
-// Marks the raft, the flat pieces on the plate, and the figure: past the raft and the shells standing on it, the
+// Marks the raft and the figure. A shell on the plate is raft when it is no taller than a flat piece, or when it is a
+// primitive lower than its shorter horizontal side, as a raft box is. Past the raft and the primitives standing on it, the figure is the
 // shells above the widest ratio gap between consecutive box volumes, largest first; the largest alone when no gap is
-// searched. A shell that itself starts on the plate stands on no raft piece, so a figure on the plate stays a candidate.
+// searched. A shell that starts on the plate stands on no raft piece, and a shell that is no primitive is never set
+// aside as standing on one, so a figure on the plate or on a raft stays a candidate.
 void mark_figure(std::vector<Shell> &shells, double z_min)
 {
     std::vector<size_t> flat, rest;
-    for (size_t i = 0; i < shells.size(); ++i)
-        if (shells[i].box.min.z() <= z_min + plate_mm && shells[i].box.size().z() <= flat_height_mm) {
+    for (size_t i = 0; i < shells.size(); ++i) {
+        const Vec3d size = shells[i].box.size();
+        if (shells[i].box.min.z() <= z_min + plate_mm &&
+            (size.z() <= flat_height_mm || (shells[i].primitive && size.z() < std::min(size.x(), size.y())))) {
             shells[i].raft = true;
             flat.push_back(i);
         }
+    }
     for (size_t i = 0; i < shells.size(); ++i) {
         const BoundingBoxf3 &b = shells[i].box;
         if (shells[i].raft)
             continue;
-        const bool resting = b.min.z() > z_min + plate_mm && std::any_of(flat.begin(), flat.end(), [&](size_t f) {
+        const bool resting = shells[i].primitive && b.min.z() > z_min + plate_mm && std::any_of(flat.begin(), flat.end(), [&](size_t f) {
             const BoundingBoxf3 &base = shells[f].box;
             return b.min.z() <= base.max.z() + overlap_mm && b.min.x() <= base.max.x() + overlap_mm && b.max.x() >= base.min.x() - overlap_mm &&
                    b.min.y() <= base.max.y() + overlap_mm && b.max.y() >= base.min.y() - overlap_mm;
@@ -351,7 +356,8 @@ Summary convert(ModelObject &object, size_t instance_idx, const std::function<vo
             shell.world.reserve(shell.its.vertices.size());
             for (const Vec3f &v : shell.its.vertices)
                 shell.world.push_back(to_world * v.cast<double>());
-            shell.box = BoundingBoxf3(shell.world);
+            shell.box       = BoundingBoxf3(shell.world);
+            shell.primitive = primitive(shell);
         }
     });
     const double z_min = std::min_element(shells.begin(), shells.end(), [](const Shell &l, const Shell &r) {
@@ -363,12 +369,12 @@ Summary convert(ModelObject &object, size_t instance_idx, const std::function<vo
     // other shell, such as a sliver of the figure's own mesh, stays with the figure.
     tbb::parallel_for(tbb::blocked_range<size_t>(0, shells.size()), [&](const tbb::blocked_range<size_t> &range) {
         for (size_t i = range.begin(); i < range.end(); ++i)
-            if (! shells[i].figure && (shells[i].primitive = primitive(shells[i])))
+            if (shells[i].primitive && ! shells[i].figure)
                 fit_ends(shells[i]);
     });
     std::vector<size_t> supports;
     for (size_t i = 0; i < shells.size(); ++i) {
-        if (shells[i].primitive)
+        if (shells[i].primitive && ! shells[i].figure)
             supports.push_back(i);
         else if (! shells[i].raft)
             shells[i].figure = true;

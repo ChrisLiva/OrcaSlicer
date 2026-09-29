@@ -402,19 +402,24 @@ never share an edge with it.
 
 Separation. The model part's mesh splits into shells by shared edges,
 `its_split`, the split `ModelObject::split` makes. Every shell is read in the
-selected instance's world frame. Shells on the plate no taller than 1 mm are
-the raft, which leaves the mesh whatever its shape, and shells off the plate
-whose bottom rests on a raft piece are set aside with it; a shell that itself
-starts on the plate rests on nothing, so a figure standing on the plate stays
-a candidate. The rest sort by bounding-box volume, and the figure is every
-shell above the widest ratio gap between neighbours, down to a thousandth of
-the largest box. Any other shell is a support only when it is a primitive:
-closed, convex to 1e-4 mm and holding more than 1e-5 mm3. A shell that is
-neither stays with the figure, as do the slivers of the figure's own mesh
-that the reference files split off. A mesh of one shell, or one with no
-support, refuses as `NoSupports`: welded supports and a plain model look the
-same to the split, so the notification names both. An object of more than
-one model part refuses as `SeveralParts`.
+selected instance's world frame and tested for being a primitive: closed,
+convex to 1e-4 mm and holding more than 1e-5 mm3, as every artist support
+piece is. A shell on the plate is raft when it is no taller than 1 mm, or when
+it is a primitive lower than its shorter horizontal side, as a raft box is;
+the raft leaves the mesh whatever its shape. A primitive off the plate whose
+bottom rests on a raft piece is set aside with it. A shell that starts on the
+plate rests on nothing, and a shell that is no primitive never rests, so a
+figure standing on the plate or on a raft stays a candidate. The raft rule
+carries one limit: a convex figure standing on the plate lower than it is
+wide, such as a coin with no separate figure, reads as raft. The rest sort by
+bounding-box volume, and the figure is every shell above the widest ratio gap
+between neighbours, down to a thousandth of the largest box. Any other shell
+is a support only when it is a primitive. A shell that is neither stays with
+the figure, as do the slivers of the figure's own mesh that the reference
+files split off. A mesh of one shell, or one with no support, refuses as
+`NoSupports`: welded supports and a plain model look the same to the split, so
+the notification names both. An object of more than one model part refuses as
+`SeveralParts`.
 
 Tips by shape. Each support's ends are read along its principal axis: rings of
 vertices, walked in from the extreme, while one least-squares sphere holds
