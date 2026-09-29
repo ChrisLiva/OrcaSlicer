@@ -2,6 +2,13 @@
 
 OrcaSlicer — open-source C++17 3D slicer. wxWidgets GUI, CMake build system.
 
+## Repository
+
+Work against the fork `ChrisLiva/OrcaSlicer` (remote `origin`); its PRs, issues and branches live there. The clone also
+has an `upstream` remote (`OrcaSlicer/OrcaSlicer`), and with no default set `gh` resolves to `upstream` before `origin`,
+so an unqualified `gh pr view 2` read upstream's 2022 PR #2 instead of the fork's (2026-09-29). Pass
+`-R ChrisLiva/OrcaSlicer` to every `gh` command, or check `gh repo set-default --view` names the fork first.
+
 ## Build Commands
 
 ```bash
