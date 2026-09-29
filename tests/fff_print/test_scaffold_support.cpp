@@ -2397,7 +2397,9 @@ TEST_CASE("Need-driven tips hold corpus plate 1's hand and sword with few contac
 
     // The sword hangs point-down from the raised hand: its blade stands free from z 1.04 and widens from its point to
     // about 7 mm by z 6.5, then rises nearly vertical to the guard at z 15.8. The widening edge takes a stability tip at
-    // z 3.56, and the stability rule then finds no corner it may hold on the blade until z 12.32, 8.76 mm higher.
+    // z 3.56. Above it the stability tip at z 12.32 drops its neck straight, and those at 8.24 and 12.44, where no corner
+    // of the blade's faces both clears straight down and holds its head within the face cap, lean theirs off the blade.
+    // The blade counts only the tips the builder routes, since a dropped head holds nothing in the print.
     size_t              hand = 0, low_blade = 0;
     std::vector<double> sword;
     bool                heavy_point = false;
@@ -2405,7 +2407,7 @@ TEST_CASE("Need-driven tips hold corpus plate 1's hand and sword with few contac
         const Vec3d p = po.trafo_centered() * tip.pos.cast<double>();
         if (p.x() > 8. && p.x() < 15.5 && p.z() > 20. && p.z() < 29.)
             ++ hand;
-        if (p.x() > -10. && p.x() < -0.2 && p.y() > 2.5 && p.z() < 15.) {
+        if (tip.result == ScaffoldTipResult::Routed && p.x() > -10. && p.x() < -0.2 && p.y() > 2.5 && p.z() < 15.) {
             sword.push_back(p.z());
             low_blade += p.z() < 7.5;
             heavy_point = heavy_point || (p.z() < 1.5 && tip.size == ScaffoldHeadSize::Heavy);
@@ -2424,8 +2426,9 @@ TEST_CASE("Need-driven tips hold corpus plate 1's hand and sword with few contac
                              << " under z 7.5, largest gap " << gap << " mm");
     CHECK(hand <= 10);
     CHECK(heavy_point);
-    // No stretch of blade under the guard longer than 9 mm goes without a tip, and the widening lower blade takes two.
-    CHECK(gap <= 9.);
+    // No stretch of blade under the guard longer than the blade's stability window, three of its 2.25 mm thicknesses
+    // rounded up to 7 mm, goes without a tip, and the widening lower blade takes two.
+    CHECK(gap <= 7.);
     CHECK(low_blade >= 2);
     // No more contacts than the resin reference's 117 for this figure.
     CHECK(record->tips.size() <= 117);

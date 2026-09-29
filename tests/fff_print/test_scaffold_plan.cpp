@@ -673,6 +673,186 @@ TEST_CASE("A level spear takes a tip at least every bridge length", "[ScaffoldPl
 }
 
 namespace {
+// A blade 1.2 mm thick, y 0..1.2, hanging from its point at x 0, z 2: its back edge stands upright at x 0, and its front
+// edge rises 40 degrees to x 2 at z 3.68 and then stands upright into a crossbar at z 14..16 that a 6 x 6 column on the
+// bed carries. From z 5.5 to 13.5 five teeth 1 mm deep line the upright front edge, each face under a tooth rising 30
+// degrees from its root out to its tip and its upper face falling back to the next root 1.6 mm higher, so the edge as a
+// whole stands upright. A head may hold the face under a tooth, but a neck straight down from it runs into the tooth
+// below.
+const double teeth_from = 5.5, tooth_pitch = 1.6;
+TriangleMesh serrated_blade()
+{
+    const double       knee = 2. + 2. * std::tan(Geometry::deg2rad(40.)), under = std::tan(Geometry::deg2rad(30.));
+    std::vector<Vec3d> blade;
+    for (double y : { 0., 1.2 })
+        for (const Vec2d &xz : { Vec2d(0., 2.), Vec2d(2., knee), Vec2d(2., 14.5), Vec2d(0., 14.5) })
+            blade.emplace_back(xz.x(), y, xz.y());
+    TriangleMesh out = merged({ hull(blade), box(-1, -1, 14, 16, 3.2, 2), box(9, -2.4, 0, 6, 6, 16) });
+    // Each tooth reaches 0.1 mm into the blade, so its faces meet the blade's front at x 2; its upper face falls `back`
+    // over its 1 mm depth.
+    for (int i = 0; i < 5; ++ i) {
+        const double       root = teeth_from + tooth_pitch * i, back = tooth_pitch - under;
+        std::vector<Vec3d> tooth;
+        for (double y : { 0., 1.2 })
+            for (const Vec2d &xz : { Vec2d(1.9, root - 0.1 * under), Vec2d(3., root + under), Vec2d(1.9, root + tooth_pitch + 0.1 * back) })
+                tooth.emplace_back(xz.x(), y, xz.y());
+        out.merge(hull(tooth));
+    }
+    return out;
+}
+
+// A band 1.2 mm thick and 14 mm long, x 0..14 and y 0..1.2, standing to z 11 beside a 5 x 5 post that roots the
+// object. Its hem hangs to two points, x 3 and x 11 at z 2, and each hem edge rises `hem_deg` from its point, steeper
+// than the threshold, so no underside tip holds it: out to the band's ends and in to a notch at x 7 where the two teeth
+// meet. Above the notch the band stands upright and offers no face a head can hold.
+const double hem_deg = 35.;
+TriangleMesh tattered_band()
+{
+    const double       rise = std::tan(Geometry::deg2rad(hem_deg)), notch = 2. + 4. * rise;
+    std::vector<Vec3d> left, right;
+    for (double y : { 0., 1.2 }) {
+        for (const Vec2d &xz : { Vec2d(0., 2. + 3. * rise), Vec2d(3., 2.), Vec2d(7., notch), Vec2d(0., notch) })
+            left.emplace_back(xz.x(), y, xz.y());
+        for (const Vec2d &xz : { Vec2d(7., notch), Vec2d(11., 2.), Vec2d(14., 2. + 3. * rise), Vec2d(14., notch) })
+            right.emplace_back(xz.x(), y, xz.y());
+    }
+    return merged({ hull(left), hull(right), box(0, 0, notch, 14, 1.2, 11. - notch), box(-9, 0, 0, 5, 5, 13) });
+}
+
+// A rod 1.2 mm square, x 0..1.2 and y 0..1.2, hangs from its flat end at z 2 into a crossbar at z 7..9 that a 6 x 6
+// column on the bed carries. A ledge juts 0.8 mm from its back from z `ledge_root`, its underside rising 40 degrees, and
+// a tooth 0.8 mm from its front from z `tooth_root`, its underside rising 25 degrees, over a 1 x 1.2 post that stands on
+// the bed to 0.5 mm under the tooth's root. A neck straight down from the tooth meets the post or the rod's wall, while
+// one from the ledge's outer half clears. `ledge` false leaves the ledge off.
+const double ledge_root = 4.4, tooth_root = 4.6;
+TriangleMesh ledged_rod(bool ledge)
+{
+    TriangleMesh out = merged({ box(0, 0, 2, 1.2, 1.2, 5.5), box(-1, -1, 7, 12, 3.2, 2), box(5, -2.4, 0, 6, 6, 9),
+                                box(1.6, 0, 0, 1., 1.2, tooth_root - 0.5) });
+    // Each reaches 0.1 mm into the rod from its face at `face_x` out to `tip_x`, and its upper face falls back to the rod
+    // 0.5 mm over its tip.
+    const auto jut = [&out](double face_x, double tip_x, double root, double deg) {
+        const double       rise = std::tan(Geometry::deg2rad(deg)), reach = std::abs(tip_x - face_x);
+        const double       in_x = face_x + 0.1 * (face_x - tip_x) / reach;
+        std::vector<Vec3d> points;
+        for (double y : { 0., 1.2 })
+            for (const Vec2d &xz : { Vec2d(in_x, root - 0.1 * rise), Vec2d(tip_x, root + reach * rise), Vec2d(in_x, root + reach * rise + 0.5) })
+                points.emplace_back(xz.x(), y, xz.y());
+        out.merge(hull(points));
+    };
+    if (ledge)
+        jut(0., -0.8, ledge_root, 40.);
+    jut(1.2, 2., tooth_root, 25.);
+    return out;
+}
+} // namespace
+
+TEST_CASE("A blade whose mid-section edges stand too steep for a straight neck takes a leaning stability tip there", "[ScaffoldPlan]")
+{
+    // The teeth above the lowest each stand over the tooth below, so every neck straight down from the face under a
+    // tooth crosses material, and the blade reaches past its 3.6 mm window, three of its 1.2 mm thicknesses, from what
+    // holds it well below the crossbar. A neck leaning off the blade's side clears the teeth: the stability tip takes
+    // the least lean that clears, as a birth does, at the azimuth whose end stands farthest from the model, and hands
+    // the builder that axis. The builder's normal still stands within the face cap there. With no lean allowed no tooth
+    // takes a tip and the blade counts slender once more.
+    Sliced              s(serrated_blade());
+    const BoundingBoxf3 teeth(Vec3d(2.2, -0.1, teeth_from + tooth_pitch), Vec3d(3.1, 1.3, teeth_from + 5. * tooth_pitch));
+    const Plan          plan    = s.plan();
+    size_t              leaning = 0;
+    for (const PlannedTip &tip : plan.tips)
+        if (tip.need == TipNeed::Stability && inside(s, tip, teeth)) {
+            const Vec2d  xy   = s.at(tip);
+            const double lean = lean_deg(tip.site.axis);
+            INFO("stability tip at (" << xy.x() << ", " << xy.y() << ", " << tip.site.print_z << ") leaning " << lean << " degrees along ("
+                                      << tip.site.axis.x() << ", " << tip.site.axis.y() << ", " << tip.site.axis.z() << "), builder "
+                                      << s.from_down_deg(tip) << " degrees from down");
+            CHECK_FALSE(tip.site.axis.isZero());
+            CHECK(lean <= 45. + 1e-6);
+            // The lean points off the side of the blade the tip stands on.
+            CHECK((xy.y() - 0.6) * double(tip.site.axis.y()) > 0.);
+            CHECK(s.from_down_deg(tip) <= 60.01);
+            // A baked list reads the same axis again at the tip.
+            CHECK_THAT(double((neck_axis(s.input, tip.site) - tip.site.axis).norm()), Catch::Matchers::WithinAbs(0., 1e-6));
+            leaning += ! tip.site.axis.isZero();
+        }
+    INFO(leaning << " leaning stability tips on the teeth, slender " << plan.islands_slender);
+    CHECK(leaning >= 1);
+
+    s.input.max_tilt_rad = 0.;
+    const Plan upright = s.plan();
+    CHECK(count_in(s, upright, teeth, { TipNeed::Stability }) == 0);
+    CHECK(upright.islands_slender > plan.islands_slender);
+}
+
+TEST_CASE("A stability tip takes a corner whose neck clears straight down ahead of a flatter one that clears only leaning", "[ScaffoldPlan]")
+{
+    // The rod passes its 3.6 mm window, three of its 1.2 mm thicknesses, from its end with the ledge and the tooth both
+    // within the window under its top, and the crossbar takes it in before it passes again. The tooth's flatter face
+    // comes first in the rule's order, but the rule tries every candidate straight down before it leans any, as the
+    // birth search does, so the ledge takes the tip with no lean and the tooth none. With no ledge the tooth takes it,
+    // leaning.
+    const BoundingBoxf3 ledge(Vec3d(-0.9, -0.1, ledge_root - 0.2), Vec3d(0., 1.3, ledge_root + 0.8)),
+                        tooth(Vec3d(1.2, -0.1, tooth_root - 0.2), Vec3d(2.1, 1.3, tooth_root + 0.5));
+    const auto describe = [](const Sliced &s, const Plan &plan) {
+        std::ostringstream out;
+        for (const PlannedTip &tip : plan.tips)
+            if (tip.need == TipNeed::Stability) {
+                const Vec2d xy = s.at(tip);
+                out << " (" << xy.x() << ", " << xy.y() << ", " << tip.site.print_z << ") leaning "
+                    << (tip.site.axis.isZero() ? 0. : lean_deg(tip.site.axis)) << " degrees;";
+            }
+        return out.str();
+    };
+    const auto count = [](const Sliced &s, const Plan &plan, const BoundingBoxf3 &box, bool leaning) {
+        return std::count_if(plan.tips.begin(), plan.tips.end(), [&](const PlannedTip &tip) {
+            return tip.need == TipNeed::Stability && inside(s, tip, box) && tip.site.axis.isZero() != leaning;
+        });
+    };
+
+    Sliced     s(ledged_rod(true));
+    const Plan plan = s.plan();
+    INFO("stability tips with the ledge:" << describe(s, plan));
+    CHECK(count(s, plan, ledge, false) >= 1);
+    CHECK(count_in(s, plan, tooth, { TipNeed::Stability }) == 0);
+
+    Sliced     bare(ledged_rod(false));
+    const Plan alone = bare.plan();
+    INFO("stability tips with no ledge:" << describe(bare, alone));
+    CHECK(count(bare, alone, tooth, true) >= 1);
+}
+
+TEST_CASE("A tattered band takes stability tips on the edges rising from its hem points", "[ScaffoldPlan]")
+{
+    // Read as a rod of its 1.2 mm thickness the band may reach 3.6 mm from what holds it, and each tooth passes that
+    // about 2 mm over its point, so the edges rising from the points take the holds a resin reference puts on a cape's
+    // hem. A reading that credits the band's length, a window from its least second moment or a hold that must shorten
+    // the lever by a tenth, reads the teeth as held and leaves the hem bare, as it strips the ratmen cape's hem.
+    Sliced                   s(tattered_band());
+    const Plan               plan = s.plan();
+    const std::vector<Vec3d> tips = stability_tips(s, plan);
+    const double             rise = std::tan(Geometry::deg2rad(hem_deg)), notch = 2. + 4. * rise;
+    std::set<int>            edges;
+    for (const Vec3d &tip : tips) {
+        // How far the tip stands across the nearest hem edge in xz: edges 0 and 1 rise from x 3, 2 and 3 from x 11.
+        double off  = std::numeric_limits<double>::max();
+        int    edge = -1;
+        for (int e = 0; e < 4; ++ e) {
+            const double x = (e < 2 ? 3. : 11.) + (e % 2 == 0 ? -1. : 1.) * (tip.z() - 2.) / rise;
+            if (const double d = std::abs(tip.x() - x) * std::sin(Geometry::deg2rad(hem_deg)); d < off) {
+                off  = d;
+                edge = e;
+            }
+        }
+        INFO("tip at (" << tip.x() << ", " << tip.y() << ", " << tip.z() << "), " << off << " mm off hem edge " << edge);
+        CHECK(off <= 0.3);
+        CHECK(tip.z() <= notch + 0.1);
+        edges.insert(edge);
+    }
+    INFO(tips.size() << " stability tips on " << edges.size() << " hem edges, slender " << plan.islands_slender);
+    CHECK(edges.size() >= 2);
+}
+
+namespace {
 // A 4 x 4 x 10 column standing on the bed carries a 12 x 10 x 2 slab at z 8..10. Three 0.6 x 0.6 mm nubs hang under the
 // slab at y 1.7..2.3: A at x 4.3..4.9 and B at x 7..7.6 from z 7.93, C at x 9..9.6 from z 7.83. At 0.05 mm layers A and
 // B print one layer, 0.05 mm free, before the slab takes them in, and C three, 0.15 mm free; at 0.1 mm layers A and B

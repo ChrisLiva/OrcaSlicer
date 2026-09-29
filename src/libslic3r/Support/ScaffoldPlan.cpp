@@ -287,7 +287,8 @@ public:
     // thin shelf the end has passed included. Straight down, the run of material right under the tip is the tip's
     // own face to the lattice's resolution and is not crossed: a tip on a face's edge stands over the slab below's
     // contour, whose cell reads material about half the time, and a steep face's column stays in its part for a few
-    // slabs. A leaning neck, a birth's, stands over no face of its own, so any material on its shaft is crossed.
+    // slabs. A leaning neck has no such allowance, so any material on its shaft is crossed: a birth's stands over no
+    // face of its own, and a stability tip's clears only where its shaft leaves its face's column at once.
     bool clear(size_t l, const Point &p, const Vec3d &axis) const
     {
         const auto [x, y] = cell_of(m_in, p);
@@ -349,16 +350,21 @@ public:
         return std::nullopt;
     }
 
+    // The least lean past straight down, in tilt steps up to the cap, at which a neck from `p` on the bottom of slab `l`
+    // clears, along the azimuth whose end stands farthest from the model; none where no lean clears.
+    std::optional<Vec3f> leaning(size_t l, const Point &p) const
+    {
+        for (const double tilt : tilts())
+            if (const std::optional<Vec3d> axis = lean(l, p, tilt))
+                return axis->cast<float>().eval();
+        return std::nullopt;
+    }
+
     // The axis a neck from `p` on the bottom of slab `l` takes by the same rule, `p` the only candidate: zero where it
     // clears straight down or no lean clears.
     Vec3f axis_at(size_t l, const Point &p) const
     {
-        if (clear(l, p, straight_down))
-            return Vec3f::Zero();
-        for (const double tilt : tilts())
-            if (const std::optional<Vec3d> axis = lean(l, p, tilt))
-                return axis->cast<float>();
-        return Vec3f::Zero();
+        return clear(l, p, straight_down) ? Vec3f::Zero() : leaning(l, p).value_or(Vec3f::Zero());
     }
 
 private:
@@ -559,8 +565,10 @@ private:
     std::unique_ptr<Footing> m_bed;            // the first slab's outline, which holds every rooted part
     // A corner of a slab's down-facing surface that steps past the slab below: the piece of the slab holding it, and
     // its slice angle, how far from straight down the face turns there over the two slabs under it. `ok` is whether a
-    // tip may stand there with its head within the face cap, -1 until read.
-    struct Corner { Point p; size_t piece; double slice_deg; int8_t ok = -1; };
+    // tip may stand there with its neck straight down and its head within the face cap, and `leans` whether one may
+    // with its neck leaning along `axis`, which stays zero on a corner whose neck clears straight down; each is -1
+    // until read.
+    struct Corner { Point p; size_t piece; double slice_deg; int8_t ok = -1, leans = -1; Vec3f axis = Vec3f::Zero(); };
     std::vector<std::optional<std::vector<Corner>>> m_corners;   // per slab, read on first use
     Necks                    m_necks;
     std::vector<std::pair<int, int>> m_head_disc;    // the cells under a small head, two support lines across
@@ -1445,8 +1453,11 @@ private:
     // under its top, at least half the window from what holds the part, since a tip beside an anchor shortens no lever,
     // and within the window of the farthest point. The corner whose face turns least from straight down over the two
     // slabs under it goes first, then the one farthest from what holds the part, and it must be eligible with the head
-    // the builder aims there within the face cap. A branch with no such corner counts slender once. A piece with no
-    // such corner, or still past its window with the new tip, is measured again `stability_retry_mm` higher.
+    // the builder aims there within the face cap. Where no corner both clears straight down and holds its head within
+    // the face cap, the first corner in that order whose head stands within the cap and whose neck clears leaning takes
+    // the least lean that clears, as a birth's neck does, and hands it to the builder as its axis. A branch with no such
+    // corner counts slender once. A piece with no such corner, or still past its window with the new tip, is measured
+    // again `stability_retry_mm` higher.
     void stability(size_t l)
     {
         const auto [first, last] = m_in.components.slab_range[l];
@@ -1520,11 +1531,21 @@ private:
                 const long da = std::lround(a.corner->slice_deg), db = std::lround(b.corner->slice_deg);
                 return da != db ? da < db : a.from > b.from;
             });
-            const auto spot = std::find_if(candidates.begin(), candidates.end(), [this](const Candidate &c) {
+            auto spot = std::find_if(candidates.begin(), candidates.end(), [this](const Candidate &c) {
                 if (c.corner->ok < 0)
                     c.corner->ok = eligible(c.slab, c.corner->p) && faces_down(c.slab, c.corner->p);
                 return c.corner->ok != 0;
             });
+            if (spot == candidates.end())
+                spot = std::find_if(candidates.begin(), candidates.end(), [this](const Candidate &c) {
+                    if (c.corner->leans < 0) {
+                        const std::optional<Vec3f> axis =
+                            faces_down(c.slab, c.corner->p) ? m_necks.leaning(c.slab, c.corner->p) : std::nullopt;
+                        c.corner->leans = axis.has_value();
+                        c.corner->axis  = axis.value_or(Vec3f::Zero());
+                    }
+                    return c.corner->leans != 0;
+                });
             if (spot == candidates.end()) {
                 if (! m_slender[p])
                     ++ m_plan.islands_slender;
@@ -1534,10 +1555,14 @@ private:
                 m_rearm_z[p] = top;
                 continue;
             }
-            place(site_at(spot->slab, spot->corner->p, 2. * m_in.toolpath_width_mm), TipNeed::Stability, nullptr);
+            TipSite site = site_at(spot->slab, spot->corner->p, 2. * m_in.toolpath_width_mm);
+            site.axis    = spot->corner->axis;
+            place(site, TipNeed::Stability, nullptr);
             BOOST_LOG_TRIVIAL(debug) << "scaffold stability tip at " << m_in.slabs[spot->slab].bottom_z << " for the section at " << top
                                      << ": lever " << lever_mm << " mm past its window of " << window << " mm, face "
-                                     << spot->corner->slice_deg << " degrees from down";
+                                     << spot->corner->slice_deg << " degrees from down, neck leaning "
+                                     << (site.axis.isZero() ? 0. : std::acos(std::clamp(-double(site.axis.z()), -1., 1.)) * 180. / M_PI)
+                                     << " degrees";
             if (lever(r, p, top, footings).first > window + EPSILON)
                 m_rearm_z[p] = top;
         }

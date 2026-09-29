@@ -12,13 +12,13 @@ namespace Slic3r {
 class PrintObject;
 namespace ScaffoldSupport {
 // Where a tip stands. `enforced` is a contact a support enforcer asked for, painted facets or an enforcer volume
-// (`SupportNode::is_pinned`), which the wall skip keeps and whose head `clip_base` clips by the model alone.
-// `grade_mm` is the disc width the tip asks for, 0 for the small disc `draw` gives it, and `source` the point's index in
-// a baked list, -1 for any other tip. `axis` is the unit direction the tip's neck leans along, pointing down, which the
-// wall skip reads the band at the neck's end by and the builder aims the head along; zero, as on every tip but a birth
-// whose neck clears only leaning, leaves the head to the mesh normal. `holds_island` marks a tip holding a part the bed
-// does not hold, whose head the builder retries along leaning axes where no other route reaches the pad. These come
-// after `enforced`, since tips are built by position.
+// (`SupportNode::is_pinned`), which the wall skip keeps and whose head `clip_base` clips by the model alone. `grade_mm`
+// is the disc width the tip asks for, 0 for the small disc `draw` gives it, and `source` the point's index in a baked
+// list, -1 for any other tip. `axis` is the unit direction the tip's neck leans along, pointing down, which the wall
+// skip reads the band at the neck's end by and the builder aims the head along; zero, as on every tip but a birth or
+// stability tip whose neck clears only leaning, leaves the head to the mesh normal. `holds_island` marks a tip holding
+// a part the bed does not hold, whose head the builder retries along leaning axes where no other route reaches the pad.
+// These come after `enforced`, since tips are built by position.
 struct TipSite
 {
     Point              position;
@@ -84,7 +84,7 @@ struct PlanInput
     double bridge_mm         = 0.;        // the longest line an underside bridges between held ends, 0 for none
     const ObjectMesh *mesh   = nullptr;   // the faces a head meets; with none the planner reads no face
     double z_offset_mm       = 0.;        // print z minus mesh z, the object's lift
-    double max_tilt_rad      = max_head_tilt_rad;   // how far a birth's neck may lean, 0 for straight down only
+    double max_tilt_rad      = max_head_tilt_rad;   // how far a birth's or stability tip's neck may lean, 0 for straight down only
 };
 // `bridge_mm` is `max_bridge_length`, `threshold_rad` the overhang detector's threshold angle and `blockers` the support
 // blockers per object layer, as TreeSupport gathers them. `mesh` is the object's, which the plan reads through the

@@ -194,11 +194,11 @@ under that one, where a contact under an overhang is filed. The list, in the
 model and in the 3MF file, stores no head axis, so `baked_tips` builds the plan
 input `place_tips` builds, with no blocker, and gives each point that is not
 enforced the axis the planner's neck search reads at that spot, `neck_axis`: a
-birth tip Generate copied leans its neck as the auto slice leaned it. The input
-reads no blocker because `Necks::clear` refuses every axis at a blocked cell: a
-point under a blocker drawn after the list was written would lose its lean,
-and the wall skip would take out a point whose neck clears only leaning. It
-then runs steps 2 to 4 of the auto path on those sites:
+birth or stability tip Generate copied leans its neck as the auto slice leaned
+it. The input reads no blocker because `Necks::clear` refuses every axis at a
+blocked cell: a point under a blocker drawn after the list was written would
+lose its lean, and the wall skip would take out a point whose neck clears only
+leaning. It then runs steps 2 to 4 of the auto path on those sites:
 
 - The wall skip calls the same `wall_skip` function `place_tips` calls, at
   each point's neck end along its axis. A point placed with the tool is
@@ -366,14 +366,14 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    the detector's threshold angle (the threshold plus 1 degree, or 30 degrees
    when it reads 0), and the blockers rastered per layer. It also carries
    `max_bridge_length`, the longest line an underside bridges, the most a
-   birth's neck may lean, `max_head_tilt_rad`, and the object mesh with its
-   AABB tree, a `ScaffoldSupport::ObjectMesh` that `place_tips` builds once and
-   hands to `draw`, off which the planner reads the normal the builder aims a
-   head along. The reach `R`, how far an underside may hang past the step, is
-   two support lines: the first line past a held edge bonds its side to a held
-   line and the second to a line hanging by one, but a third would lie against
-   a line hanging by two. The `PlanInput` lives only through `place_tips`, or
-   `baked_tips` on a list.
+   birth's or stability tip's neck may lean, `max_head_tilt_rad`, and the
+   object mesh with its AABB tree, a `ScaffoldSupport::ObjectMesh` that
+   `place_tips` builds once and hands to `draw`, off which the planner reads
+   the normal the builder aims a head along. The reach `R`, how far an
+   underside may hang past the step, is two support lines: the first line past
+   a held edge bonds its side to a held line and the second to a line hanging
+   by one, but a third would lie against a line hanging by two. The
+   `PlanInput` lives only through `place_tips`, or `baked_tips` on a list.
 
    The planner walks the layers bottom up and tracks parts itself: a part is
    a connected set of pieces, and a part merges when a piece overlaps two
@@ -518,7 +518,19 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
      corner's distance to the slab two under it, taken to the whole degree,
      since the slices read a flat face's angle only to float rounding. The
      corner must be eligible, and the builder's normal there must stand within
-     60 degrees of down, as for an underside head. Where a 45 degree face
+     60 degrees of down, as for an underside head. Where no candidate both
+     clears straight down and has its builder's normal within the cap, the
+     first in the same order whose builder's normal stands within the cap and
+     whose neck clears leaning takes the least lean that clears, by the birth
+     search's steps, cap and azimuth, and carries it as its axis. Every
+     candidate is tried straight down before any leans, as in the birth
+     search, so a steeper corner whose neck clears straight down takes the tip
+     ahead of a flatter one whose neck clears only leaning. On a steep, bumpy
+     surface, as plate 1's sword blade is
+     between its widening point and its guard, no neck from the small faces
+     within the cap clears the surface below straight down, while one leaning
+     off the surface does. The cap stays on the builder's normal, not on the
+     axis, since the head's pin still meets that face. Where a 45 degree face
      meets an upright side at a square edge that normal averages to exactly 60
      degrees, which counts as within. So legs, torso sides and head sides,
      which stand near upright, stay bare, while a raised spear, a fist, a
@@ -553,9 +565,14 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    lattice's resolution and is not crossed: a tip on a face's edge, as every
    stability tip is, stands over the slab below's contour, whose cell reads
    material about half the time, and a steep face's column stays in its part
-   for a few slabs. A leaning neck, only ever a birth's, stands over no face
-   of its own, so any material on its shaft is crossed. An underside or
-   stability tip stands only where its neck clears straight down. A birth's neck search, `Necks::search`, tries the deepest point and
+   for a few slabs. A leaning neck has no such allowance, so any material on
+   its shaft is crossed: a birth's stands over no face of its own, and a
+   stability tip's clears only where its shaft leaves its face's column at
+   once. An underside tip stands only where its neck clears straight down. A
+   stability tip leans only where no candidate both clears straight down and
+   holds its head within the face cap, and then takes the least lean that
+   clears at its corner, `Necks::leaning`.
+   A birth's neck search, `Necks::search`, tries the deepest point and
    then the piece's cells nearest it first, straight down. Failing that it
    leans the neck in steps of asin(cell / neck depth), 5.2 degrees at a
    0.22 mm line, each moving the end one cell sideways, up to
@@ -563,12 +580,12 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    head at: at the least lean at which any candidate clears, it takes the
    first such candidate and, among azimuths one cell apart at the end, the
    one whose end stands farthest from the model's material on the end's slab.
-   That tip carries the lean as `TipSite::axis`, which the wall skip reads its
-   band along and the builder aims its head along. Every other tip carries a
-   zero axis and keeps the builder's normal: a head on a side-on face already
-   tilts to the cap along that normal and routes there. `neck_axis` runs the
-   same search at one spot, which is how a baked list reads a point's axis
-   again. The planner logs
+   A birth or stability tip carries its lean as `TipSite::axis`, which the
+   wall skip reads its band along and the builder aims its head along. Every
+   other tip carries a zero axis and keeps the builder's normal: a head on a
+   side-on face already tilts to the cap along that normal and routes there.
+   `neck_axis` runs the same search at one spot, which is how a baked list
+   reads a point's axis again. The planner logs
    `scaffold plan: <n> birth, <n> underside, <n> stability, <n> enforced
    tips` at debug level. On plate 1's figure it runs in about 1.8 s, 1.2 s of
    it filling the piece thicknesses, after `prepare_plan` spends about 0.08 s
@@ -584,9 +601,9 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    past it. The skip reads the planned neck's end, not the built neck: under a
    slope the head tilts along the underside's normal, and the neck check in
    step 6 exempts a cut head whose tilted neck bottoms outside the band. A
-   birth whose neck clears only leaning would stand in the band straight
-   down, so without the axis the skip would take out the tip its lean
-   placed. A skipped tip logs
+   birth or stability tip whose neck clears only leaning would stand in the
+   band straight down, so without the axis the skip would take out the tip
+   its lean placed. A skipped tip logs
    `scaffold tip skipped at (x, y, z): wall` at debug level and counts as
    neither placed nor dropped. The planner already keeps its tips off the
    band on its lattice, so the skip reads the band exactly for the few its
@@ -1107,25 +1124,38 @@ stability tip on a blade whose edge faces 50 degrees from down, on the rod
 and on the panel standing where the builder's normal reads within 60 degrees
 of down; a figure
 standing on a base taking none and counting its two legs slender; a floating
-cone taking none at its apex and counting nothing; and a level spear held by
+cone taking none at its apex and counting nothing; a level spear held by
 underside heads no more than `max_bridge_length` apart, the last covering its
-end. Then the birth rule: at 0.05 mm layers a nub within the merge slab's step
-plus the reach of a held column hangs rooted from it while one farther off and
-a taller one take birth tips, the same nub at 0.1 mm layers taking a tip, of
-two nubs meeting in mid-air one taking the birth tip and the other listing it
-as its holder, a fin within the step of the column beside it taking no tip and
-counting no island, a far nub wide enough for a head taking an underside head
-on its own layer and holding by it with no second tip, and a rod over a shelf
-taking a birth tip whose neck leans the least that clears, which `neck_axis`
-reads again at its spot and which no lean a step smaller clears, and with no
-lean allowed no tip and an unheld island, a rod over a shelf 0.3 mm thin whose
-straight neck ends clear under the shelf but crosses it leaning past the
-shelf's edge, and with no lean allowed no tip, a lattice built by hand where a
-one-cell plate in a neck's shaft makes it lean and the lean takes the azimuth
-whose end stands farthest from a wall, and a baked list's tipless nubs read by
-`read_births`: the near nub hanging from the rooted column, the far and the
-taller ones tipped, the far nub held once the list holds its underside head,
-and of two nubs meeting in mid-air one tipped and the other hanging from it.
+end; a blade whose upright front edge carries teeth, each over the tooth below
+so that no neck from the face under a tooth clears straight down, taking
+stability tips on those faces whose necks lean off the blade's sides no more
+than 45 degrees, with the builder's normal within 60 degrees of down and the
+axis `neck_axis` reads again at each tip, and with no lean allowed none there
+and one more slender count; a rod hanging from its flat end with a ledge on
+its back whose underside rises 40 degrees and a tooth on its front whose
+underside rises 25 degrees over a post, at the same height, taking its
+stability tip on the ledge with no lean, and with no ledge taking it on the
+tooth, leaning; and a tattered band hanging from two hem points taking its
+stability tips on at least two of the four edges rising from those points,
+none above the notch where its teeth meet, as a resin reference holds a
+cape's hem. Then the birth rule: at 0.05 mm layers a nub within the merge
+slab's step plus the reach of a held column hangs rooted from it while one
+farther off and a taller one take birth tips, the same nub at 0.1 mm layers
+taking a tip, of two nubs meeting in mid-air one taking the birth tip and the
+other listing it as its holder, a fin within the step of the column beside it
+taking no tip and counting no island, a far nub wide enough for a head taking
+an underside head on its own layer and holding by it with no second tip, and a
+rod over a shelf taking a birth tip whose neck leans the least that clears,
+which `neck_axis` reads again at its spot and which no lean a step smaller
+clears, and with no lean allowed no tip and an unheld island, a rod over a
+shelf 0.3 mm thin whose straight neck ends clear under the shelf but crosses
+it leaning past the shelf's edge, and with no lean allowed no tip, a lattice
+built by hand where a one-cell plate in a neck's shaft makes it lean and the
+lean takes the azimuth whose end stands farthest from a wall, and a baked
+list's tipless nubs read by `read_births`: the near nub hanging from the
+rooted column, the far and the taller ones tipped, the far nub held once the
+list holds its underside head, and of two nubs meeting in mid-air one tipped
+and the other hanging from it.
 
 Two `[ScaffoldSupport]` cases cover the baked list on the shelf fixture. The
 first bakes an auto slice's routed tips and slices from them with no contact
@@ -1165,16 +1195,21 @@ in order and isolates its searches.
 
 The hidden case "Need-driven tips hold corpus plate 1's hand and sword with
 few contacts" slices plate 1 and requires of the tips its record holds at most
-10 on the hand over the raised knee, a heavy one at the sword's point, two
-under z 7.5 on the blade, no stretch of blade under z 15 longer than 9 mm
-without one, and at most 117 in all, the resin reference's count for the
-figure, and of its islands at most four under-held, each named among the
-record's bare islands. Plate 1's record holds 86 tips, 7 on the hand, and on
-the blade tips at z 1.04 (the heavy birth tip), 1.16, 3.56 and 12.32: the
-widening edge takes a stability tip at 3.56, and above it the blade rises
-nearly upright to the guard with no corner the stability rule may hold until
-12.32, a gap of 8.76 mm. It has four bare islands: two born at z 35.2 whose
-birth tips the builder cannot route, and two born at z 40.4 and 42.7 whose
-necks lean off a wall, one unrouted and one cut by the neck check. The three
-unrouted heads hold islands, so the builder ran its routing retries on each
-before dropping it.
+10 on the hand over the raised knee and at most 117 in all, the resin
+reference's count for the figure; of the tips the builder routes, a heavy one
+at the sword's point, two under z 7.5 on the blade and no stretch of blade
+under z 15 longer than 7 mm without one, the blade's stability window of three
+2.25 mm thicknesses rounded up; and of its islands at most four under-held,
+each named among the record's bare islands. Plate 1's record holds 97 tips, 7
+on the hand, and on the blade routed tips at z 1.04 (the heavy birth tip),
+1.16, 3.56, 8.24, 12.32 and 12.44: the widening edge takes a stability tip at
+3.56, and above it the blade rises nearly upright to the guard, where the tip
+at 12.32 drops its neck straight and those at 8.24 and 12.44 lean theirs 31
+and 36 degrees off the blade, a largest gap of 4.68 mm. Of the record's 24
+stability tips 13 lean, and 8 of those route. It has four bare islands: two
+born at z 35.2 whose birth tips the builder cannot route, and two born at z
+40.4 and 42.7 whose necks lean off a wall, one unrouted and one cut by the
+neck check. The record holds five unrouted heads: the three unrouted births
+and the leaning stability tips at z 38.12 and 39.44. All five hold islands, as
+every stability tip in the record does, so the builder ran its routing retries
+on each before dropping it.
