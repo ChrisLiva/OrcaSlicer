@@ -570,10 +570,7 @@ void GLGizmoScaffoldPoints::convert()
         if (dlg.ShowModal() != wxID_YES) return;
     }
 
-    Plater *plater  = wxGetApp().plater();
-    const bool painted = std::any_of(mo->volumes.begin(), mo->volumes.end(), [](const ModelVolume *mv) {
-        return !mv->supported_facets.empty() || !mv->seam_facets.empty() || !mv->mmu_segmentation_facets.empty() || !mv->fuzzy_skin_facets.empty();
-    });
+    Plater *plater = wxGetApp().plater();
     // A refusal leaves the object as it was and takes no snapshot, so it leaves no empty undo step. The snapshot holds
     // off every other one until Convert returns, so the plate switch below adds none and one undo reverts it all.
     std::optional<Plater::TakeSnapshot> snapshot;
@@ -603,7 +600,7 @@ void GLGizmoScaffoldPoints::convert()
     wxGetApp().obj_list()->update_item_error_icon(obj_idx, -1);
     wxGetApp().obj_list()->update_info_items(size_t(obj_idx));
     wxGetApp().obj_list()->notify_instance_updated(obj_idx);
-    if (painted)
+    if (summary.paint_removed)
         notifications->push_notification(NotificationType::CustomSupportsAndSeamRemovedAfterRepair,
                                          NotificationManager::NotificationLevel::PrintInfoNotificationLevel,
                                          _u8L("Custom supports and color painting were removed by the conversion."));

@@ -26,6 +26,7 @@ struct Summary
     size_t  axes_clamped          = 0; // axes leaning past the builder's head tilt cap, moved onto the cap
     size_t  micro_struts_dropped  = 0; // supports off the plate with no tip and two or more ends on the figure
     size_t  tips_rooted_on_figure = 0; // converted tips whose support never reaches the plate
+    bool    paint_removed         = false; // the model part carried paint, which the new mesh cannot keep
 };
 
 // Leaves `object` unchanged on a refusal. Otherwise replaces its model part's mesh with the figure, in place, so the

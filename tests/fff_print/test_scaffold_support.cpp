@@ -2818,6 +2818,10 @@ TEST_CASE("Converting a pre-supported model leaves the figure and one scaffold p
     // The instance turned about Z or not: the points come back in the raw-mesh frame the fixture was built in, and an
     // axis is clamped to the head tilt cap in the world, where the builder reads it.
     const double turn = GENERATE(0., PI / 6.);
+    // Paint on the model part, which the conversion clears with the mesh its triangles index, or on a modifier, which
+    // the conversion leaves painted.
+    enum class Paint { None, Part, Modifier };
+    const Paint  paint = GENERATE(Paint::None, Paint::Part, Paint::Modifier);
     Print        print;
     Model        model;
     init_print({ presupported_fixture() }, print, model, scaffold_config());
@@ -2830,9 +2834,15 @@ TEST_CASE("Converting a pre-supported model leaves the figure and one scaffold p
     mo.ensure_on_bed();
     const Vec3d world_before = mo.instance_bounding_box(0).min;
     REQUIRE_THAT(world_before.z(), WithinAbs(0., 1e-6));
+    ModelVolume *painted = paint == Paint::Part     ? mo.volumes.front() :
+                           paint == Paint::Modifier ? mo.add_volume(make_cube(2., 2., 2.), ModelVolumeType::PARAMETER_MODIFIER, false) :
+                                                      nullptr;
+    if (painted != nullptr)
+        REQUIRE(paint_enforcers(*painted, [](const Vec3f &, const Vec3f &, const Vec3f &) { return true; }) > 0);
 
     const PresupportedConversion::Summary summary = PresupportedConversion::convert(mo, 0);
     CHECK(summary.refusal == PresupportedConversion::Refusal::None);
+    CHECK(summary.paint_removed == (paint == Paint::Part));
     CHECK(summary.tips_converted == 6);
     CHECK(summary.duplicates_removed == 1);
     CHECK(summary.axes_clamped == 2);
@@ -2840,8 +2850,11 @@ TEST_CASE("Converting a pre-supported model leaves the figure and one scaffold p
     CHECK(summary.tips_rooted_on_figure == 1);
 
     // The figure alone is left, its three shells, where the artist posed it, and no bed drop takes its lift.
-    REQUIRE(mo.volumes.size() == 1);
+    REQUIRE(mo.volumes.size() == (paint == Paint::Modifier ? 2 : 1));
     CHECK(mo.volumes.front()->mesh().facets_count() == 12 + presupported_staff().facets_count() + presupported_eye().facets_count());
+    CHECK_FALSE(mo.volumes.front()->is_any_painted());
+    if (paint == Paint::Modifier)
+        CHECK(mo.volumes.back()->is_any_painted());
     const BoundingBoxf3 raw = mo.raw_mesh_bounding_box();
     for (int c = 0; c < 3; ++c) {
         CHECK_THAT(raw.min[c], WithinAbs(Vec3d(0., -1., 6.)[c], 1e-5));

@@ -491,6 +491,7 @@ Summary convert(ModelObject &object, size_t instance_idx, const std::function<vo
     part->calculate_convex_hull();
     part->invalidate_convex_hull_2d();
     // Paint is indexed by triangle, and the Print and the canvas key a volume's mesh on its id.
+    summary.paint_removed = part->is_any_painted();
     part->reset_extra_facets();
     part->set_new_unique_id();
     object.invalidate_bounding_box();
