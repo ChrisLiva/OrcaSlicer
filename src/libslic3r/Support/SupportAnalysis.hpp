@@ -215,11 +215,12 @@ struct Report
     size_t                      seeds_retained  = 0;
     // What the Tree Scaffold pass did, counted where it did it: tips placed on the model, tips routed to
     // a pillar, tips dropped for want of a route, islands that print with no tip holding them because no tip
-    // could stand under them, a baked list stood none there or every tip the planner placed to hold them dropped,
-    // pillars no neighbour braced, branches left past their stability window with no face a head can hold,
-    // underside the plan left hanging past one and a half reaches plus what dropped Underside heads answered; and
-    // the printed pieces the floating pass removed, under every style that runs it. A baked list has no plan, so
-    // an island whose points all dropped counts only in `tips_dropped`.
+    // could stand under them, a baked list stood none there or every tip holding them dropped, pillars no
+    // neighbour braced, branches left past their stability window with no face a head can hold, underside the
+    // plan left hanging past one and a half reaches plus what dropped Underside heads answered; and the printed
+    // pieces the floating pass removed, under every style that runs it. The tips holding an island are the
+    // planner's holders on an automatic slice and the points on the island's birth piece on a baked list, where a
+    // nub held at its merge has none and never counts.
     size_t                      tips_placed             = 0;
     size_t                      tips_routed             = 0;
     size_t                      tips_dropped            = 0;

@@ -114,44 +114,55 @@ size_t birth_piece_index(const SupportAnalysis::IslandMap &map, size_t k)
     return birth;
 }
 
+// An island's birth point: the deepest point of its birth piece at the piece's bottom, as the plan names it.
+Vec3d birth_point(const SupportAnalysis::Piece &piece)
+{
+    const Vec2d xy = unscale(inscribed_point(piece.polygon));
+    return { xy.x(), xy.y(), piece.bottom_z };
+}
+
 // Where each mid-air island of the model prints with no tip of a baked list holding it, read by the planner's island
 // rule, so a list and an automatic slice hold an island alike. A tip belongs to the island that owns the model piece
 // over it, on the overhang's own layer, one above the node's, and is marked `holds_island`. It holds the island only
 // on the birth piece, the island's one piece with nothing under it, as the planner holds a birth with the enforced tip
-// on that piece and stands no tip higher on the part in for it. An island with no tip on its birth piece is read by
-// the birth rule, `read_births`: one continuing the slab below, debris, or a nub the list's tips or the bed hold at its
-// merge needs none. Any other prints unheld, named at the tip the rule would stand under it, or, where no neck clears,
-// at its birth point, the deepest point of its birth piece at the piece's bottom, as the plan names it.
-std::vector<Vec3d> unheld_islands(const PlanInput &input, std::vector<TipSite> &tips)
+// on that piece and stands no tip higher on the part in for it. Each island a tip holds goes to `held` at its birth
+// point with the indices of the tips on its birth piece, since it prints unheld once none of them routes, as a plan's
+// island does once its holders all fail. An island with no tip on its birth piece is read by the birth rule,
+// `read_births`: one continuing the slab below, debris, or a nub the list's tips or the bed hold at its merge needs
+// none. Any other prints unheld, named at the tip the rule would stand under it, or, where no neck clears, at its
+// birth point.
+std::vector<Vec3d> unheld_islands(const PlanInput &input, std::vector<TipSite> &tips, std::vector<HeldIsland> &held)
 {
     using namespace SupportAnalysis;
     std::vector<Vec3d> bare;
     if (input.slabs.empty())
         return bare;
     // `build_components` over the plan's own slabs and ground, so the map's pieces are the plan input's, index for index.
-    const IslandMap   map = island_joins(input.slabs, input.slabs.front().bottom_z);
-    std::vector<char> held(map.islands.size(), 0);
-    for (TipSite &tip : tips)
-        if (const size_t p = piece_of(map, tip); p != size_t(-1))
-            if (const size_t k = map.island_of_piece[p]; k < held.size()) {
-                tip.holds_island = true;
+    const IslandMap                  map = island_joins(input.slabs, input.slabs.front().bottom_z);
+    std::vector<std::vector<size_t>> holders(map.islands.size());
+    for (size_t i = 0; i < tips.size(); ++ i)
+        if (const size_t p = piece_of(map, tips[i]); p != size_t(-1))
+            if (const size_t k = map.island_of_piece[p]; k < holders.size()) {
+                tips[i].holds_island = true;
                 if (map.components.pieces[p].below.empty())
-                    held[k] = 1;
+                    holders[k].push_back(i);
             }
     std::vector<size_t> births;
     for (size_t k = 0; k < map.islands.size(); ++ k)
-        if (const size_t p = birth_piece_index(map, k); ! held[k] && p != size_t(-1))
-            births.push_back(p);
+        if (const size_t p = birth_piece_index(map, k); p != size_t(-1)) {
+            if (holders[k].empty())
+                births.push_back(p);
+            else
+                held.push_back({ birth_point(map.components.pieces[p]), std::move(holders[k]) });
+        }
     const std::vector<BirthRead> reads = read_births(input, births, tips);
     for (size_t i = 0; i < births.size(); ++ i) {
-        const Piece &piece = map.components.pieces[births[i]];
         if (reads[i].hold == BirthHold::Tip) {
             const Vec2d xy = unscale(reads[i].site.position);
             bare.emplace_back(xy.x(), xy.y(), reads[i].site.print_z);
-        } else if (reads[i].hold == BirthHold::NoNeck) {
-            const Vec2d xy = unscale(inscribed_point(piece.polygon));
-            bare.emplace_back(xy.x(), xy.y(), piece.bottom_z);
-        } else
+        } else if (reads[i].hold == BirthHold::NoNeck)
+            bare.push_back(birth_point(map.components.pieces[births[i]]));
+        else
             continue;
         BOOST_LOG_TRIVIAL(debug) << "scaffold island at (" << bare.back().x() << ", " << bare.back().y() << ", " << bare.back().z()
                                  << ") unheld: " << (reads[i].hold == BirthHold::Tip ? "no point" : "no neck");
@@ -193,8 +204,8 @@ size_t alias_of(const AliasGrid &kept, const Vec3d &p, const AliasCell &c)
 // takes the larger head grade of the two, so a Heavy point merged into a Light one keeps its Heavy head, holds an
 // island when either did, and keeps its own axis. The kept tips sit in a grid of cells the distance wide, so a tip
 // reads the 27 cells around its own.
-// `tips` keeps its order.
-void merge_aliases(std::vector<TipSite> &tips)
+// `tips` keeps its order, and the result gives each tip's index in it after the merge, a merged tip its keeper's.
+std::vector<size_t> merge_aliases(std::vector<TipSite> &tips)
 {
     AliasGrid kept;
     std::vector<size_t> order(tips.size());
@@ -208,7 +219,7 @@ void merge_aliases(std::vector<TipSite> &tips)
             return ta.seed < tb.seed;
         return ta.position.x() != tb.position.x() ? ta.position.x() < tb.position.x() : ta.position.y() < tb.position.y();
     });
-    std::vector<bool> keep(tips.size(), false);
+    std::vector<size_t> keeper(tips.size());
     for (const size_t i : order) {
         const Vec3d     p = alias_point(tips[i]);
         const AliasCell c{int64_t(std::floor(p.x() / sla::D_SP)), int64_t(std::floor(p.y() / sla::D_SP)),
@@ -218,16 +229,23 @@ void merge_aliases(std::vector<TipSite> &tips)
             tips[into].enforced = tips[into].enforced || tips[i].enforced;
             tips[into].grade_mm = std::max(tips[into].grade_mm, tips[i].grade_mm);
             tips[into].holds_island = tips[into].holds_island || tips[i].holds_island;
+            keeper[i] = into;
             continue;
         }
-        keep[i] = true;
+        keeper[i] = i;
         kept[c].emplace_back(p, i);
     }
-    size_t next = 0;
+    std::vector<size_t> at(tips.size());
+    size_t              next = 0;
     for (size_t i = 0; i < tips.size(); ++ i)
-        if (keep[i])
+        if (keeper[i] == i) {
+            at[i]         = next;
             tips[next ++] = tips[i];
+        }
     tips.resize(next);
+    for (size_t &k : keeper)
+        k = at[k];
+    return keeper;
 }
 
 // Where `tip`'s neck ends, `depth_mm` from the tip along its axis, or straight down where it has none.
@@ -976,12 +994,19 @@ Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const P
                     tips.wall_skipped.push_back(site.source);
                     return true;
                 }), sites.end());
-    // The islands the list leaves unheld are counted and named, and none is given a tip.
+    // The islands the list leaves unheld are counted and named, and none is given a tip. Each island its points hold
+    // keeps its holders through the merge, a merged point's place taken by its keeper.
     const auto islands_start = std::chrono::steady_clock::now();
-    tips.bare_islands        = unheld_islands(input, sites);
+    tips.bare_islands        = unheld_islands(input, sites, tips.held_islands);
     tips.islands_under_held  = tips.bare_islands.size();
     tips.island_joins_ms     = ms_since(islands_start);
-    merge_aliases(sites);
+    const std::vector<size_t> kept = merge_aliases(sites);
+    for (HeldIsland &island : tips.held_islands) {
+        for (size_t &holder : island.holders)
+            holder = kept[holder];
+        std::sort(island.holders.begin(), island.holders.end());
+        island.holders.erase(std::unique(island.holders.begin(), island.holders.end()), island.holders.end());
+    }
     tips.sites = std::move(sites);
     return tips;
 }
@@ -1130,8 +1155,8 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
         BOOST_LOG_TRIVIAL(debug) << "scaffold tip dropped at (" << p.x() << ", " << p.y() << ", " << p.z()
                                  << "): " << drop_reason(tips[i]);
     }
-    // What routing left of the plan: an island whose holders all dropped prints with no tip holding it, and the
-    // underside a dropped head answered hangs. A baked list has no plan, so its dropped points count only as dropped.
+    // What routing left of the placement: an island whose holders all dropped prints with no tip holding it, the plan's
+    // islands and a baked list's alike, and the underside a dropped head answered hangs.
     const PlanOutcome after        = unheld_after_routing(chosen.plan, nodes, tips);
     out.counts.islands_under_held  = chosen.islands_under_held + after.islands.size();
     out.counts.underside_unmet_mm2 = chosen.plan.underside_unmet_mm2 + after.underside_mm2;
@@ -1139,6 +1164,13 @@ Output draw(const PrintObject &object, const Tips &chosen, const std::vector<Lay
     for (const size_t k : after.islands)
         out.bare_islands.push_back(chosen.plan.islands[k].birth);
     log_islands(chosen.plan, after);
+    for (const HeldIsland &island : chosen.held_islands)
+        if (std::none_of(island.holders.begin(), island.holders.end(), [&tips](size_t i) { return tips[i] == ScaffoldTipResult::Routed; })) {
+            ++ out.counts.islands_under_held;
+            out.bare_islands.push_back(island.birth);
+            BOOST_LOG_TRIVIAL(debug) << "scaffold island at (" << island.birth.x() << ", " << island.birth.y() << ", " << island.birth.z()
+                                     << ") unheld: " << (island.holders.size() == 1 ? drop_reason(tips[island.holders.front()]) : "holders unrouted");
+        }
 
     ctx.write_output(*builder, cage, rings, build_ms, out);
     out.results = std::move(tips);

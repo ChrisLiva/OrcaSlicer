@@ -533,6 +533,25 @@ TriangleMesh hanging_tee_fixture()
     return base;
 }
 
+// The hanging islands' column on a 20 x 12 x 4 mm base at x 0..20, y 0..12, a 28 x 6 x 1 mm bar off the column's top at
+// x 0..28, y 3..9, z 9..10, and a 12 x 4 x 3 mm slab hanging from the bar at x 14..26, y 4..8, down to z 6: the slab is
+// one island, born 2 mm over the base at x 14..20 and 6 mm over the bed past the base's +x edge. A head under the slab
+// 4 mm in from that edge has no route, since no pillar stands on the model and every walk down from its junction meets
+// the base before it clears the edge, while one 4 mm past the edge drops straight to the pad.
+TriangleMesh overhung_slab_fixture()
+{
+    TriangleMesh base   = make_cube(20., 12., 4.);
+    TriangleMesh column = make_cube(2., 2., 6.);
+    column.translate(0.f, 5.f, 4.f);
+    TriangleMesh bar = make_cube(28., 6., 1.);
+    bar.translate(0.f, 3.f, 9.f);
+    TriangleMesh slab = make_cube(12., 4., 3.);
+    slab.translate(14.f, 4.f, 6.f);
+    for (const TriangleMesh *part : { &column, &bar, &slab })
+        base.merge(*part);
+    return base;
+}
+
 // A JSON config written to the OS temp directory and removed when the guard leaves scope.
 struct ScratchJson
 {
@@ -1480,6 +1499,79 @@ TEST_CASE("A baked point holds an island only on its birth piece", "[ScaffoldSup
     REQUIRE(held.sites.size() == 2);
     CHECK(held.islands_under_held == 0);
     CHECK(held.bare_islands.empty());
+}
+
+TEST_CASE("A baked island whose points on its birth piece all fail to route reads under-held and bare", "[ScaffoldSupport]")
+{
+    // At 0.2 mm layers the slab is born on the object layer at z 6. A point under it 4 mm in from the base's edge holds
+    // the island by the planner's rule, but its head has no route, so once it drops the island prints with no tip
+    // holding it: draw counts it under-held and names it at its birth point, the slab's middle, as the plan names an
+    // island whose holders all fail. The same list with a point 4 mm past the edge, which routes, reads the island held.
+    // An alias of the stranded point merges into it and hands its place to it, so a routable point under the bar past
+    // the slab, which holds no island, listed after the two, leaves the island under-held.
+    Print print;
+    Model model;
+    init_print({ overhung_slab_fixture() }, print, model, fixture_config({ { "enable_support", "0" }, { "layer_change_gcode", "G92 E0" } }));
+    print.process();
+    REQUIRE(print.objects().size() == 1);
+    const PrintObject &object = *print.objects().front();
+    const DrawOnLayers draw(object);
+    const double       threshold = M_PI / 6.;
+    const ScaffoldSupport::TipSite over   = site_under(object, Vec2d(16., 6.), 5.);
+    const ScaffoldSupport::TipSite beyond = site_under(object, Vec2d(24., 6.), 5.);
+    const ScaffoldSupport::TipSite middle = site_under(object, Vec2d(20., 6.), 5.);
+    REQUIRE_THAT(over.print_z, WithinAbs(6., 1e-6));
+    REQUIRE_THAT(beyond.print_z, WithinAbs(6., 1e-6));
+    const auto point = [&](const ScaffoldSupport::TipSite &site) {
+        return ScaffoldSupport::point_of(object, draw.params, site, 2. * draw.params.toolpath_width_mm);
+    };
+    const auto results = [](const ScaffoldSupport::Output &out) {
+        std::string text;
+        for (const ScaffoldTipResult result : out.results)
+            text += Catch::StringMaker<ScaffoldTipResult>::convert(result) + " ";
+        return text;
+    };
+
+    const ScaffoldSupport::Tips stranded = ScaffoldSupport::baked_tips(object, { point(over) }, draw.params, threshold);
+    REQUIRE(stranded.sites.size() == 1);
+    CHECK(stranded.sites.front().holds_island);
+    CHECK(stranded.islands_under_held == 0);
+    const ScaffoldSupport::Output dropped = draw(object, stranded);
+    INFO("the point over the base reads " << results(dropped));
+    REQUIRE(dropped.results.size() == 1);
+    CHECK(dropped.results.front() != ScaffoldTipResult::Routed);
+    CHECK(dropped.counts.islands_under_held == 1);
+    REQUIRE(dropped.bare_islands.size() == 1);
+    const Vec3d &bare = dropped.bare_islands.front();
+    INFO("bare island at (" << bare.x() << ", " << bare.y() << ", " << bare.z() << ")");
+    CHECK((bare.head<2>() - unscale(middle.position)).norm() <= 0.3);
+    CHECK_THAT(bare.z(), WithinAbs(6., 1e-6));
+
+    const ScaffoldSupport::Tips   held   = ScaffoldSupport::baked_tips(object, { point(over), point(beyond) }, draw.params, threshold);
+    REQUIRE(held.sites.size() == 2);
+    const ScaffoldSupport::Output routed = draw(object, held);
+    INFO("the points read " << results(routed));
+    REQUIRE(routed.results.size() == 2);
+    CHECK(routed.results.front() != ScaffoldTipResult::Routed);
+    CHECK(routed.results.back() == ScaffoldTipResult::Routed);
+    CHECK(routed.counts.islands_under_held == 0);
+    CHECK(routed.bare_islands.empty());
+
+    ScaffoldSupport::TipSite alias = over;
+    alias.position += Point::new_scale(0.05, 0.);
+    const ScaffoldSupport::TipSite under_bar = site_under(object, Vec2d(27.5, 6.), 8.5);
+    REQUIRE_THAT(under_bar.print_z, WithinAbs(9., 1e-6));
+    const ScaffoldSupport::Tips merged =
+        ScaffoldSupport::baked_tips(object, { point(over), point(alias), point(under_bar) }, draw.params, threshold);
+    REQUIRE(merged.sites.size() == 2);
+    CHECK_FALSE(merged.sites.back().holds_island);
+    const ScaffoldSupport::Output still_dropped = draw(object, merged);
+    INFO("with the stranded point's alias the points read " << results(still_dropped));
+    REQUIRE(still_dropped.results.size() == 2);
+    CHECK(still_dropped.results.front() != ScaffoldTipResult::Routed);
+    CHECK(still_dropped.results.back() == ScaffoldTipResult::Routed);
+    CHECK(still_dropped.counts.islands_under_held == 1);
+    CHECK(still_dropped.bare_islands.size() == 1);
 }
 
 TEST_CASE("A head whose neck bottoms in the xy band is dropped while one whose neck clears it keeps its head and no ring floats",

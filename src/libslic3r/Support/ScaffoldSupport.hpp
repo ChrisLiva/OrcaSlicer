@@ -38,13 +38,18 @@ struct Output { std::vector<LayerAreas> layers;   // one entry per planned layer
                 std::vector<double>            grades;    // each tip's disc width in mm, indexed like `Tips::sites`
                 std::vector<Vec3d>             bare_islands;   // where an island prints with no tip holding it
               };
+// An island a baked list's points hold: its birth point, x and y in mm and print z, and the sites on its birth piece,
+// indexing `Tips::sites`. `draw` counts it under-held and names it at its birth point where no holder reads `Routed`,
+// as `unheld_after_routing` reads a plan's island.
+struct HeldIsland { Vec3d birth; std::vector<size_t> holders; };
 // The tips `draw` builds heads for, the plan they came from and how long it took, with the islands the placement leaves
 // unheld: their count, and where each prints with no tip holding it, x and y in mm and print z. A baked list has no
-// plan: its unheld islands are the ones the planner's island rule reads unheld under its points, and it also names the
-// `source` of each point the wall skip took out. `mesh` is the object mesh the plan or a baked list's leans read,
-// which `draw` builds on, building one where it is empty.
+// plan: its unheld islands are the ones the planner's island rule reads unheld under its points, `held_islands` are the
+// ones its points hold, and it also names the `source` of each point the wall skip took out. `mesh` is the object mesh
+// the plan or a baked list's leans read, which `draw` builds on, building one where it is empty.
 struct Tips { std::vector<TipSite> sites; Plan plan; size_t islands_under_held = 0; uint32_t island_joins_ms = 0;
-              std::vector<int> wall_skipped; std::vector<Vec3d> bare_islands; std::shared_ptr<const ObjectMesh> mesh; };
+              std::vector<int> wall_skipped; std::vector<Vec3d> bare_islands; std::vector<HeldIsland> held_islands;
+              std::shared_ptr<const ObjectMesh> mesh; };
 // What routing left of a plan. `tips` is each planned tip's result, read off a drawn site within `sla::D_SP` of it in
 // 3-D, the alias merge's metric, and `Wall` where none stands, the wall skip having taken it out. `islands` indexes the
 // islands the plan held whose holders all failed, and `underside_mm2` is what the failed Underside heads answered.
@@ -64,8 +69,9 @@ ScaffoldPoint point_of(const PrintObject &object, const Params &params, const Ti
 // to the bottom of the object layer holding it; each point not enforced leaning its neck as the planner would there,
 // read off the plan input `threshold_rad` and the object's mesh build with no blocker, since a list ignores blockers
 // as it ignores paint; wall skip (enforced exempt), the islands the list leaves unheld counted by the planner's rule
-// with no tip given, a point holding an island only on its birth piece, each point under a mid-air island marked
-// `holds_island`, alias merge.
+// with no tip given, a point holding an island only on its birth piece, each island a point holds listed with its
+// holders, each point under a mid-air island marked `holds_island`, alias merge, which hands a merged holder's place
+// to its keeper.
 Tips baked_tips(const PrintObject &object, const ScaffoldPoints &points, const Params &params, double threshold_rad);
 // Whether a list baked under the linear part `pose` still holds under `linear`: the change between them keeps lengths
 // and keeps the Z axis, as a turn about Z or a mirror in X or Y does, and a tilt, a Z mirror or a scale does not.

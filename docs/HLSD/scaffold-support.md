@@ -209,11 +209,15 @@ the auto path on those sites:
 - The island count reads the islands by the planner's rule and gives none a
   tip: an island with a point on its birth piece is held, one the birth rule
   holds with no tip needs none, and any other is under-held and recorded as a
-  bare island.
+  bare island. A held island keeps the points on its birth piece as its
+  holders, and `draw` counts it under-held once none of them routes.
   It marks every point under a mid-air island as holding it, so the builder
   retries that point's head along leaning axes as it retries an auto slice's
-  island holders, and a list Generate copied routes the island tips the auto
-  slice routed.
+  island holders. A list Generate copied does not route every tip the auto
+  slice routed: on corpus plate 1 the builder cuts the head of the birth tip
+  at print z 42.08 at the neck check, where the auto slice routes it, so the
+  copy routes 89 of its 90 points and counts four islands under-held where the
+  auto slice counts three.
 - The alias merge runs unchanged, so a point within `sla::D_SP` of another
   merges into it.
 
@@ -241,9 +245,10 @@ islands differ by pass:
   size and flag. Its result is `draw`'s outcome (`Routed`, `Filtered`,
   `Unrouted` or `Neck`) for a point with a drawn site, `Wall` for a point the
   wall skip took out and `Merged` for any other point without a site. Its bare
-  islands are the islands the island count reads under-held, one per island
-  `islands_under_held` counts: at the tip the planner's rule would stand under
-  each, or at the birth point of one no neck clears.
+  islands are the islands the island count reads under-held, at the tip the
+  planner's rule would stand under each or at the birth point of one no neck
+  clears, and the birth points of the held islands whose points on the birth
+  piece all failed to route, one per island `islands_under_held` counts.
 - An auto record holds one tip per site handed to `draw`, with `draw`'s
   outcome and a size read back from the tip's grade: `Heavy` above three
   support lines, `Light` otherwise. Its bare islands are the birth points of
@@ -646,8 +651,8 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    `enforced` set, and the skip keeps it however close the wall stands, so
    the tip fuses where the user asked for support and leaves its scar there.
 3. The island count, on a baked list only, where it gives no island a tip
-   and names the islands the list leaves unheld, by the planner's island rule
-   so that a list and an auto slice count an island alike.
+   and names the islands the list leaves unheld, by the planner's island rule,
+   so that a list and an auto slice read an island by one rule.
    `SupportAnalysis::island_joins` maps every mid-air island of the model, a
    birth piece off the bed with nothing under it, to the pieces it owns; the
    map's pieces are the plan input's, index for index, since both come from
@@ -658,7 +663,10 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    however far the island stands free and however many more tips its birth
    piece has room for. A point elsewhere on the island stands in for no birth
    tip, as in the planner, since the island's layers under it would print on
-   nothing. An island with no point on its birth piece is read by the
+   nothing. Each held island goes into `Tips::held_islands` at its birth point
+   with the points on its birth piece as its holders, which the draw reads
+   after routing as `unheld_after_routing` reads a plan's holders. An island
+   with no point on its birth piece is read by the
    planner's birth rule, `read_births`. A birth piece continuing the
    slab below and debris need no tip. A nub needs none where its merge holds
    it as the planner's merge would, walked bottom up over the list's points:
@@ -666,7 +674,11 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    slab's `a` plus `R` of a part the bed or a point of the list holds. Any
    other nub, like any other birth, needs the tip the rule would stand under
    it, and a nub the rule tips holds its part for the nubs meeting it after
-   it, as the planner's tip would. An island that needs a tip the list lacks
+   it, as the planner's tip would. A nub its merge holds keeps no holders, so
+   the draw never counts it under-held, even where every point holding its
+   merge fails to route, while an auto slice counts such a nub once the tips
+   on its own part or on the parts it hangs from all fail. An island that
+   needs a tip the list lacks
    is under-held, and so is one no neck clears, which the plan counts unheld
    too: each counts in `islands_under_held` and is named in the bare islands,
    at the tip the rule would stand under it, or, where no neck clears, at its
@@ -680,7 +692,8 @@ runs steps 2 to 4 on its points, as Baked contact points describes.
    id, and merges a tip standing within `sla::D_SP` in 3-D of a tip already
    kept into it, so no two tips it hands the builder are aliases; a kept tip is
    enforced when any tip merged into it was, holds an island when any did,
-   and keeps its own axis. A merge
+   takes a merged holder's place among a held island's holders on a baked
+   list, and keeps its own axis. A merge
    logs
    `scaffold tip merged at (x, y, z)` at debug level and counts as neither
    placed nor dropped.
@@ -828,21 +841,28 @@ merged tip reads its keeper's result and a tip the wall skip took out, with no
 drawn site, reads `Wall`. An island with holders that is not `rooted` and
 whose holders all failed to route prints with no tip holding it, and a failed
 Underside head's `answered_mm2` goes back into `underside_unmet_mm2`.
+A baked list carries no plan, and the draw reads its `Tips::held_islands` by
+the same rule, each holder's result read by its index among the sites: a held
+island whose points on its birth piece all failed to route prints with no tip
+holding it too, and its points also count in `tips_dropped` and in the baked
+warning's dropped count. A nub the birth rule reads as held at its merge is not
+among the held islands, so the draw does not count it once the points holding
+its merge all fail to route.
 `islands_under_held` is the placement's count, the plan's `NoNeck` islands or
 the island count's on a baked list, plus those islands, and `Output::bare_islands`
-adds each one's birth point to the placement's list. A baked list carries no
-plan, so an island whose points all fail to route adds nothing there: its
-points count only in `tips_dropped` and in the baked warning's dropped count.
+adds each one's birth point to the placement's list.
 Each unheld island logs
 `scaffold island at (x, y, z) unheld: <cause>` at debug level, with z its print
 z and the cause `no neck`, a tipped island's own tip result (`unrouted`,
 `filtered`, `neck` or `wall`) or, for a hung island, `holders unrouted`, so an
 island whose own tip failed reads apart from one that hung from a failed
-part. A planned slice with islands logs
+part. A baked island with one point on its birth piece names that point's
+result, and one with several reads `holders unrouted`. A planned slice with
+islands logs
 `scaffold islands: <t> tipped, <h> hung, <u> unheld (<n> no neck, <m> not
 routed)` at info level, debris left out. The planner does not re-plan:
-corpus plate 1 reads no island unheld at plan time and four whose birth tips
-the builder cannot route or cuts.
+corpus plate 1 reads one island unheld at plan time, where no neck clears with
+its head fitting, and two whose birth tips the builder cannot route.
 
 The returned `Output` carries one `LayerAreas` per planned layer (base,
 interface and exempt heads), the number of
@@ -1043,7 +1063,8 @@ style except the last. `islands_under_held` counts the islands that print
 with no tip holding them once the build has routed, and `underside_unmet_mm2`
 the underside left hanging past one and a half reaches, with what dropped
 Underside heads answered; both read the plan and the build together. A baked
-list has no plan, so its `islands_under_held` is the island count's alone.
+list has no plan: its `islands_under_held` is the island count's plus the held
+islands whose points on the birth piece all failed to route.
 `islands_slender` counts the branches the stability rule left past their
 window with no corner a head can hold, once per branch, which reads the
 placement alone: a Stability head the build drops counts only in
@@ -1104,7 +1125,14 @@ it stands free, the rod, which no neck clears, reads under-held and is named
 as the plan names it while a copied point under it is wall-skipped, and a point
 placed there with the tool holds it, an empty list names the block at
 the tip the rule would place and the rod, and a list copied from the auto
-slice counts and names what the auto slice does, a tip placed under an unseeded
+slice counts and names what the auto slice does, a slab born 2 mm over a
+base and hanging past its edge, where a baked point under it over the base
+has no route and leaves the slab under-held and named at its birth point, the
+same list with a point past the edge added routes that point and holds the
+slab, and an alias of the stranded point, which the merge folds into it, ahead
+of a routable point under the bar that holds no island leaves the slab
+under-held, a tip placed
+under an unseeded
 feature start with its ring on the layer its z tops and none under debris,
 slivers beside a wall leaning their tips away from it and routing, braces on
 slender pillars, pillars widening toward
