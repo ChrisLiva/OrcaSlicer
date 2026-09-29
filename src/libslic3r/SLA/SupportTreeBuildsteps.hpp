@@ -307,9 +307,17 @@ class SupportTreeBuildsteps {
     // Helper function for interconnecting two pillars with zig-zag bridges.
     bool interconnect(const Pillar& pillar, const Pillar& nextpillar);
 
-    // For connecting a head to a nearby pillar.
-    bool connect_to_nearpillar(const Head& head, long nearpillar_id);
-    
+    // For connecting a head to a nearby pillar. safety_d is the clearance the
+    // bridge and the partial pillar under the head keep from the model, the
+    // safety distance scaled by the head's radius if omitted.
+    bool connect_to_nearpillar(const Head& head, long nearpillar_id, double safety_d);
+    bool connect_to_nearpillar(const Head& head, long nearpillar_id)
+    {
+        return connect_to_nearpillar(head, nearpillar_id,
+                                     head.r_back_mm * m_cfg.safety_distance_mm /
+                                         m_cfg.head_back_radius_mm);
+    }
+
     // Find route for a head to the ground. Inserts additional bridge from the
     // head to the pillar if cannot create pillar directly.
     // The optional dir parameter is the direction of the bridge which is the
@@ -339,12 +347,21 @@ class SupportTreeBuildsteps {
     // corrector bridge off the pad's gap keeps the scaled clearance on a thin
     // pillar up to 20 radii tall, which it does not widen first. Under
     // branch_off_retry each retry searches the pillars from every pose it
-    // takes before its ground attempt, and try_ground false keeps only that
+    // takes before its ground attempt, and the branch bridge that search lays
+    // keeps the full safety distance too; try_ground false keeps only that
     // search.
     bool connect_thin_to_ground(Head &head, bool try_ground);
     bool connect_along_axes(Head &head, bool try_ground);
 
-    bool search_pillar_and_connect(const Head& source);
+    // safety_d reaches connect_to_nearpillar, the safety distance scaled by
+    // the head's radius if omitted.
+    bool search_pillar_and_connect(const Head& source, double safety_d);
+    bool search_pillar_and_connect(const Head& source)
+    {
+        return search_pillar_and_connect(source,
+                                         source.r_back_mm * m_cfg.safety_distance_mm /
+                                             m_cfg.head_back_radius_mm);
+    }
     
     // This is a proxy function for pillar creation which will mind the gap
     // between the pad and the model bottom in zero elevation mode.

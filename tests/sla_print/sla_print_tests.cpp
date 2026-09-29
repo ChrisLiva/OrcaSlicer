@@ -179,6 +179,21 @@ indexed_triangle_set floored_slot_mesh()
 const sla::SupportPoint FLOORED_SLOT_NUB(Vec3f(0.f, 0.f, 3.7f), 0.2f);
 const sla::SupportPoint FLOORED_SLOT_OPEN(Vec3f(0.f, 2.2f, 4.2f), 0.2f);
 
+// floored_slot_mesh with a 0.25x0.16x3.2 post against the +x block at
+// x 0.55..0.8, y 1.02..1.18, z 0..3.2, beside the bridge the nub's thin head
+// lays from (0, 0, 3.58) down to the open point's pillar at (0, 2.2, 1.38).
+// The post stands 0.33 mm off that 0.22 mm bridge: past the 0.18 mm the
+// safety distance scaled by the thin head's radius keeps, inside the full
+// 0.5 mm. It keeps out of both points' 1.1 mm pinhead rings and of the open
+// point's 0.72 mm scan down the slot.
+indexed_triangle_set posted_slot_mesh()
+{
+    indexed_triangle_set its = floored_slot_mesh();
+    its_merge(its, box(0.25, 0.16, 3.2, 0.55f, 1.02f, 0.f).its);
+
+    return its;
+}
+
 // floored_slot_mesh with a second nub at x -0.3..0.3, y 4.1..4.7, z 3.7..4.2
 // over a second floor at x -0.8..0.8, y 3.4..5.4, z 0..0.4, mirroring the
 // first about the open point's y 2.2. A point under either nub takes a 0.6
@@ -642,6 +657,44 @@ TEST_CASE("A head whose thin retry cannot drop straight down branches into a pil
         CHECK(again.bridges == first.bridges);
         CHECK(again.valid == first.valid);
     }
+}
+
+TEST_CASE("A thin retry's branch bridge keeps the full safety distance from the model", "[SLASupportGeneration]") {
+    // The nub's 0.6 head meets the blocks, and retried thin its drop meets the floor. Its branch bridge into the open
+    // point's pillar passes the post 0.33 mm off, which the thin head's scaled clearance allows and the full 0.5 mm
+    // safety distance a caller cuts support by does not, so the head lays no bridge and stays unrouted in either
+    // order: nub first, the second pass searches for it.
+    indexed_triangle_set mesh = posted_slot_mesh();
+    const bool nub_first = GENERATE(false, true);
+    INFO("nub first " << nub_first);
+    const sla::SupportPoints points = nub_first ? sla::SupportPoints{FLOORED_SLOT_NUB, FLOORED_SLOT_OPEN}
+                                                : sla::SupportPoints{FLOORED_SLOT_OPEN, FLOORED_SLOT_NUB};
+    const auto build = [&mesh, &points](bool branch) {
+        sla::SupportTreeConfig cfg = slot_fin_config(true);
+        cfg.route_in_order   = true;
+        cfg.branch_off_retry = branch;
+        sla::SupportTreeBuilder builder;
+        sla::SupportableMesh    sm{mesh, points, cfg};
+        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(builder, sm));
+        return builder;
+    };
+
+    const sla::SupportTreeBuilder plain = build(false);
+    const sla::Head *plain_nub = head_at(plain, FLOORED_SLOT_NUB.pos);
+    REQUIRE(plain_nub != nullptr);
+    CHECK_FALSE(plain_nub->is_valid());
+    CHECK_THAT(plain_nub->r_back_mm, Catch::Matchers::WithinAbs(0.6, 1e-9));
+
+    const sla::SupportTreeBuilder branched = build(true);
+    const sla::Head *nub  = head_at(branched, FLOORED_SLOT_NUB.pos);
+    const sla::Head *open = head_at(branched, FLOORED_SLOT_OPEN.pos);
+    REQUIRE(nub != nullptr);
+    REQUIRE(open != nullptr);
+    CHECK(open->is_valid());
+    CHECK(branched.pillars().size() == 1);
+    CHECK(branched.bridges().size() == 0);
+    CHECK(nub->bridge_id < 0);
+    CHECK_FALSE(nub->is_valid());
 }
 
 TEST_CASE("Heads the ordered loop leaves unrouted take a pillar's last bridge slot in the points' order", "[SLASupportGeneration]") {

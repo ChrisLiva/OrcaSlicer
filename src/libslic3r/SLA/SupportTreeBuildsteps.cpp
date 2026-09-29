@@ -390,7 +390,8 @@ bool SupportTreeBuildsteps::interconnect(const Pillar &pillar,
 }
 
 bool SupportTreeBuildsteps::connect_to_nearpillar(const Head &head,
-                                                  long        nearpillar_id)
+                                                  long        nearpillar_id,
+                                                  double      safety_d)
 {
     auto nearpillar = [this, nearpillar_id]() -> const Pillar& {
         return m_builder.pillar(nearpillar_id);
@@ -431,7 +432,7 @@ bool SupportTreeBuildsteps::connect_to_nearpillar(const Head &head,
             bridgestart(Z) -= zdiff;
             touchjp(Z) = Zdown;
 
-            double t = bridge_mesh_distance(headjp, DOWN, r);
+            double t = bridge_mesh_distance(headjp, DOWN, r, safety_d);
 
             // We can't insert a pillar under the source head to connect
             // with the nearby pillar's starting junction
@@ -449,7 +450,7 @@ bool SupportTreeBuildsteps::connect_to_nearpillar(const Head &head,
     double minz = m_builder.ground_level + 4 * head.r_back_mm;
     if(bridgeend(Z) < minz) return false;
 
-    double t = bridge_mesh_distance(bridgestart, dirv(bridgestart, bridgeend), r);
+    double t = bridge_mesh_distance(bridgestart, dirv(bridgestart, bridgeend), r, safety_d);
 
     // Cannot insert the bridge. (further search might not worth the hassle)
     if(t < distance(bridgestart, bridgeend)) return false;
@@ -1012,7 +1013,7 @@ bool SupportTreeBuildsteps::connect_to_model_body(Head &head)
     return true;
 }
 
-bool SupportTreeBuildsteps::search_pillar_and_connect(const Head &source)
+bool SupportTreeBuildsteps::search_pillar_and_connect(const Head &source, double safety_d)
 {
     // Hope that a local copy takes less time than the whole search loop.
     // We also need to remove elements progressively from the copied index.
@@ -1041,7 +1042,7 @@ bool SupportTreeBuildsteps::search_pillar_and_connect(const Head &source)
                 // over without a bridge that joins nothing.
                 const bool too_thin = m_cfg.branch_off_retry &&
                                       m_builder.pillar(nearest_id).r < source.r_back_mm;
-                if(too_thin || !connect_to_nearpillar(source, nearest_id) ||
+                if(too_thin || !connect_to_nearpillar(source, nearest_id, safety_d) ||
                     m_builder.pillar(nearest_id).r < source.r_back_mm) {
                     nearest_id = SupportTreeNode::ID_UNSET;    // continue searching
                     spindex.remove(ne);       // without the current pillar
@@ -1062,7 +1063,7 @@ bool SupportTreeBuildsteps::connect_thin_to_ground(Head &head, bool try_ground)
     head.width_mm  = 0.;
     // A thin head whose straight drop meets the model may still bridge into a
     // pillar another head stood.
-    if (m_cfg.branch_off_retry && search_pillar_and_connect(head))
+    if (m_cfg.branch_off_retry && search_pillar_and_connect(head, m_cfg.safety_distance_mm))
         return true;
 
     const Vec3d hjp = head.junction_point();
@@ -1112,7 +1113,7 @@ bool SupportTreeBuildsteps::connect_along_axes(Head &head, bool try_ground)
                 clears         = true;
                 // A head whose walk along the axis meets the model may still
                 // bridge into a pillar another head stood.
-                if (m_cfg.branch_off_retry && search_pillar_and_connect(head))
+                if (m_cfg.branch_off_retry && search_pillar_and_connect(head, m_cfg.safety_distance_mm))
                     return true;
                 if (try_ground && connect_to_ground(head, axis, m_cfg.safety_distance_mm))
                     return true;

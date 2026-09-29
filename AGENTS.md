@@ -178,11 +178,11 @@ passing cases, 2026-09-29), so gate that suite on its case count too.
 The hidden `[ScaffoldSupport][.]` case "Scaffold support over corpus plate 3 in two poses" reads one result on every
 run of one binary: `tree_config` sets `route_in_order`, so the SLA builder routes the heads in the points' order, and
 `SupportTreeBuildsteps` runs each head search and each route under `tbb::this_task_arena::isolate`. Every run reads
-stored `tips placed 76 / routed 76 / dropped 0`, 724.274 mm3, and upright `tips placed 220 / routed 201 / dropped 19`,
-3 islands under-held, 1140.86 mm3, with `floating_pieces_removed` 0 in both poses (four runs over three Release builds
+stored `tips placed 76 / routed 76 / dropped 0`, 724.274 mm3, and upright `tips placed 220 / routed 200 / dropped 20`,
+3 islands under-held, 1139.96 mm3, with `floating_pieces_removed` 0 in both poses (four runs over three Release builds
 of the same placement code, 2026-09-28 and 2026-09-29; the stored volume, two runs since leaning necks must fit the
-builder's full head, 2026-09-29; the upright counts and volume, one run since `tree_config` sets `branch_off_retry`,
-2026-09-29). On an unchanged corpus hash a non-zero
+builder's full head, 2026-09-29; the upright counts and volume, two runs since a retry's branch bridge keeps the full
+safety distance, 2026-09-29). On an unchanged corpus hash a non-zero
 `floating_pieces_removed` or a changed placed, routed or dropped count is a regression; only the process times vary
 between runs.
 The corpus `elf_test.3mf` carries no painted enforcers since its intentional rewrite at 14:02 on 2026-09-25 (sha256

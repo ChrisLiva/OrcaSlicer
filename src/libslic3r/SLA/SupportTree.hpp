@@ -113,7 +113,8 @@ struct SupportTreeConfig
     // search passes over a pillar thinner than the head without bridging to it,
     // and after the ordered routing every head still unrouted searches the
     // pillars once more from its own pose and the retries' poses, trying no
-    // ground route.
+    // ground route. The branch bridge a retry lays keeps the full safety
+    // distance from the model whatever the head's radius.
     bool branch_off_retry = false;
 
     // The unbraced height-to-diameter ratio above which interconnect_pillars
