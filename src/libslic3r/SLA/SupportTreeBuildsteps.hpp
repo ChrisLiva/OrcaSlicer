@@ -240,6 +240,13 @@ class SupportTreeBuildsteps {
         return m_mesh.query_ray_hit(s, dir);
     }
 
+    // The safety distance scaled by a back radius against the configured
+    // head_back_radius_mm, the clearance a thinner head's checks keep.
+    double scaled_safety(double r_back) const
+    {
+        return r_back * m_cfg.safety_distance_mm / m_cfg.head_back_radius_mm;
+    }
+
     // This function will test if a future pinhead would not collide with the
     // model geometry. It does not take a 'Head' object because those are
     // created after this test. Parameters: s: The touching point on the model
@@ -270,9 +277,7 @@ class SupportTreeBuildsteps {
         double r_back,
         double width)
     {
-        return pinhead_mesh_intersect(s, dir, r_pin, r_back, width,
-                                      r_back * m_cfg.safety_distance_mm /
-                                          m_cfg.head_back_radius_mm);
+        return pinhead_mesh_intersect(s, dir, r_pin, r_back, width, scaled_safety(r_back));
     }
 
     // Checking bridge (pillar and stick as well) intersection with the model.
@@ -294,9 +299,7 @@ class SupportTreeBuildsteps {
         const Vec3d& dir,
         double r)
     {
-        return bridge_mesh_intersect(s, dir, r,
-                                     r * m_cfg.safety_distance_mm /
-                                         m_cfg.head_back_radius_mm);
+        return bridge_mesh_intersect(s, dir, r, scaled_safety(r));
     }
     
     template<class...Args>
@@ -308,15 +311,8 @@ class SupportTreeBuildsteps {
     bool interconnect(const Pillar& pillar, const Pillar& nextpillar);
 
     // For connecting a head to a nearby pillar. safety_d is the clearance the
-    // bridge and the partial pillar under the head keep from the model, the
-    // safety distance scaled by the head's radius if omitted.
+    // bridge and the partial pillar under the head keep from the model.
     bool connect_to_nearpillar(const Head& head, long nearpillar_id, double safety_d);
-    bool connect_to_nearpillar(const Head& head, long nearpillar_id)
-    {
-        return connect_to_nearpillar(head, nearpillar_id,
-                                     head.r_back_mm * m_cfg.safety_distance_mm /
-                                         m_cfg.head_back_radius_mm);
-    }
 
     // Find route for a head to the ground. Inserts additional bridge from the
     // head to the pillar if cannot create pillar directly.
@@ -327,9 +323,7 @@ class SupportTreeBuildsteps {
     bool connect_to_ground(Head& head, const Vec3d &dir, double safety_d);
     bool connect_to_ground(Head& head, const Vec3d &dir)
     {
-        return connect_to_ground(head, dir,
-                                 head.r_back_mm * m_cfg.safety_distance_mm /
-                                     m_cfg.head_back_radius_mm);
+        return connect_to_ground(head, dir, scaled_safety(head.r_back_mm));
     }
     inline bool connect_to_ground(Head& head);
     
@@ -345,26 +339,14 @@ class SupportTreeBuildsteps {
     // distance would cut a thinner route where it passes nearer, and the head
     // with it. The pillar they stand goes through create_ground_pillar, whose
     // corrector bridge off the pad's gap keeps the scaled clearance on a thin
-    // pillar up to 20 radii tall, which it does not widen first. Under
-    // branch_off_retry each retry searches the pillars from every pose it
-    // takes before its ground attempt, and the branch bridge that search lays
-    // keeps the full safety distance too; try_ground false keeps only that
-    // search.
+    // pillar up to 20 radii tall, which it does not widen first. try_ground
+    // false skips the ground attempt.
     bool connect_thin_to_ground(Head &head, bool try_ground);
     bool connect_along_axes(Head &head, bool try_ground);
 
-    // safety_d reaches connect_to_nearpillar, the safety distance scaled by
-    // the head's radius if omitted. Under branch_off_retry the retries and the
-    // pass routing_to_model makes over the heads its ordered routing left
-    // unrouted pass the full safety distance, so every branch bridge that pass
-    // lays keeps it, from a head the filter narrowed as from a retry's pose.
+    // safety_d is the clearance the branch bridge to the pillar found, and the
+    // partial pillar under the head, keep from the model.
     bool search_pillar_and_connect(const Head& source, double safety_d);
-    bool search_pillar_and_connect(const Head& source)
-    {
-        return search_pillar_and_connect(source,
-                                         source.r_back_mm * m_cfg.safety_distance_mm /
-                                             m_cfg.head_back_radius_mm);
-    }
     
     // This is a proxy function for pillar creation which will mind the gap
     // between the pad and the model bottom in zero elevation mode.

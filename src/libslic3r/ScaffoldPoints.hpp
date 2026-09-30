@@ -11,7 +11,9 @@ struct ScaffoldPoint {
     ScaffoldHeadSize size = ScaffoldHeadSize::Light;
     bool             enforced = false;
     // The approach axis in the raw-mesh frame: the direction from `pos` along the neck toward the pillar, straight down
-    // (0, 0, -1) for a head under an overhang, as the builder's head axes run. Zero lets the builder aim the head.
+    // (0, 0, -1) for a head under an overhang, as the builder's head axes run. Zero on a point that is not enforced
+    // takes the neck axis the planner would lean there; zero on an enforced one aims the head along the mesh normal.
+    // A drag in the gizmo that moves the point clears its axis.
     Vec3f            axis = Vec3f::Zero();
 
     bool operator==(const ScaffoldPoint &o) const { return pos == o.pos && size == o.size && enforced == o.enforced && axis == o.axis; }

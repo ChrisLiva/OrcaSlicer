@@ -1,6 +1,7 @@
 #include "PresupportedConversion.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <numeric>
 #include <optional>
@@ -27,7 +28,7 @@ constexpr double plate_mm            = 0.05;  // a shell whose bottom is this cl
 constexpr double flat_height_mm      = 1.0;   // a shell on the plate no taller than this is an artist raft piece
 constexpr double gap_floor           = 1e-3;  // the gap search stops at shells this small against the largest's box
 constexpr double min_volume_mm3      = 1e-5;  // a closed shell with less volume is a sliver of the figure's own mesh
-constexpr size_t max_primitive_faces = 5000;  // a shell with more faces is no support primitive, and its hull test would cost
+constexpr size_t max_primitive_faces = 5000;  // a shell with more faces is no support primitive: its plane test costs faces times vertices
 constexpr double plane_slack_mm      = 1e-4;  // how far a convex shell's vertex may stand outside one of its face planes
 constexpr double level_mm            = 1e-4;  // vertices this close in height along the axis form one ring
 constexpr double flat_mm             = 1e-3;  // a ring this close to the end's extreme is a flat end
@@ -73,7 +74,7 @@ struct Shell
     BoundingBoxf3        box;
     bool                 figure    = false;
     bool                 raft      = false; // a raft piece on the plate
-    bool                 primitive = false; // closed, convex and with volume, as every artist support piece is
+    bool                 primitive = false; // the result of primitive()
     Planes               planes;
     End                  ends[2];
 };
@@ -134,8 +135,9 @@ bool fit_sphere(const std::vector<Vec3d> &pts, Vec3d &centre, double &r)
 }
 
 // The end of `pts` farthest along `sign * axis` from `c`: rings of vertices walked inward from the extreme while one
-// sphere holds them all. Three rings on a sphere, the extreme vertex counting as one, make a rounded end, since any two
-// coaxial rings lie on some sphere; a first ring of three or more vertices that no sphere continues is a flat end.
+// sphere holds them all. Three rings on a sphere, the extreme vertex counting as one, make a rounded end when the cap
+// runs at least min_cap_depth of its radius along the axis, since any two coaxial rings lie on some sphere. An end that
+// is not rounded is flat when its first ring holds three or more vertices within flat_mm of the extreme.
 End fit_end(const std::vector<Vec3d> &pts, const Vec3d &c, const Vec3d &axis, double sign)
 {
     std::vector<std::pair<double, size_t>> order(pts.size());
@@ -204,14 +206,15 @@ void fit_ends(Shell &shell)
 
 struct Tip
 {
-    size_t shell;
-    Vec3d  site;   // the narrow end's centre
-    Vec3d  axis;   // unit, from the site toward the wide end
+    size_t cluster; // the root of its support's cluster, as clusters() returns it
+    Vec3d  site;    // the narrow end's centre
+    Vec3d  axis;    // unit, from the site toward the wide end
     double diameter;
 };
 
-// The tip a shell makes: two rounded ends of different radii, apart by more than the wide one, the narrow one on the figure.
-std::optional<Tip> tip_of(const Shell &shell, size_t idx)
+// The tip a shell makes: two usable rounded ends, the narrow one's radius under tip_ratio of the wide one's, their
+// centres apart by more than the wide radius, the narrow end on the figure.
+std::optional<Tip> tip_of(const Shell &shell, size_t cluster)
 {
     const End &a = shell.ends[0], &b = shell.ends[1];
     if (a.kind != End::Kind::Round || b.kind != End::Kind::Round || ! a.usable() || ! b.usable())
@@ -220,7 +223,7 @@ std::optional<Tip> tip_of(const Shell &shell, size_t idx)
     const Vec3d  span   = wide.centre - narrow.centre;
     if (narrow.r >= tip_ratio * wide.r || span.norm() <= wide.r || ! narrow.on_figure())
         return std::nullopt;
-    return Tip { idx, narrow.centre, span.normalized(), 2. * narrow.r };
+    return Tip { cluster, narrow.centre, span.normalized(), 2. * narrow.r };
 }
 
 size_t find_root(std::vector<size_t> &parent, size_t i)
@@ -230,7 +233,8 @@ size_t find_root(std::vector<size_t> &parent, size_t i)
     return i;
 }
 
-// Each support's cluster root: supports join where a vertex of one lies inside the other, found over boxes swept in x.
+// Each support's cluster root: supports join where a vertex of one lies inside the other or within overlap_mm outside
+// its faces, found over boxes swept in x.
 std::vector<size_t> clusters(const std::vector<Shell> &shells, const std::vector<size_t> &supports)
 {
     std::vector<size_t> parent(supports.size());
@@ -323,21 +327,23 @@ bool clamp_axis(Vec3d &axis)
 
 } // namespace
 
-Summary convert(ModelObject &object, size_t instance_idx, const std::function<void()> &before_change)
+Analysis analyze(const ModelObject &object, size_t instance_idx)
 {
-    Summary      summary;
-    ModelVolume *part = nullptr;
-    for (ModelVolume *volume : object.volumes)
+    assert(instance_idx < object.instances.size());
+    Analysis           analysis;
+    Summary           &summary = analysis.summary;
+    const ModelVolume *part    = nullptr;
+    for (const ModelVolume *volume : object.volumes)
         if (volume->is_model_part()) {
             if (part != nullptr) {
                 summary.refusal = Refusal::SeveralParts;
-                return summary;
+                return analysis;
             }
             part = volume;
         }
-    if (part == nullptr || instance_idx >= object.instances.size()) {
+    if (part == nullptr) {
         summary.refusal = Refusal::SeveralParts;
-        return summary;
+        return analysis;
     }
 
     // The same split ModelObject::split makes: faces joined by a shared edge.
@@ -346,7 +352,7 @@ Summary convert(ModelObject &object, size_t instance_idx, const std::function<vo
         shells.push_back(Shell { std::move(its) });
     if (shells.size() < 2) {
         summary.refusal = Refusal::NoSupports;
-        return summary;
+        return analysis;
     }
     const ModelInstance &instance = *object.instances[instance_idx];
     const Transform3d    to_world = instance.get_matrix() * part->get_matrix();
@@ -365,8 +371,8 @@ Summary convert(ModelObject &object, size_t instance_idx, const std::function<vo
                          })->box.min.z();
     mark_figure(shells, z_min);
 
-    // Supports: primitives outside the figure, and every raft piece, which leaves the mesh whatever its shape. Any
-    // other shell, such as a sliver of the figure's own mesh, stays with the figure.
+    // A primitive outside the figure is a support. Every raft piece leaves the mesh whatever its shape, and any other
+    // shell, such as a sliver of the figure's own mesh, stays with the figure.
     tbb::parallel_for(tbb::blocked_range<size_t>(0, shells.size()), [&](const tbb::blocked_range<size_t> &range) {
         for (size_t i = range.begin(); i < range.end(); ++i)
             if (shells[i].primitive && ! shells[i].figure)
@@ -381,7 +387,7 @@ Summary convert(ModelObject &object, size_t instance_idx, const std::function<vo
     }
     if (supports.empty()) {
         summary.refusal = Refusal::NoSupports;
-        return summary;
+        return analysis;
     }
 
     // A cluster reaches the plate where a member stands on the raft or on the plate itself: a trunk sunk into a raft
@@ -391,12 +397,9 @@ Summary convert(ModelObject &object, size_t instance_idx, const std::function<vo
         if (shell.raft)
             raft_top = std::max(raft_top, shell.box.max.z());
     const std::vector<size_t> root = clusters(shells, supports);
-    std::vector<size_t>       cluster_of(shells.size(), size_t(-1));
     std::vector<bool>         on_plate(supports.size(), false);
-    for (size_t k = 0; k < supports.size(); ++k) {
-        cluster_of[supports[k]] = root[k];
-        on_plate[root[k]]       = on_plate[root[k]] || shells[supports[k]].box.min.z() <= raft_top + overlap_mm;
-    }
+    for (size_t k = 0; k < supports.size(); ++k)
+        on_plate[root[k]] = on_plate[root[k]] || shells[supports[k]].box.min.z() <= raft_top + overlap_mm;
 
     // Each end's distance to the figure, over a tree of the figure in the world frame, and the tips that makes. A
     // cluster off the plate that holds no tip and touches the figure less than twice is no support but a separate
@@ -434,7 +437,7 @@ Summary convert(ModelObject &object, size_t instance_idx, const std::function<vo
             const Shell &shell = shells[supports[k]];
             if (shell.figure)
                 continue;
-            if (std::optional<Tip> tip = tip_of(shell, supports[k])) {
+            if (std::optional<Tip> tip = tip_of(shell, root[k])) {
                 tips.push_back(*tip);
                 has_tip[root[k]] = true;
             }
@@ -449,13 +452,13 @@ Summary convert(ModelObject &object, size_t instance_idx, const std::function<vo
     }
     if (tips.empty()) {
         summary.refusal = Refusal::NoArtistTips;
-        return summary;
+        return analysis;
     }
     for (size_t k = 0; k < supports.size(); ++k)
         if (root[k] == k && ! shells[supports[k]].figure && ! on_plate[k] && ! has_tip[k])
             ++summary.micro_struts_dropped;
 
-    // One point per distinct tip, the first of each run of duplicates kept.
+    // A tip within duplicate_site_mm and duplicate_axis_deg of any tip already kept is dropped.
     const double         same_axis = std::cos(duplicate_axis_deg * M_PI / 180.);
     std::vector<Tip>     distinct;
     for (const Tip &tip : tips) {
@@ -468,39 +471,42 @@ Summary convert(ModelObject &object, size_t instance_idx, const std::function<vo
     }
     const Transform3d to_raw      = instance.get_matrix().inverse();
     const Matrix3d    axis_to_raw = instance.get_matrix().linear().inverse();
-    ScaffoldPoints    points;
     for (Tip &tip : distinct) {
         summary.axes_clamped          += size_t(clamp_axis(tip.axis));
-        summary.tips_rooted_on_figure += size_t(! on_plate[cluster_of[tip.shell]]);
-        points.push_back({ (to_raw * tip.site).cast<float>(),
-                           tip.diameter >= heavy_diameter_mm - EPSILON ? ScaffoldHeadSize::Heavy : ScaffoldHeadSize::Light, true,
-                           (axis_to_raw * tip.axis).normalized().cast<float>() });
+        summary.tips_rooted_on_figure += size_t(! on_plate[tip.cluster]);
+        analysis.points.push_back({ (to_raw * tip.site).cast<float>(),
+                                    tip.diameter >= heavy_diameter_mm - EPSILON ? ScaffoldHeadSize::Heavy : ScaffoldHeadSize::Light, true,
+                                    (axis_to_raw * tip.axis).normalized().cast<float>() });
     }
-    summary.tips_converted = points.size();
+    summary.tips_converted = analysis.points.size();
 
     // The figure in the part's own frame, the part and instance transforms kept, so it stays where the artist posed it.
-    indexed_triangle_set figure;
     for (const Shell &shell : shells)
         if (shell.figure)
-            its_merge(figure, shell.its);
-    if (before_change)
-        before_change();
+            its_merge(analysis.figure, shell.its);
+    summary.paint_removed = part->is_any_painted();
+    return analysis;
+}
+
+void apply(ModelObject &object, size_t instance_idx, Analysis &&analysis)
+{
+    assert(instance_idx < object.instances.size() && analysis.summary.refusal == Refusal::None);
+    // analyze refused any object without exactly one model part.
+    ModelVolume *part = *std::find_if(object.volumes.begin(), object.volumes.end(), [](const ModelVolume *v) { return v->is_model_part(); });
     for (ModelInstance *inst : object.instances)
         inst->auto_drop = false;
-    part->set_mesh(std::move(figure));
+    part->set_mesh(std::move(analysis.figure));
     part->calculate_convex_hull();
     part->invalidate_convex_hull_2d();
     // Paint is indexed by triangle, and the Print and the canvas key a volume's mesh on its id.
-    summary.paint_removed = part->is_any_painted();
     part->reset_extra_facets();
     part->set_new_unique_id();
     object.invalidate_bounding_box();
-    object.scaffold_points          = std::move(points);
+    object.scaffold_points          = std::move(analysis.points);
     object.scaffold_points_status   = ScaffoldPointsStatus::UserModified;
-    object.scaffold_points_pose     = instance.get_matrix().linear();
+    object.scaffold_points_pose     = object.instances[instance_idx]->get_matrix().linear();
     object.scaffold_points_mesh_box = object.raw_mesh_bounding_box();
     save_object_mesh(object);
-    return summary;
 }
 
 } // namespace PresupportedConversion

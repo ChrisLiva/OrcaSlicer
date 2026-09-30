@@ -896,8 +896,8 @@ void SupportTreeBuildsteps::routing_to_ground()
 
                 auto &sidehead = m_builder.head(c);
 
-                if (!connect_to_nearpillar(sidehead, centerpillarID) &&
-                    !search_pillar_and_connect(sidehead)) {
+                if (!connect_to_nearpillar(sidehead, centerpillarID, scaled_safety(sidehead.r_back_mm)) &&
+                    !search_pillar_and_connect(sidehead, scaled_safety(sidehead.r_back_mm))) {
                     Vec3d pstart = sidehead.junction_point();
                     // Vec3d pend = Vec3d{pstart(X), pstart(Y), gndlvl};
                     // Could not find a pillar, create one
@@ -1140,7 +1140,7 @@ void SupportTreeBuildsteps::routing_to_model()
         auto& head = m_builder.head(idx);
 
         // Search nearby pillar
-        if (search_pillar_and_connect(head)) { return; }
+        if (search_pillar_and_connect(head, scaled_safety(head.r_back_mm))) { return; }
 
         // Cannot connect to nearby pillar. We will try to search for
         // a route to the ground.

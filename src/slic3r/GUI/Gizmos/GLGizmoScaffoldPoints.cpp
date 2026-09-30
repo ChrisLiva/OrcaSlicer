@@ -574,12 +574,8 @@ void GLGizmoScaffoldPoints::convert()
     }
 
     Plater *plater = wxGetApp().plater();
-    // A refusal leaves the object as it was and takes no snapshot, so it leaves no empty undo step. The snapshot holds
-    // off every other one until Convert returns, so the plate switch below adds none and one undo reverts it all.
-    std::optional<Plater::TakeSnapshot> snapshot;
-    const PresupportedConversion::Summary summary = PresupportedConversion::convert(*mo, size_t(active), [&snapshot, plater]() {
-        snapshot.emplace(plater, "Convert pre-supported model");
-    });
+    PresupportedConversion::Analysis      analysis = PresupportedConversion::analyze(*mo, size_t(active));
+    const PresupportedConversion::Summary summary  = analysis.summary;
     NotificationManager *notifications = wxGetApp().notification_manager();
     if (summary.refusal != Refusal::None) {
         const wxString why =
@@ -594,6 +590,10 @@ void GLGizmoScaffoldPoints::convert()
         return;
     }
 
+    // A refusal takes no snapshot, so it leaves no empty undo step. The snapshot holds off every other one until this
+    // function returns, so select_plate_of adds none and one undo reverts it all.
+    Plater::TakeSnapshot snapshot(plater, "Convert pre-supported model");
+    PresupportedConversion::apply(*mo, size_t(active), std::move(analysis));
     m_generate_failure.clear();
     m_click_refused = false;
     // Reloads the scene, which rebuilds the raycasters the cache reads each point's normal from.

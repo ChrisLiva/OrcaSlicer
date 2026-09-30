@@ -111,10 +111,12 @@ struct SupportTreeConfig
     // heads stood before it gives up: the thin and island axis retries search
     // the pillars from each pose they take before trying the ground, the pillar
     // search passes over a pillar thinner than the head without bridging to it,
-    // and after the ordered routing every head still unrouted searches the
-    // pillars once more from its own pose and the retries' poses, trying no
-    // ground route. Every branch bridge the retries and that last pass lay
-    // keeps the full safety distance from the model whatever the head's radius.
+    // and after the routing loop every head still unrouted searches the pillars
+    // once more from its own pose and the retries' poses, trying no ground
+    // route. That pass walks m_iheads_onmodel in order: classify's heads, then
+    // the centroids routing_to_ground could not stand a pillar under. Every
+    // branch bridge the retries and that last pass lay keeps the full safety
+    // distance from the model whatever the head's radius.
     bool branch_off_retry = false;
 
     // The unbraced height-to-diameter ratio above which interconnect_pillars

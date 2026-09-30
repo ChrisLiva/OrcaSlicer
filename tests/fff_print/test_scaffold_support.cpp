@@ -537,6 +537,16 @@ TriangleMesh presupported_fixture(TriangleMesh model = presupported_slab(), bool
     return model;
 }
 
+// Converts `mo` about its first instance as the gizmo's Convert does: analyze, then apply unless the analysis refused.
+PresupportedConversion::Summary convert_presupported(ModelObject &mo)
+{
+    PresupportedConversion::Analysis      analysis = PresupportedConversion::analyze(mo, 0);
+    const PresupportedConversion::Summary summary  = analysis.summary;
+    if (summary.refusal == PresupportedConversion::Refusal::None)
+        PresupportedConversion::apply(mo, 0, std::move(analysis));
+    return summary;
+}
+
 // A 6 x 6 x 14 mm column at x 0..6, y 0..6 carrying off its +x face a 6 x 6 mm sheet 0.1 mm thick at x 6..12,
 // z 8..8.1, and off its -x face two 2 x 2.5 x 1 mm bars at x -2..0, one at y 0..2.5 from z 8.12, one at y 3.5..6 from
 // z 8.18. At 0.06 mm layers over a 0.2 mm first layer each underside tops an object layer, and a scaffold contact,
@@ -2840,7 +2850,7 @@ TEST_CASE("Converting a pre-supported model leaves the figure and one scaffold p
     if (painted != nullptr)
         REQUIRE(paint_enforcers(*painted, [](const Vec3f &, const Vec3f &, const Vec3f &) { return true; }) > 0);
 
-    const PresupportedConversion::Summary summary = PresupportedConversion::convert(mo, 0);
+    const PresupportedConversion::Summary summary = convert_presupported(mo);
     CHECK(summary.refusal == PresupportedConversion::Refusal::None);
     CHECK(summary.paint_removed == (paint == Paint::Part));
     CHECK(summary.tips_converted == 6);
@@ -2930,7 +2940,7 @@ TEST_CASE("Converting a pre-supported model strips a raft taller than a flat pie
     mo.add_volume(fixture);
     mo.add_instance();
 
-    const PresupportedConversion::Summary summary = PresupportedConversion::convert(mo, 0);
+    const PresupportedConversion::Summary summary = convert_presupported(mo);
     CHECK(summary.refusal == PresupportedConversion::Refusal::None);
     CHECK(summary.tips_converted == 6);
     // Every trunk reaches the plate through the raft; only the tip on the slab's top face stands on the figure.
@@ -2985,11 +2995,9 @@ TEST_CASE("Converting a model with no separable artist tip leaves it unchanged a
     const ObjectID volume_id = mo.volumes.front()->id();
 
     DYNAMIC_SECTION(kind) {
-        size_t                                changes = 0;
-        const PresupportedConversion::Summary summary = PresupportedConversion::convert(mo, 0, [&changes]() { ++ changes; });
+        const PresupportedConversion::Summary summary = convert_presupported(mo);
         CHECK(summary.refusal == refusal);
         CHECK(summary.tips_converted == 0);
-        CHECK(changes == 0);
         CHECK(mo.volumes.front()->mesh().facets_count() == facets);
         CHECK(mo.volumes.front()->id() == volume_id);
         CHECK(mo.scaffold_points_status == ScaffoldPointsStatus::UserModified);
@@ -3008,7 +3016,7 @@ TEST_CASE("A converted pre-supported model slices its list and aims each head al
     init_print({ presupported_fixture() }, print, model, config);
     ModelObject &mo = *model.objects.front();
     mo.instances.front()->set_rotation(Vec3d(0., 0., turn));
-    REQUIRE(PresupportedConversion::convert(mo, 0).refusal == PresupportedConversion::Refusal::None);
+    REQUIRE(convert_presupported(mo).refusal == PresupportedConversion::Refusal::None);
     REQUIRE(reapply(print, model, config) != Print::APPLY_STATUS_UNCHANGED);
     REQUIRE_NOTHROW(print.process());
     REQUIRE(print.objects().size() == 1);
@@ -3455,7 +3463,7 @@ TEST_CASE("Converting the reference pre-supported miniatures keeps each artist t
             ModelObject &mo = *supported.objects.front();
 
             const auto                            start   = std::chrono::steady_clock::now();
-            const PresupportedConversion::Summary summary = PresupportedConversion::convert(mo, 0);
+            const PresupportedConversion::Summary summary = convert_presupported(mo);
             const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
             std::cout << pair.supported << ": " << summary.tips_converted << " tips, " << summary.duplicates_removed << " duplicates, "
                       << summary.axes_clamped << " clamped, " << summary.tips_rooted_on_figure << " rooted, " << summary.micro_struts_dropped

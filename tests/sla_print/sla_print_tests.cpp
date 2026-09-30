@@ -140,6 +140,18 @@ sla::SupportTreeConfig slot_fin_config(bool retry_thin_head)
     return cfg;
 }
 
+// The tree the builder grows on `mesh` from `points` under `cfg`, each head
+// aimed along its entry in `axes` where one is given, built without a stop.
+sla::SupportTreeBuilder build_tree(const indexed_triangle_set &mesh, const sla::SupportPoints &points,
+                                   const sla::SupportTreeConfig &cfg, std::vector<Vec3f> axes = {})
+{
+    sla::SupportTreeBuilder builder;
+    sla::SupportableMesh    sm{mesh, points, cfg};
+    sm.head_axes = std::move(axes);
+    REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(builder, sm));
+    return builder;
+}
+
 const sla::SupportPoints SLOT_FIN_POINTS = {sla::SupportPoint(Vec3f(0.f, 0.f, 4.2f), 0.2f)};
 
 // slot_fin_mesh with its blocks run on to y 30, and a 2x2x0.5 lip at
@@ -578,9 +590,7 @@ TEST_CASE("A head whose 0.6 junction is blocked retries thin and reaches the pad
     // down the slot to the ground.
     indexed_triangle_set mesh = slot_fin_mesh();
     const auto build = [&mesh](bool retry) {
-        sla::SupportTreeBuilder builder;
-        sla::SupportableMesh    sm{mesh, SLOT_FIN_POINTS, slot_fin_config(retry)};
-        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(builder, sm));
+        sla::SupportTreeBuilder builder = build_tree(mesh, SLOT_FIN_POINTS, slot_fin_config(retry));
         REQUIRE(builder.heads().size() == 1);
         return builder;
     };
@@ -608,10 +618,7 @@ TEST_CASE("A pillar the pillar search passes over for its radius keeps no bridge
         cfg.route_in_order      = true;
         cfg.head_back_radius_mm = 0.4;
         cfg.branch_off_retry    = branch;
-        sla::SupportTreeBuilder builder;
-        sla::SupportableMesh    sm{mesh, PARKED_LIP_POINTS, cfg};
-        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(builder, sm));
-        return builder;
+        return build_tree(mesh, PARKED_LIP_POINTS, cfg);
     };
 
     const sla::SupportTreeBuilder plain = build(false);
@@ -652,10 +659,7 @@ TEST_CASE("A head whose thin retry cannot drop straight down branches into a pil
         sla::SupportTreeConfig cfg = slot_fin_config(true);
         cfg.route_in_order   = true;
         cfg.branch_off_retry = branch;
-        sla::SupportTreeBuilder builder;
-        sla::SupportableMesh    sm{mesh, points, cfg};
-        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(builder, sm));
-        return builder;
+        return build_tree(mesh, points, cfg);
     };
 
     const sla::SupportTreeBuilder plain = build(false);
@@ -704,10 +708,7 @@ TEST_CASE("A thin retry's branch bridge keeps the full safety distance from the 
         sla::SupportTreeConfig cfg = slot_fin_config(true);
         cfg.route_in_order   = true;
         cfg.branch_off_retry = branch;
-        sla::SupportTreeBuilder builder;
-        sla::SupportableMesh    sm{mesh, points, cfg};
-        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(builder, sm));
-        return builder;
+        return build_tree(mesh, points, cfg);
     };
 
     const sla::SupportTreeBuilder plain = build(false);
@@ -745,11 +746,7 @@ TEST_CASE("A narrowed head's branch bridge keeps the full safety distance from t
         cfg.retry_thin_head         = true;
         cfg.island_axis_retry       = true;
         cfg.branch_off_retry        = branch;
-        sla::SupportTreeBuilder builder;
-        sla::SupportableMesh    sm{mesh, GATED_TUBE_POINTS, cfg};
-        sm.head_axes = {Vec3f::Zero(), leaning_axis(45.)};
-        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(builder, sm));
-        return builder;
+        return build_tree(mesh, GATED_TUBE_POINTS, cfg, {Vec3f::Zero(), leaning_axis(45.)});
     };
 
     const sla::SupportTreeBuilder plain = build(false);
@@ -784,10 +781,7 @@ TEST_CASE("Heads the ordered loop leaves unrouted take a pillar's last bridge sl
         cfg.route_in_order        = true;
         cfg.max_bridges_on_pillar = 1;
         cfg.branch_off_retry      = branch;
-        sla::SupportTreeBuilder builder;
-        sla::SupportableMesh    sm{mesh, points, cfg};
-        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(builder, sm));
-        return builder;
+        return build_tree(mesh, points, cfg);
     };
 
     const sla::SupportTreeBuilder plain = build(false);
@@ -855,9 +849,7 @@ TEST_CASE("An island head with no straight route routes along a retry axis", "[S
     cfg.allow_model_anchors = false;
     cfg.island_axis_retry   = true;
     const auto build = [&](bool island) {
-        sla::SupportTreeBuilder builder;
-        sla::SupportableMesh    sm{mesh, {sla::SupportPoint(Vec3f(0.f, 0.f, 7.4f), 0.2f, island)}, cfg};
-        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(builder, sm));
+        sla::SupportTreeBuilder builder = build_tree(mesh, {sla::SupportPoint(Vec3f(0.f, 0.f, 7.4f), 0.2f, island)}, cfg);
         REQUIRE(builder.heads().size() == 1);
         return builder;
     };
@@ -894,10 +886,7 @@ TEST_CASE("An island head's axis retry branches into a pillar before walking to 
         cfg.route_in_order          = true;
         cfg.island_axis_retry       = true;
         cfg.branch_off_retry        = branch;
-        sla::SupportTreeBuilder builder;
-        sla::SupportableMesh    sm{mesh, points, cfg};
-        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(builder, sm));
-        return builder;
+        return build_tree(mesh, points, cfg);
     };
 
     const sla::SupportTreeBuilder plain = build(false);
@@ -1078,9 +1067,7 @@ TEST_CASE("Braces take the pillar link radius, capped at the pillar's, and brace
     auto build = [&mesh](double link_radius) {
         sla::SupportTreeConfig cfg = two_plates_config(15.);
         cfg.pillar_link_radius_mm  = link_radius;
-        sla::SupportTreeBuilder builder;
-        sla::SupportableMesh    sm{mesh, TRIANGLE_POINTS, cfg};
-        REQUIRE_FALSE(sla::SupportTreeBuildsteps::execute(builder, sm));
+        sla::SupportTreeBuilder builder = build_tree(mesh, TRIANGLE_POINTS, cfg);
         REQUIRE(builder.pillars().size() == 3);
         CHECK(builder.unbraced_pillars == 0);
         REQUIRE_FALSE(builder.crossbridges().empty());
